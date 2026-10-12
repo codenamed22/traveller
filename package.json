@@ -22,6 +22,7 @@
     "@neon/config": "^1.8.6",
     "@neon/env": "^1.5.3",
     "@neondatabase/serverless": "1.1.0",
+    "@openrouter/ai-sdk-provider": "^3.1.0",
     "@vis.gl/react-google-maps": "1.10.1",
     "ai": "7.0.118",
     "drizzle-orm": "0.45.3",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, mapsQuery, youtubeUrl } from "./import";
+import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, mapsQuery, mergeDuplicateDetails, youtubeUrl } from "./import";
 import { newStop, newTrip, stopSchema } from "./trip";
 
 describe("itinerary import", () => {
@@ -44,6 +44,16 @@ describe("itinerary import", () => {
     expect([...duplicateCandidateIndexes(candidates, stops)]).toEqual([0, 2]);
     expect(stops).toHaveLength(1);
     expect(candidates).toHaveLength(4);
+  });
+  it("copies non-default details from skipped duplicates onto the existing stop", () => {
+    const trip = { ...newTrip(), startDate: "2026-10-12", days: 3 };
+    const stop = newStop("Louvre Museum");
+    const place = { name: "louvre museum", date: "2026-10-13", time: "10:00", duration: 90, source: "", warning: "" };
+    const result = mergeDuplicateDetails([{ place, included: false }], [stop], trip);
+    expect(result.stops[0]).toMatchObject({ day: 1, fixedTime: "10:00", duration: 90 });
+    expect(result.merged).toBe(1);
+    const kept = mergeDuplicateDetails([{ place, included: false }], [{ ...stop, duration: 30 }], trip);
+    expect(kept.stops[0].duration).toBe(30);
   });
   it("retains safe source links and makes only non-booked ideas optional", () => {
     const trip = { ...newTrip(), startDate: "2026-10-12" };

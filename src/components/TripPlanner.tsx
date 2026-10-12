@@ -10,8 +10,9 @@ import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
 import { NewTripDialog } from "./NewTripDialog";
 import { PlanningDialog } from "./PlanningDialog";
+import { mergeDuplicateStops } from "@/lib/duplicates";
 import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, type Journey, type StoredTrip } from "@/lib/journey";
-import { changeStartDate, formatMinute, newStop, newTrip, persistedPlan, tripDate, tripSchema, type Place, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
+import { changeStartDate, formatMinute, maxStopsPerCity, newStop, newTrip, persistedPlan, tripDate, tripSchema, type Place, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
 
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; timing?: boolean; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; updatedAt: string };
@@ -82,6 +83,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }, [snapshot, savedFor, busy, canUseServices, revision, journey]);
   const currentDay = result?.schedule.days.find((entry) => entry.day === day);
   const plannedCount = result?.schedule.days.reduce((sum, entry) => sum + entry.visits.length, 0) ?? 0;
+  const duplicateCount = mergeDuplicateStops(trip.stops).removed.length;
+  function mergeDuplicates() {
+    const merged = mergeDuplicateStops(trip.stops);
+    edit({ stops: merged.stops });
+    setNotice(`Merged ${merged.removed.length} duplicate${merged.removed.length === 1 ? "" : "s"}: ${merged.removed.join(", ")}.`);
+  }
 
   function setTrip(update: Trip | ((current: Trip) => Trip)) {
     setJourney((current) => {
@@ -120,7 +127,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
 
   function addPlace() {
     if (!adding.trim()) return;
-    if (trip.stops.length >= 25) { setError("A city can contain at most 25 stops."); return; }
+    if (trip.stops.length >= maxStopsPerCity) { setError(`A city can contain at most ${maxStopsPerCity} stops.`); return; }
     const stop = newStop(adding.trim());
     edit({ stops: [...trip.stops, stop] });
     setAdding(""); setSelected(stop.id);
@@ -241,7 +248,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
           <div className="section-tabs"><button className={tab === "places" ? "active" : ""} onClick={() => setTab("places")}>Places <span>{trip.stops.length}</span></button><button className={tab === "itinerary" ? "active" : ""} onClick={() => setTab("itinerary")}>Itinerary {result && <span>{plannedCount}</span>}</button><button className="text-button import-trigger" onClick={() => setImportOpen(true)}><FileInput size={15} />Import</button></div>
 
           {tab === "places" ? <div className="places-editor">
-            <form className="add-place" onSubmit={(event) => { event.preventDefault(); addPlace(); }}><MapPin size={17} /><input aria-label="New place name" placeholder="Add a place to visit" value={adding} maxLength={200} onChange={(event) => setAdding(event.target.value)} /><button type="submit" className="icon-button" aria-label="Add place" title="Add place" disabled={!adding.trim() || trip.stops.length >= 25}><Plus size={20} /></button></form>
+            <form className="add-place" onSubmit={(event) => { event.preventDefault(); addPlace(); }}><MapPin size={17} /><input aria-label="New place name" placeholder="Add a place to visit" value={adding} maxLength={200} onChange={(event) => setAdding(event.target.value)} /><button type="submit" className="icon-button" aria-label="Add place" title="Add place" disabled={!adding.trim() || trip.stops.length >= maxStopsPerCity}><Plus size={20} /></button></form>
+            {duplicateCount > 0 && <button className="button secondary small" onClick={mergeDuplicates}>Merge {duplicateCount} duplicate{duplicateCount === 1 ? "" : "s"}</button>}
             {!trip.stops.length && <div className="empty-stops"><span className="empty-icon"><MapPin size={24} strokeWidth={1.4} /></span><h2>Your places, all together</h2><p>No places added yet.</p><button className="button secondary" onClick={() => setImportOpen(true)}><FileInput size={16} />Import itinerary</button></div>}
             <div className="stop-list">{trip.stops.map((stop, index) => <article key={stop.id} className={`stop-item ${selected === stop.id ? "selected" : ""}`}>
               <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span>{stop.fixedTime ? <LockKeyhole size={15} className="booking-icon" /> : stop.placeId ? <Check size={15} className="confirmed-icon" /> : <span className="unconfirmed-dot" title="Place not yet confirmed" />}<ChevronDown size={14} /></button>
@@ -289,7 +297,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       }
       setPlanningOpen(false); setError(""); setNotice(response ? "Plan accepted. Review venue hours and ticket conditions before departure." : "Planning preferences applied. Generate a preview to check the routes.");
     }} />}
-    {importOpen && <ImportReview trip={trip} canExtract={Boolean(canUseServices && config.ai)} onClose={() => setImportOpen(false)} onImport={(stops) => { edit({ stops: [...trip.stops, ...stops] }); setTab("places"); setNotice(`${stops.length} places added. Confirm each place on the map before planning.`); }} />}
+    {importOpen && <ImportReview trip={trip} canExtract={Boolean(canUseServices && config.ai)} onClose={() => setImportOpen(false)} onImport={(stops, existing) => { edit({ stops: [...existing, ...stops] }); setTab("places"); setNotice(`${stops.length} places added. Confirm each place on the map before planning.`); }} />}
     {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. Try the hotel address or a more specific name.</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small></span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
     {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Neon database", ready: config.database }, { label: "Google Maps display", ready: config.maps }, { label: "Places and routes", ready: config.routes }, { label: "Gemini extraction", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Configured" : "Not configured"}</span></div>)}</div><p className="notice">Server credentials belong in environment variables. Never include them in a trip or uploaded document.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Personal account allowlist · capped API usage</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}
     {savedTrips && <Dialog title="My trips" onClose={() => setSavedTrips(null)}><div className="saved-trips">{savedTrips.length ? savedTrips.map((entry) => <div key={entry.data.id}><button className="saved-trip" disabled={Boolean(busy)} onClick={() => loadSaved(entry)}><span className="saved-trip-icon"><MapPin size={22} /></span><span><strong>{entry.data.title}</strong><small>{asJourney(entry.data).cities.map((city) => city.city).join(" / ")} · {asJourney(entry.data).cities[0].startDate}</small></span><ArrowUpRight size={17} /></button><button className="icon-button danger" title={`Delete ${entry.data.title}`} aria-label={`Delete ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => { if (window.confirm(`Delete ${entry.data.title}?`)) void perform("Deleting trip", async () => { await requestJson(`/api/trips/${entry.data.id}`, undefined, "DELETE"); setSavedTrips((current) => current!.filter((item) => item.data.id !== entry.data.id)); if (journey.id === entry.data.id) { setRevision(0); setSavedFor(""); } }); }}><Trash2 size={17} /></button></div>) : <p className="notice">No saved trips yet.</p>}</div><div className="dialog-actions"><button className="button primary" disabled={Boolean(busy)} onClick={() => { setSavedTrips(null); setSetup("new"); }}><Plus size={16} />New trip</button></div></Dialog>}

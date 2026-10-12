@@ -5,10 +5,31 @@ import { validateSchedule } from "./schedule-validation";
 let engine: ReturnType<typeof loadHighs> | undefined;
 
 export class PlanningError extends Error {
-  constructor(message: string, public readonly reason: "conflict" | "incomplete" = "incomplete") {
+  constructor(message: string, public readonly reason: "conflict" | "incomplete" = "incomplete", public readonly detailed = false) {
     super(message);
     this.name = "PlanningError";
   }
+}
+
+// Lower bound: uses the fastest known leg, or none when the route is unknown.
+export function bookingConflicts(trip: Trip, travel: TravelEdge[]) {
+  const issues: string[] = [];
+  for (let day = 0; day < trip.days; day++) {
+    const start = minuteAt(trip, day, trip.dailyStart);
+    const end = minuteAt(trip, day, trip.dailyEnd);
+    const booked = trip.stops.filter((stop) => stop.day === day && stop.fixedTime).map((stop) => ({ stop, at: minuteAt(trip, day, stop.fixedTime!) })).sort((left, right) => left.at - right.at);
+    for (const { stop, at } of booked) {
+      if (at < start) issues.push(`Day ${day + 1}: ${stop.name} is booked at ${stop.fixedTime}, before the day starts.`);
+      else if (at + stop.duration > end) issues.push(`Day ${day + 1}: ${stop.name} (${stop.fixedTime}, ${stop.duration} min) ends after the day ends.`);
+    }
+    booked.slice(1).forEach(({ stop, at }, index) => {
+      const previous = booked[index];
+      const legs = travel.filter((edge) => edge.day === day && edge.from === previous.stop.id && edge.to === stop.id).map((edge) => edge.minutes);
+      const needed = previous.stop.duration + stop.buffer + (legs.length ? Math.min(...legs) : 0);
+      if (at - previous.at < needed) issues.push(`Day ${day + 1}: ${previous.stop.name} (${previous.stop.fixedTime}) and ${stop.name} (${stop.fixedTime}) are too close; ${needed} min needed, ${Math.round(at - previous.at)} available.`);
+    });
+  }
+  return issues;
 }
 
 export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5): Promise<Schedule> {
@@ -90,6 +111,8 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5):
     model.run();
     if (model.info.get("primal_solution_status") !== 2) {
       const conflict = model.getModelStatus() === highs.constants.modelStatus.infeasible;
+      const issues = conflict ? bookingConflicts(trip, travel) : [];
+      if (issues.length) throw new PlanningError(`No schedule fits these bookings. ${issues.slice(0, 5).join(" ")}${issues.length > 5 ? ` (${issues.length - 5} more)` : ""} Change or clear those booked times.`, "conflict", true);
       throw new PlanningError(conflict ? "No schedule fits these bookings and available routes. Adjust the daily hours, visit durations, or required stops." : "The planning time limit was reached without a feasible schedule. Try fewer stops or assign some sights to a day.", conflict ? "conflict" : "incomplete");
     }
     const values = model.getSolution().colValue;

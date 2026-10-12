@@ -4,6 +4,9 @@ import { allowsTravelEdge, instantAt, instantForMinute, minuteAt, planningPrefer
 import { HttpError } from "./server";
 import { solveTrip, PlanningError } from "./planner";
 import { validateSchedule } from "./schedule-validation";
+import { assignDays } from "./days";
+
+const jointPlanningLimit = 25;
 
 const placeResponse = z.object({ id: z.string(), displayName: z.object({ text: z.string() }), formattedAddress: z.string().optional(), location: z.object({ latitude: z.number(), longitude: z.number() }), timeZone: z.object({ id: z.string() }).optional() });
 const routeResponse = z.object({ routes: z.array(z.object({
@@ -19,8 +22,9 @@ export class RequestBudget {
   matrix = 0;
   routes = 0;
   readonly deadline = Date.now() + 110_000;
+  constructor(private readonly routeLimit = 100) {}
   consume(kind: "matrix" | "routes", amount: number) {
-    if (Date.now() > this.deadline || this[kind] + amount > (kind === "matrix" ? 1000 : 100)) throw new HttpError(422, "This plan reached its request budget. Use fewer sights or assign them to specific days.");
+    if (Date.now() > this.deadline || this[kind] + amount > (kind === "matrix" ? 1000 : this.routeLimit)) throw new HttpError(422, "This plan reached its request budget. Use fewer sights or assign them to specific days.");
     this[kind] += amount;
   }
 }
@@ -105,19 +109,32 @@ async function mapConcurrent<Value, Result>(values: Value[], action: (value: Val
   return results;
 }
 
-export async function planWithGoogle(trip: Trip) {
-  if (!trip.hotelPlaceId || trip.stops.some((stop) => !stop.placeId)) throw new HttpError(400, "Confirm the hotel and every place on the map before planning.");
-  if (!trip.stops.length) throw new HttpError(400, "Add at least one place to visit.");
-  const ids = ["hotel", ...trip.stops.map((stop) => stop.id)];
+export async function planWithGoogle(input: Trip) {
+  if (!input.hotelPlaceId || input.stops.some((stop) => !stop.placeId)) throw new HttpError(400, "Confirm the hotel and every place on the map before planning.");
+  if (!input.stops.length) throw new HttpError(400, "Add at least one place to visit.");
+  const ids = ["hotel", ...input.stops.map((stop) => stop.id)];
   const places: Record<string, Place> = {};
-  const details = await mapConcurrent([trip.hotelPlaceId, ...trip.stops.map((stop) => stop.placeId!)], placeDetails);
+  const details = await mapConcurrent([input.hotelPlaceId, ...input.stops.map((stop) => stop.placeId!)], placeDetails);
   ids.forEach((id, index) => { places[id] = details[index]; });
-  if (places.hotel.timeZone && places.hotel.timeZone !== trip.timeZone) throw new HttpError(400, `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before planning.`);
-  const budget = new RequestBudget();
-  const walking = (await mapConcurrent(ids, (from) => matrixRow(trip, 0, from, ids.filter((to) => to !== from), "WALK", places, budget))).flat();
-  let edges: TravelEdge[] = Array.from({ length: trip.days }, (_, day) => walking.map((edge) => ({ ...edge, day }))).flat();
+  if (places.hotel.timeZone && places.hotel.timeZone !== input.timeZone) throw new HttpError(400, `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before planning.`);
+  const grouped = input.stops.length > jointPlanningLimit;
+  const trip = grouped ? assignDays(input, Object.fromEntries(Object.entries(places).map(([id, place]) => [id, place.location]))) : input;
+  const budget = new RequestBudget(Math.max(100, 3 * (trip.stops.length + trip.days)));
   const warnings = ["Opening hours have not been verified. Check venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."];
+  if (grouped) warnings.push("Places were grouped into days by location. Assign a day to a place to override this.");
   const dayIds = Array.from({ length: trip.days }, (_, day) => ids.filter((id) => id === "hotel" || ((trip.stops.find((stop) => stop.id === id)?.day ?? day) === day)));
+  let walking: TravelEdge[];
+  let edges: TravelEdge[];
+  if (trip.stops.every((stop) => stop.day !== null)) {
+    walking = [];
+    for (let day = 0; day < trip.days; day++) {
+      walking.push(...(await mapConcurrent(dayIds[day], (from) => matrixRow(trip, day, from, dayIds[day].filter((to) => to !== from), "WALK", places, budget))).flat());
+    }
+    edges = [...walking];
+  } else {
+    walking = (await mapConcurrent(ids, (from) => matrixRow(trip, 0, from, ids.filter((to) => to !== from), "WALK", places, budget))).flat();
+    edges = Array.from({ length: trip.days }, (_, day) => walking.map((edge) => ({ ...edge, day }))).flat();
+  }
   const transitTargets = Math.max(0, Math.floor((1000 - budget.matrix) / dayIds.reduce((total, nodes) => total + nodes.length, 0)));
   for (let day = 0; day < trip.days; day++) {
     const transitStops = trip.stops.filter((stop) => (stop.day === null || stop.day === day) && travelModes(trip, stop).includes("TRANSIT"));
@@ -143,10 +160,10 @@ export async function planWithGoogle(trip: Trip) {
   for (let attempt = 0; attempt < 3; attempt++) {
     let schedule: Schedule;
     try { schedule = await solveTrip(trip, edges); } catch (error) {
-      if (error instanceof PlanningError) throw new HttpError(422, `${error.message} Transit candidates are budget-limited; this is not proof that no alternative exists.`);
+      if (error instanceof PlanningError) throw new HttpError(422, error.detailed ? error.message : `${error.message} Transit candidates are budget-limited; this is not proof that no alternative exists.`);
       throw error;
     }
-    for (const day of schedule.days) {
+    await Promise.all(schedule.days.map(async (day) => {
       let departure = minuteAt(trip, day.day, trip.dailyStart);
       let from = "hotel";
       for (const visit of day.visits) {
@@ -170,7 +187,7 @@ export async function planWithGoogle(trip: Trip) {
         const best = options.sort((left, right) => left.minutes - right.minutes)[0];
         day.returnLeg = best ? { ...best, alternatives: options.filter((option) => option !== best) } : undefined;
       }
-    }
+    }));
     if (!validateSchedule(trip, schedule).length) {
       schedule.warnings = [...new Set(warnings)];
       return { schedule, places, verified: true };

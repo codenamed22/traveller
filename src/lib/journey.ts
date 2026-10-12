@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { newTrip, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
+import { maxStopsPerCity, newTrip, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
 
 export const popularCities = [
   { name: "Paris", country: "France", timeZone: "Europe/Paris", days: 3 },
@@ -23,8 +23,8 @@ export function cityPreset(value: string) {
 }
 
 export const savedPlanSchema = z.object({
-  days: z.array(z.object({ day: z.number().int().min(0).max(6), stopIds: z.array(z.uuid()).max(25) }).strict()).max(7),
-  omitted: z.array(z.uuid()).max(25),
+  days: z.array(z.object({ day: z.number().int().min(0).max(6), stopIds: z.array(z.uuid()).max(maxStopsPerCity) }).strict()).max(7),
+  omitted: z.array(z.uuid()).max(maxStopsPerCity),
 }).strict();
 
 const cityTripSchema = tripSchema.safeExtend({ hotel: z.string().trim().max(200) });

@@ -1,6 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 
+export const maxStopsPerCity = 60;
 export const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a time such as 09:30.");
 export const modeSchema = z.enum(["AUTO", "WALK", "TRANSIT"]);
 export const planningPreferencesSchema = z.object({
@@ -57,7 +58,7 @@ export const tripSchema = z.object({
   dailyEnd: timeSchema,
   returnToHotel: z.boolean(),
   planning: planningPreferencesSchema.optional(),
-  stops: z.array(stopSchema).max(25),
+  stops: z.array(stopSchema).max(maxStopsPerCity),
 }).strict().superRefine((trip, context) => {
   if (trip.dailyEnd <= trip.dailyStart) {
     context.addIssue({ code: "custom", message: "End the sightseeing day after it starts.", path: ["dailyEnd"] });

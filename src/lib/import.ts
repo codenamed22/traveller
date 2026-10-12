@@ -27,15 +27,49 @@ export function youtubeUrl(value: string): string | null {
 }
 
 export function duplicateCandidateIndexes(candidates: ImportCandidate[], stops: Stop[]): Set<number> {
-  const normalize = (name: string) => name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
-  const seen = new Set(stops.map((stop) => normalize(stop.name)));
+  const seen = new Set(stops.map((stop) => normalizeName(stop.name)));
   const duplicates = new Set<number>();
   candidates.forEach((candidate, index) => {
-    const name = normalize(candidate.name);
+    const name = normalizeName(candidate.name);
     if (seen.has(name)) duplicates.add(index);
     seen.add(name);
   });
   return duplicates;
+}
+
+function normalizeName(name: string) {
+  return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// Skipped duplicates fill in dates, times and durations that the matching stop or earlier candidate still has at defaults.
+export function mergeDuplicateDetails(entries: { place: ImportCandidate; included: boolean }[], stops: Stop[], trip: Trip) {
+  let merged = 0;
+  const nextStops = stops.map((stop) => ({ ...stop }));
+  const nextEntries = entries.map((entry) => ({ ...entry, place: { ...entry.place } }));
+  nextEntries.forEach((entry, index) => {
+    if (entry.included) return;
+    const source = entry.place;
+    const name = normalizeName(source.name);
+    const day = source.date ? Temporal.PlainDate.from(trip.startDate).until(Temporal.PlainDate.from(source.date)).days : null;
+    const validDay = day !== null && day >= 0 && day < trip.days ? day : null;
+    const stop = nextStops.find((candidate) => normalizeName(candidate.name) === name);
+    if (stop) {
+      const before = JSON.stringify(stop);
+      if (validDay !== null && stop.day === null) stop.day = validDay;
+      if (source.time && !stop.fixedTime && stop.day !== null && (validDay === null || stop.day === validDay)) { stop.fixedTime = source.time; stop.optional = false; }
+      if (source.duration && stop.duration === newStop().duration) stop.duration = source.duration;
+      if (JSON.stringify(stop) !== before) merged++;
+      return;
+    }
+    const target = nextEntries.find((other, otherIndex) => otherIndex < index && other.included && normalizeName(other.place.name) === name)?.place;
+    if (!target) return;
+    const before = JSON.stringify(target);
+    if (source.date && !target.date) target.date = source.date;
+    if (source.time && !target.time && target.date && target.date === source.date) target.time = source.time;
+    if (source.duration && !target.duration) target.duration = source.duration;
+    if (JSON.stringify(target) !== before) merged++;
+  });
+  return { entries: nextEntries, stops: nextStops, merged };
 }
 
 export function manualCandidates(text: string): ImportCandidate[] {

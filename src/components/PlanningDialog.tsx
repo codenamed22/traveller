@@ -25,7 +25,8 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   const [researchIds, setResearchIds] = useState<string[]>([]);
   const [timing, setTiming] = useState<TimingResult | null>(null);
   const preferences = planningPreferences(draft);
-  const confirmed = Boolean(draft.hotelPlaceId && draft.stops.length && draft.stops.every((stop) => stop.placeId));
+  const unconfirmed = draft.stops.filter((stop) => !stop.placeId).map((stop) => stop.name);
+  const confirmed = Boolean(draft.hotelPlaceId && draft.stops.length && !unconfirmed.length);
 
   function report(cause: unknown) { setError(cause instanceof ZodError ? cause.issues[0].message : cause instanceof Error ? cause.message : "Unable to complete this request."); }
   function edit(patch: Partial<Trip>) { setDraft((current) => ({ ...current, ...patch })); setPreview(null); setError(""); }
@@ -100,7 +101,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
           {timing && <><p className="quiet">{timing.recommendations.length} timing suggestions. Opening hours and ticket conditions still need checking.</p><details className="research-evidence"><summary>Google Search evidence</summary><p>{timing.research}</p><ul>{timing.sources.map((source, index) => <li key={index}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></details>{timing.searchEntryPoint && <iframe title="Google Search suggestions" className="search-attribution" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={timing.searchEntryPoint} />}</>}
         </div>
       </fieldset>
-      {!confirmed && <p className="notice warning">Confirm the hotel and every place on the map before optimizing.</p>}
+      {!confirmed && <p className="notice warning">Confirm the hotel and every place on the map before optimizing.{unconfirmed.length > 0 && ` Not confirmed yet: ${unconfirmed.join(", ")}.`}</p>}
       {!canPlan && <p className="notice">Google route planning requires sign-in, Neon quota tracking, and the Maps server key.</p>}
       <div className="dialog-actions planning-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => apply()}><Check size={15} />Apply preferences</button><button className="button primary" disabled={Boolean(busy) || !confirmed} onClick={() => void optimize()}><Route size={16} />Optimize preview</button></div>
     </> : preview && <>

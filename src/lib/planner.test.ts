@@ -29,6 +29,18 @@ describe("schedule optimizer", () => {
     schedule.days[0].returnLeg!.mode = "WALK";
     expect(validateSchedule(trip, schedule)).toContain("Day 1: hotel return violates transport preferences.");
   });
+  it("names the bookings that cannot fit", async () => {
+    const trip = fixture();
+    trip.stops = [
+      { ...newStop("First"), day: 0, fixedTime: "10:00", duration: 45 },
+      { ...newStop("Second"), day: 0, fixedTime: "10:30", duration: 45 },
+      { ...newStop("Late"), day: 0, fixedTime: "17:30", duration: 60 },
+    ];
+    trip.dailyEnd = "18:00";
+    const error = await solveTrip(trip, routes(trip)).catch((cause: Error) => cause.message);
+    expect(error).toContain("First (10:00) and Second (10:30) are too close");
+    expect(error).toContain("Late (17:30, 60 min) ends after the day ends");
+  });
   it("rejects walking beyond the configured leg limit", async () => {
     const trip = fixture();
     trip.planning = { ...planningPreferences(trip), mode: "WALK", maxWalkMinutes: 5 };

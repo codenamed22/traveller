@@ -4,11 +4,11 @@ import { useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, FileText, ImagePlus, Link, LoaderCircle, Sparkles, Trash2, Upload, Video } from "lucide-react";
 import { Dialog } from "./Dialog";
-import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, youtubeUrl, type ImportCandidate } from "@/lib/import";
+import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, mergeDuplicateDetails, youtubeUrl, type ImportCandidate } from "@/lib/import";
 import { readDocument, type ImportImage } from "@/lib/documents";
-import type { Stop, Trip } from "@/lib/trip";
+import { maxStopsPerCity, type Stop, type Trip } from "@/lib/trip";
 
-export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Trip; canExtract: boolean; onImport: (stops: Stop[]) => void; onClose: () => void }) {
+export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Trip; canExtract: boolean; onImport: (stops: Stop[], existing: Stop[]) => void; onClose: () => void }) {
   const [tab, setTab] = useState<"text" | "file" | "link" | "youtube">("text");
   const [text, setText] = useState("");
   const [url, setUrl] = useState("");
@@ -23,7 +23,8 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
   const selectedPlaces = candidates?.filter((candidate) => candidate.included).map((candidate) => candidate.place) ?? [];
   const duplicates = duplicateCandidateIndexes(candidates?.map((candidate) => candidate.place) ?? [], trip.stops);
   const selectedDuplicates = candidates?.filter((candidate, index) => candidate.included && duplicates.has(index)).length ?? 0;
-  const remaining = 25 - trip.stops.length;
+  const remaining = maxStopsPerCity - trip.stops.length;
+  const merged = candidates ? mergeDuplicateDetails(candidates, trip.stops, trip).merged : 0;
 
   function beginReview(places: ImportCandidate[]) {
     const duplicates = duplicateCandidateIndexes(places, trip.stops);
@@ -71,9 +72,10 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
   function accept() {
     try {
       if (selectedDuplicates && !duplicatesAccepted) throw new Error("Confirm the selected duplicates or skip them before importing.");
-      const parsed = importResultSchema.parse({ places: selectedPlaces });
-      if (parsed.places.length + trip.stops.length > 25) throw new Error("A city can contain at most 25 places.");
-      onImport(candidatesToStops(parsed.places, trip, { ideas }));
+      const { entries, stops: existing } = mergeDuplicateDetails(candidates ?? [], trip.stops, trip);
+      const parsed = importResultSchema.parse({ places: entries.filter((entry) => entry.included).map((entry) => entry.place) });
+      if (parsed.places.length + trip.stops.length > maxStopsPerCity) throw new Error(`A city can contain at most ${maxStopsPerCity} places.`);
+      onImport(candidatesToStops(parsed.places, trip, { ideas }), existing);
       onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Check the imported dates and times."); }
   }
@@ -106,7 +108,8 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
         <p role="status">{duplicates.size} possible {duplicates.size === 1 ? "duplicate" : "duplicates"} found in this city or import. {selectedDuplicates ? `${selectedDuplicates} selected for another visit.` : "All excluded from this import."}</p>
         {!!selectedDuplicates && <><button className="button secondary" onClick={() => { setDuplicatesAccepted(false); setCandidates((current) => current!.map((entry, index) => duplicates.has(index) ? { ...entry, included: false } : entry)); }}>Skip duplicates</button><label className="checkbox consent"><input type="checkbox" checked={duplicatesAccepted} onChange={(event) => setDuplicatesAccepted(event.target.checked)} />Include selected duplicates as separate visits</label></>}
       </div>}
-      {selectedPlaces.length > remaining && <p className="notice warning">Select at most {remaining} places to stay within the 25-place city limit.</p>}
+      {selectedPlaces.length > remaining && <p className="notice warning">Select at most {remaining} places to stay within the {maxStopsPerCity}-place city limit.</p>}
+      {merged > 0 && <p className="notice" role="status">Times and durations from {merged} skipped {merged === 1 ? "duplicate" : "duplicates"} will update the existing places.</p>}
       <div className="review-list">{candidates.map(({ place: candidate, included }, index) => <section className="review-item" key={index}>
         <label className="checkbox"><input type="checkbox" aria-label={`Include ${candidate.name}`} checked={included} onChange={(event) => { setDuplicatesAccepted(false); setCandidates((current) => current!.map((entry, candidateIndex) => candidateIndex === index ? { ...entry, included: event.target.checked } : entry)); }} />Include place{duplicates.has(index) && <span className="warning-text">Possible duplicate</span>}</label>
         <div className="row"><label className="field grow">Place<input value={candidate.name} onChange={(event) => update(index, { name: event.target.value })} /></label><button className="icon-button" aria-label={`Remove ${candidate.name}`} onClick={() => { setDuplicatesAccepted(false); setCandidates((current) => current!.filter((_, candidateIndex) => candidateIndex !== index)); }}><Trash2 size={17} /></button></div>
@@ -115,7 +118,7 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
         {candidate.sourceUrl && <a className="source-link" href={candidate.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}
       </section>)}</div>
       {!candidates.length && <p className="notice">No places found in this selection.</p>}
-      <div className="dialog-actions"><button className="button secondary" onClick={() => { setCandidates(null); setError(""); }}>Back</button><button className="button primary" disabled={!selectedPlaces.length || selectedPlaces.length > remaining || (selectedDuplicates > 0 && !duplicatesAccepted)} onClick={accept}>Confirm {selectedPlaces.length} {selectedPlaces.length === 1 ? "place" : "places"}</button></div>
+      <div className="dialog-actions"><button className="button secondary" onClick={() => { setCandidates(null); setError(""); }}>Back</button><button className="button primary" disabled={(!selectedPlaces.length && !merged) || selectedPlaces.length > remaining || (selectedDuplicates > 0 && !duplicatesAccepted)} onClick={accept}>{selectedPlaces.length || !merged ? `Confirm ${selectedPlaces.length} ${selectedPlaces.length === 1 ? "place" : "places"}` : `Update ${merged} existing ${merged === 1 ? "place" : "places"}`}</button></div>
     </>}
   </Dialog>;
 }
