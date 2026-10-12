@@ -18,14 +18,17 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
   const [error, setError] = useState("");
   const [candidates, setCandidates] = useState<{ place: ImportCandidate; included: boolean }[] | null>(null);
   const [ideas, setIdeas] = useState(false);
+  const [duplicatesAccepted, setDuplicatesAccepted] = useState(false);
   const remoteSource = tab === "link" || tab === "youtube";
   const selectedPlaces = candidates?.filter((candidate) => candidate.included).map((candidate) => candidate.place) ?? [];
   const duplicates = duplicateCandidateIndexes(candidates?.map((candidate) => candidate.place) ?? [], trip.stops);
+  const selectedDuplicates = candidates?.filter((candidate, index) => candidate.included && duplicates.has(index)).length ?? 0;
   const remaining = 25 - trip.stops.length;
 
   function beginReview(places: ImportCandidate[]) {
     const duplicates = duplicateCandidateIndexes(places, trip.stops);
     setError("");
+    setDuplicatesAccepted(false);
     setCandidates(places.map((place, index) => ({ place, included: !duplicates.has(index) })));
   }
 
@@ -61,11 +64,13 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
   }
 
   function update(index: number, patch: Partial<ImportCandidate>) {
+    setDuplicatesAccepted(false);
     setCandidates((current) => current!.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, place: { ...candidate.place, ...patch } } : candidate));
   }
 
   function accept() {
     try {
+      if (selectedDuplicates && !duplicatesAccepted) throw new Error("Confirm the selected duplicates or skip them before importing.");
       const parsed = importResultSchema.parse({ places: selectedPlaces });
       if (parsed.places.length + trip.stops.length > 25) throw new Error("A city can contain at most 25 places.");
       onImport(candidatesToStops(parsed.places, trip, { ideas }));
@@ -96,17 +101,21 @@ export function ImportReview({ trip, canExtract, onImport, onClose }: { trip: Tr
         <button className="button primary" disabled={busy || !consent || !canExtract || !(remoteSource ? url.trim() : text.trim() || (tab === "file" && images.length))} onClick={() => void extract()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{tab === "youtube" ? "Find place ideas" : "Extract itinerary"}</button>
       </div>
     </> : <>
-      <div className="review-summary"><span>{selectedPlaces.length} selected · {remaining} slots available</span><label className="checkbox"><input type="checkbox" checked={candidates.length > 0 && selectedPlaces.length === candidates.length} onChange={(event) => setCandidates((current) => current!.map((entry) => ({ ...entry, included: event.target.checked })))} />Select all places</label><label className="checkbox"><input type="checkbox" checked={ideas} onChange={(event) => setIdeas(event.target.checked)} />Add as optional ideas</label></div>
+      <div className="review-summary"><span>{selectedPlaces.length} selected · {remaining} slots available</span><label className="checkbox"><input type="checkbox" checked={candidates.length > 0 && selectedPlaces.length === candidates.length} onChange={(event) => { setDuplicatesAccepted(false); setCandidates((current) => current!.map((entry) => ({ ...entry, included: event.target.checked }))); }} />Select all places</label><label className="checkbox"><input type="checkbox" checked={ideas} onChange={(event) => setIdeas(event.target.checked)} />Add as optional ideas</label></div>
+      {!!duplicates.size && <div className="notice warning">
+        <p role="status">{duplicates.size} possible {duplicates.size === 1 ? "duplicate" : "duplicates"} found in this city or import. {selectedDuplicates ? `${selectedDuplicates} selected for another visit.` : "All excluded from this import."}</p>
+        {!!selectedDuplicates && <><button className="button secondary" onClick={() => { setDuplicatesAccepted(false); setCandidates((current) => current!.map((entry, index) => duplicates.has(index) ? { ...entry, included: false } : entry)); }}>Skip duplicates</button><label className="checkbox consent"><input type="checkbox" checked={duplicatesAccepted} onChange={(event) => setDuplicatesAccepted(event.target.checked)} />Include selected duplicates as separate visits</label></>}
+      </div>}
       {selectedPlaces.length > remaining && <p className="notice warning">Select at most {remaining} places to stay within the 25-place city limit.</p>}
       <div className="review-list">{candidates.map(({ place: candidate, included }, index) => <section className="review-item" key={index}>
-        <label className="checkbox"><input type="checkbox" aria-label={`Include ${candidate.name}`} checked={included} onChange={(event) => setCandidates((current) => current!.map((entry, candidateIndex) => candidateIndex === index ? { ...entry, included: event.target.checked } : entry))} />Include place{duplicates.has(index) && <span className="warning-text">Possible duplicate</span>}</label>
-        <div className="row"><label className="field grow">Place<input value={candidate.name} onChange={(event) => update(index, { name: event.target.value })} /></label><button className="icon-button" aria-label={`Remove ${candidate.name}`} onClick={() => setCandidates((current) => current!.filter((_, candidateIndex) => candidateIndex !== index))}><Trash2 size={17} /></button></div>
+        <label className="checkbox"><input type="checkbox" aria-label={`Include ${candidate.name}`} checked={included} onChange={(event) => { setDuplicatesAccepted(false); setCandidates((current) => current!.map((entry, candidateIndex) => candidateIndex === index ? { ...entry, included: event.target.checked } : entry)); }} />Include place{duplicates.has(index) && <span className="warning-text">Possible duplicate</span>}</label>
+        <div className="row"><label className="field grow">Place<input value={candidate.name} onChange={(event) => update(index, { name: event.target.value })} /></label><button className="icon-button" aria-label={`Remove ${candidate.name}`} onClick={() => { setDuplicatesAccepted(false); setCandidates((current) => current!.filter((_, candidateIndex) => candidateIndex !== index)); }}><Trash2 size={17} /></button></div>
         <div className="form-grid three"><label className="field">Date<input type="date" value={candidate.date ?? ""} onChange={(event) => update(index, { date: event.target.value || null })} /></label><label className="field">Booked time<input type="time" value={candidate.time ?? ""} onChange={(event) => update(index, { time: event.target.value || null })} /></label><label className="field">Visit minutes<input type="number" min={5} max={480} value={candidate.duration ?? 45} onChange={(event) => update(index, { duration: Number(event.target.value) })} /></label></div>
         {candidate.source && <blockquote>{candidate.source}</blockquote>}{candidate.warning && <p className="warning-text">{candidate.warning}</p>}
         {candidate.sourceUrl && <a className="source-link" href={candidate.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}
       </section>)}</div>
       {!candidates.length && <p className="notice">No places found in this selection.</p>}
-      <div className="dialog-actions"><button className="button secondary" onClick={() => { setCandidates(null); setError(""); }}>Back</button><button className="button primary" disabled={!selectedPlaces.length || selectedPlaces.length > remaining} onClick={accept}>Confirm {selectedPlaces.length} {selectedPlaces.length === 1 ? "place" : "places"}</button></div>
+      <div className="dialog-actions"><button className="button secondary" onClick={() => { setCandidates(null); setError(""); }}>Back</button><button className="button primary" disabled={!selectedPlaces.length || selectedPlaces.length > remaining || (selectedDuplicates > 0 && !duplicatesAccepted)} onClick={accept}>Confirm {selectedPlaces.length} {selectedPlaces.length === 1 ? "place" : "places"}</button></div>
     </>}
   </Dialog>;
 }
