@@ -12,12 +12,14 @@ function MapContents({ trip, places, schedule, day, selected, onSelect }: Props)
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
   const stopIds = visits ? visits.visits.map((visit) => visit.stopId) : trip.stops.map((stop) => stop.id);
+  const locationKey = Object.entries(places).map(([id, place]) => `${id}:${place.location.lat},${place.location.lng}`).join("|");
   useEffect(() => {
-    if (!map || !Object.keys(places).length) return;
+    if (!map || !locationKey) return;
     const bounds = new google.maps.LatLngBounds();
     Object.values(places).forEach((place) => bounds.extend(place.location));
     map.fitBounds(bounds, 70);
-  }, [map, places]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, locationKey]);
   useEffect(() => { if (map && selected && places[selected]) map.panTo(places[selected].location); }, [map, selected, places]);
   useEffect(() => {
     if (!map || !visits) return;

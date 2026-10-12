@@ -13,6 +13,7 @@ export const stopSchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(1).max(200),
   placeId: z.string().max(300).nullable(),
+  location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional(),
   duration: z.number().int().min(5).max(480),
   day: z.number().int().min(0).max(6).nullable(),
   fixedTime: timeSchema.nullable(),
@@ -37,6 +38,7 @@ export const tripSchema = z.object({
   city: z.string().trim().min(1, "Enter a city.").max(150),
   hotel: z.string().trim().min(1, "Enter your hotel or starting point.").max(200),
   hotelPlaceId: z.string().max(300).nullable(),
+  hotelLocation: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional(),
   startDate: z.iso.date(),
   days: z.number().int().min(1).max(7),
   timeZone: z.string().min(1).max(100).refine((zone) => {

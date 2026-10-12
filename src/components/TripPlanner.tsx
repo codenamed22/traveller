@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
@@ -22,13 +22,20 @@ async function requestJson(url: string, body?: unknown, method = "POST") {
   return data;
 }
 
-export function TripPlanner({ initialTrip, config }: { initialTrip: Trip; config: AppConfig }) {
-  const [journey, setJourney] = useState(() => asJourney(initialTrip));
-  const [activeCity, setActiveCity] = useState(initialTrip.id);
+export function TripPlanner({ initialTrip, initialSaved, config }: { initialTrip: Trip; initialSaved: SavedTrip | null; config: AppConfig }) {
+  const [restored] = useState(() => { const parsed = initialSaved ? journeySchema.safeParse(asJourney(initialSaved.data, initialSaved.plan)) : null; return parsed?.success ? parsed.data : null; });
+  const [journey, setJourney] = useState(() => restored ?? asJourney(initialTrip));
+  const [activeCity, setActiveCity] = useState(() => (restored ?? asJourney(initialTrip)).cities[0].id);
   const trip = journey.cities.find((city) => city.id === activeCity) ?? journey.cities[0];
-  const [revision, setRevision] = useState(0);
-  const [savedFor, setSavedFor] = useState("");
-  const [places, setPlaces] = useState<Record<string, Place>>({});
+  const [revision, setRevision] = useState(restored && initialSaved ? initialSaved.revision : 0);
+  const [savedFor, setSavedFor] = useState(restored ? JSON.stringify(restored) : "");
+  const [placeState, setPlaces] = useState<Record<string, Place>>({});
+  const places = useMemo(() => {
+    const stored: Record<string, Place> = {};
+    if (trip.hotelPlaceId && trip.hotelLocation) stored.hotel = { id: trip.hotelPlaceId, name: trip.hotel, address: "", location: trip.hotelLocation };
+    for (const stop of trip.stops) if (stop.placeId && stop.location) stored[stop.id] = { id: stop.placeId, name: stop.name, address: "", location: stop.location };
+    return { ...stored, ...placeState };
+  }, [trip, placeState]);
   const [result, setResult] = useState<PlanResult | null>(null);
   const [plannedFor, setPlannedFor] = useState("");
   const savedPlan = journey.plans[trip.id] ?? null;
@@ -54,6 +61,23 @@ export function TripPlanner({ initialTrip, config }: { initialTrip: Trip; config
   const stale = Boolean(result && plannedFor !== JSON.stringify(trip));
   const canUseServices = Boolean(config.email && config.database);
   const canPlan = canUseServices && config.routes;
+  const saving = useRef(false);
+
+  useEffect(() => {
+    if (!canUseServices || snapshot === savedFor || busy) return;
+    const parsed = journeySchema.safeParse(journey);
+    if (!parsed.success) return;
+    const timer = setTimeout(async () => {
+      if (saving.current) return;
+      saving.current = true;
+      try {
+        const response = await requestJson(`/api/trips/${journey.id}`, { journey: parsed.data, revision }, "PUT");
+        setRevision(response.revision); setSavedFor(snapshot);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Autosave failed."); }
+      finally { saving.current = false; }
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [snapshot, savedFor, busy, canUseServices, revision, journey]);
   const currentDay = result?.schedule.days.find((entry) => entry.day === day);
   const plannedCount = result?.schedule.days.reduce((sum, entry) => sum + entry.visits.length, 0) ?? 0;
 
@@ -121,8 +145,8 @@ export function TripPlanner({ initialTrip, config }: { initialTrip: Trip; config
       const detailed: Place = id === "hotel" ? (await requestJson("/api/places", { placeId: place.id })).place : place;
       if (version !== editVersion.current) throw new Error("The trip changed while the place was loading. Confirm the location again.");
       setPlaces((current) => ({ ...current, [id]: detailed }));
-      if (id === "hotel") edit({ hotelPlaceId: detailed.id, ...(detailed.timeZone ? { timeZone: detailed.timeZone } : {}) });
-      else editStop(id, { placeId: detailed.id });
+      if (id === "hotel") edit({ hotelPlaceId: detailed.id, hotelLocation: detailed.location, ...(detailed.timeZone ? { timeZone: detailed.timeZone } : {}) });
+      else editStop(id, { placeId: detailed.id, location: detailed.location });
       setSearch(null);
     });
   }
@@ -196,9 +220,9 @@ export function TripPlanner({ initialTrip, config }: { initialTrip: Trip; config
               <datalist id="editor-city-presets">{popularCities.map((city) => <option key={city.name} value={`${city.name}, ${city.country}`} />)}</datalist>
               <label className="field">City<input value={trip.city} list="editor-city-presets" maxLength={150} placeholder="e.g. Paris, France" onChange={(event) => {
                 const preset = cityPreset(event.target.value);
-                edit({ city: event.target.value, hotelPlaceId: null, stops: trip.stops.map((stop) => ({ ...stop, placeId: null })), ...(preset ? { timeZone: preset.timeZone } : {}) }); setPlaces({});
+                edit({ city: event.target.value, hotelPlaceId: null, hotelLocation: undefined, stops: trip.stops.map((stop) => ({ ...stop, placeId: null, location: undefined })), ...(preset ? { timeZone: preset.timeZone } : {}) }); setPlaces({});
               }} /></label>
-              <label className="field">Hotel or starting point<div className="input-with-action"><Hotel size={15} /><input value={trip.hotel} maxLength={200} placeholder="Hotel name or address" onChange={(event) => { edit({ hotel: event.target.value, hotelPlaceId: null }); setPlaces((current) => { const next = { ...current }; delete next.hotel; return next; }); }} /><button title="Find hotel on map" aria-label="Find hotel on map" disabled={!trip.hotel.trim() || Boolean(busy)} onClick={() => openSearch("hotel", trip.hotel)}>{trip.hotelPlaceId ? <Check size={17} /> : <Search size={17} />}</button></div></label>
+              <label className="field">Hotel or starting point<div className="input-with-action"><Hotel size={15} /><input value={trip.hotel} maxLength={200} placeholder="Hotel name or address" onChange={(event) => { edit({ hotel: event.target.value, hotelPlaceId: null, hotelLocation: undefined }); setPlaces((current) => { const next = { ...current }; delete next.hotel; return next; }); }} /><button title="Find hotel on map" aria-label="Find hotel on map" disabled={!trip.hotel.trim() || Boolean(busy)} onClick={() => openSearch("hotel", trip.hotel)}>{trip.hotelPlaceId ? <Check size={17} /> : <Search size={17} />}</button></div></label>
               {places.hotel && <div className="confirmed-hotel"><Check size={14} /><span><strong>{places.hotel.name}</strong><small>{places.hotel.address}</small></span></div>}
               <div className="form-grid"><label className="field">Start date<input type="date" value={trip.startDate} onChange={(event) => {
                 if (!event.target.value) return;
@@ -222,7 +246,7 @@ export function TripPlanner({ initialTrip, config }: { initialTrip: Trip; config
             <div className="stop-list">{trip.stops.map((stop, index) => <article key={stop.id} className={`stop-item ${selected === stop.id ? "selected" : ""}`}>
               <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span>{stop.fixedTime ? <LockKeyhole size={15} className="booking-icon" /> : stop.placeId ? <Check size={15} className="confirmed-icon" /> : <span className="unconfirmed-dot" title="Place not yet confirmed" />}<ChevronDown size={14} /></button>
               {selected === stop.id && <div className="stop-details">
-                <label className="field">Place name<input value={stop.name} maxLength={200} onChange={(event) => { editStop(stop.id, { name: event.target.value, placeId: null }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }} /></label>
+                <label className="field">Place name<input value={stop.name} maxLength={200} onChange={(event) => { editStop(stop.id, { name: event.target.value, placeId: null, location: undefined }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }} /></label>
                 <button className="text-button" disabled={Boolean(busy)} onClick={() => openSearch(stop.id, stop.name)}>{stop.placeId ? <Check size={14} /> : <Search size={14} />}{stop.placeId ? "Place confirmed · change" : "Confirm place on map"}</button>
                 <div className="form-grid"><label className="field">Visit minutes<input type="number" min={5} max={480} step={5} value={stop.duration} onChange={(event) => editStop(stop.id, { duration: Number(event.target.value) })} /></label><label className="field">Assigned day<select value={stop.day ?? ""} onChange={(event) => editStop(stop.id, { day: event.target.value === "" ? null : Number(event.target.value), ...(event.target.value === "" ? { fixedTime: null } : {}) })}><option value="">Flexible</option>{Array.from({ length: trip.days }, (_, dayIndex) => <option key={dayIndex} value={dayIndex}>Day {dayIndex + 1}</option>)}</select></label></div>
                 <label className="checkbox"><input type="checkbox" checked={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: "10:00", day: stop.day ?? day, optional: false } : { fixedTime: null })} /><LockKeyhole size={13} />Fixed booking</label>
