@@ -97,10 +97,12 @@ export function travelModes(trip: Trip, stop?: Stop): TravelMode[] {
   return mode === "AUTO" ? ["WALK", "TRANSIT"] : [mode];
 }
 
+export const maxWalkMeters = 1500;
+
 export function allowsTravelEdge(trip: Trip, edge: TravelEdge) {
   const limit = planningPreferences(trip).maxWalkMinutes;
   return travelModes(trip, trip.stops.find((stop) => stop.id === edge.to)).includes(edge.mode)
-    && (edge.mode !== "WALK" || limit === null || edge.minutes <= limit);
+    && (edge.mode !== "WALK" || ((limit === null || edge.minutes <= limit) && edge.meters <= maxWalkMeters));
 }
 
 export function newStop(name = ""): Stop {
