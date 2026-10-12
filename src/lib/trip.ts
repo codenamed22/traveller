@@ -3,6 +3,15 @@ import { z } from "zod";
 
 export const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a time such as 09:30.");
 export const modeSchema = z.enum(["AUTO", "WALK", "TRANSIT"]);
+export const planningPreferencesSchema = z.object({
+  mode: modeSchema.default("AUTO"),
+  goal: z.enum(["TRAVEL", "BALANCED"]).default("TRAVEL"),
+  maxWalkMinutes: z.number().int().min(5).max(180).nullable().default(null),
+  maxStopsPerDay: z.number().int().min(1).max(25).default(25),
+  transitPreference: z.enum(["DEFAULT", "LESS_WALKING", "FEWER_TRANSFERS"]).default("DEFAULT"),
+}).strict();
+export type PlanningPreferences = z.infer<typeof planningPreferencesSchema>;
+const defaultPlanningPreferences = planningPreferencesSchema.parse({});
 export const sourceUrlSchema = z.url().max(3000).refine((value) => {
   try {
     const url = new URL(value);
@@ -47,6 +56,7 @@ export const tripSchema = z.object({
   dailyStart: timeSchema,
   dailyEnd: timeSchema,
   returnToHotel: z.boolean(),
+  planning: planningPreferencesSchema.optional(),
   stops: z.array(stopSchema).max(25),
 }).strict().superRefine((trip, context) => {
   if (trip.dailyEnd <= trip.dailyStart) {
@@ -77,6 +87,21 @@ export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: 
 export type Schedule = { days: DayPlan[]; omitted: string[]; warnings: string[]; generatedAt: string };
 export type SavedPlan = { days: { day: number; stopIds: string[] }[]; omitted: string[] };
 export type PlanResult = { schedule: Schedule; places: Record<string, Place>; verified: boolean };
+
+export function planningPreferences(trip: Trip): PlanningPreferences {
+  return trip.planning ?? defaultPlanningPreferences;
+}
+
+export function travelModes(trip: Trip, stop?: Stop): TravelMode[] {
+  const mode = stop && stop.mode !== "AUTO" ? stop.mode : planningPreferences(trip).mode;
+  return mode === "AUTO" ? ["WALK", "TRANSIT"] : [mode];
+}
+
+export function allowsTravelEdge(trip: Trip, edge: TravelEdge) {
+  const limit = planningPreferences(trip).maxWalkMinutes;
+  return travelModes(trip, trip.stops.find((stop) => stop.id === edge.to)).includes(edge.mode)
+    && (edge.mode !== "WALK" || limit === null || edge.minutes <= limit);
+}
 
 export function newStop(name = ""): Stop {
   return { id: crypto.randomUUID(), name, placeId: null, duration: 45, day: null, fixedTime: null, buffer: 15, optional: false, priority: 1, mode: "AUTO", source: "" };

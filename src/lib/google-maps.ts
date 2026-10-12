@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { instantAt, instantForMinute, minuteAt, type Place, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
+import { allowsTravelEdge, instantAt, instantForMinute, minuteAt, planningPreferences, travelModes, type Place, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
 import { HttpError } from "./server";
 import { solveTrip, PlanningError } from "./planner";
 import { validateSchedule } from "./schedule-validation";
@@ -68,6 +68,7 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
   const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare", {
     origin: { placeId: places[from].id }, destination: { placeId: places[to].id }, travelMode: mode,
     ...(mode === "TRANSIT" ? { departureTime: instantForMinute(trip, day, departure).toString() } : {}),
+    ...(mode === "TRANSIT" && planningPreferences(trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(trip).transitPreference } } : {}),
   });
   const route = routeResponse.parse(body).routes[0];
   if (!route) return null;
@@ -118,16 +119,19 @@ export async function planWithGoogle(trip: Trip) {
   const warnings = ["Opening hours have not been verified. Check venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."];
   const transitTargets = Math.max(0, Math.floor((1000 - budget.matrix) / (trip.days * ids.length)));
   for (let day = 0; day < trip.days; day++) {
+    const transitStops = trip.stops.filter((stop) => (stop.day === null || stop.day === day) && travelModes(trip, stop).includes("TRANSIT"));
+    const transitReturn = trip.returnToHotel && travelModes(trip).includes("TRANSIT");
+    if (!transitStops.length && !transitReturn) continue;
     const delta = instantAt(trip, day, trip.dailyStart).epochMilliseconds - Date.now();
     if (delta < -7 * 86_400_000 || delta > 100 * 86_400_000) {
-      if (trip.stops.some((stop) => stop.mode === "TRANSIT" && (stop.day === null || stop.day === day))) throw new HttpError(422, "Transit-only stops fall outside Google's routing horizon. Change the dates or transport preference.");
+      if (transitStops.some((stop) => travelModes(trip, stop).length === 1) || (transitReturn && travelModes(trip).length === 1)) throw new HttpError(422, "Transit-only travel falls outside Google's routing horizon. Change the dates or transport preference.");
       warnings.push(`Day ${day + 1}: transit is outside the available date range; walking only.`);
       continue;
     }
     const rows = await mapConcurrent(ids, (from) => {
-      const targets = ids.filter((to) => to !== from).sort((left, right) => {
-        const leftRequired = trip.stops.find((stop) => stop.id === left)?.mode === "TRANSIT" ? 1 : 0;
-        const rightRequired = trip.stops.find((stop) => stop.id === right)?.mode === "TRANSIT" ? 1 : 0;
+      const targets = ids.filter((to) => to !== from && (to === "hotel" ? transitReturn : transitStops.some((stop) => stop.id === to))).sort((left, right) => {
+        const leftRequired = travelModes(trip, trip.stops.find((stop) => stop.id === left)).length === 1 ? 1 : 0;
+        const rightRequired = travelModes(trip, trip.stops.find((stop) => stop.id === right)).length === 1 ? 1 : 0;
         const duration = (to: string) => walking.find((edge) => edge.from === from && edge.to === to)?.minutes ?? 1000;
         return rightRequired - leftRequired || duration(right) - duration(left);
       }).slice(0, transitTargets);
@@ -146,8 +150,8 @@ export async function planWithGoogle(trip: Trip) {
       let from = "hotel";
       for (const visit of day.visits) {
         const stop = trip.stops.find((candidate) => candidate.id === visit.stopId)!;
-        const modes: TravelMode[] = stop.mode === "AUTO" ? ["WALK", "TRANSIT"] : [stop.mode];
-        const options = (await Promise.all(modes.map((mode) => computeLeg(trip, day.day, from, stop.id, mode, departure, places, budget)))).filter((edge): edge is TravelEdge => edge !== null);
+        const modes = travelModes(trip, stop);
+        const options = (await Promise.all(modes.map((mode) => computeLeg(trip, day.day, from, stop.id, mode, departure, places, budget)))).filter((edge): edge is TravelEdge => edge !== null && allowsTravelEdge(trip, edge));
         edges = edges.filter((edge) => !(edge.day === day.day && edge.from === from && edge.to === stop.id && modes.includes(edge.mode)));
         edges.push(...options);
         const best = options.sort((left, right) => left.minutes - right.minutes)[0];
@@ -159,7 +163,7 @@ export async function planWithGoogle(trip: Trip) {
         from = stop.id;
       }
       if (trip.returnToHotel && day.visits.length && Number.isFinite(day.visits.at(-1)?.leg.minutes)) {
-        const options = (await Promise.all((["WALK", "TRANSIT"] as const).map((mode) => computeLeg(trip, day.day, from, "hotel", mode, departure, places, budget)))).filter((edge): edge is TravelEdge => edge !== null);
+        const options = (await Promise.all(travelModes(trip).map((mode) => computeLeg(trip, day.day, from, "hotel", mode, departure, places, budget)))).filter((edge): edge is TravelEdge => edge !== null && allowsTravelEdge(trip, edge));
         edges = edges.filter((edge) => !(edge.day === day.day && edge.from === from && edge.to === "hotel"));
         edges.push(...options);
         const best = options.sort((left, right) => left.minutes - right.minutes)[0];

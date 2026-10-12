@@ -9,10 +9,11 @@ import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
 import { NewTripDialog } from "./NewTripDialog";
+import { PlanningDialog } from "./PlanningDialog";
 import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, type Journey, type StoredTrip } from "@/lib/journey";
 import { changeStartDate, formatMinute, newStop, newTrip, persistedPlan, tripDate, tripSchema, type Place, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
 
-export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; email: string | null };
+export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; timing?: boolean; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; updatedAt: string };
 
 async function requestJson(url: string, body?: unknown, method = "POST") {
@@ -45,6 +46,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [tab, setTab] = useState<"places" | "itinerary">("places");
   const [importOpen, setImportOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [planningOpen, setPlanningOpen] = useState(false);
   const [setup, setSetup] = useState<"new" | "add" | null>(null);
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
@@ -160,18 +162,16 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     });
   }
 
-  async function generate() {
-    if (!canPlan) { setSettingsOpen(true); return; }
-    await perform("Planning your days", async () => {
+  async function generate(candidate: Trip): Promise<PlanResult> {
+    setBusy("Planning your days");
+    try {
       const version = editVersion.current;
-      journeySchema.parse(journey);
-      const validated = tripSchema.parse(trip);
+      journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
+      const validated = tripSchema.parse(candidate);
       const response: PlanResult = await requestJson("/api/plan", { trip: validated, operationId: crypto.randomUUID() });
       if (version !== editVersion.current) throw new Error("The trip changed while planning. Your edits were kept; generate a new route.");
-      setResult(response); setPlaces(response.places); setPlannedFor(JSON.stringify(validated)); setTab("itinerary"); setDay(0);
-      setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: persistedPlan(response.schedule) } }));
-      setNotice("Travel times checked. Review venue opening hours before departure.");
-    });
+      return response;
+    } finally { setBusy(null); }
   }
 
   function loadSaved(entry: SavedTrip) {
@@ -198,7 +198,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     <main className="planner-main">
       <section className="trip-heading">
         <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : ""}`}>{snapshot === savedFor ? "Saved" : "Unsaved draft"}</span></div></div>
-        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => void generate()}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
+        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
       </section>
 
       {(error || notice) && <div className={`banner ${error ? "error" : "success"}`} role={error ? "alert" : "status"}><span>{error || notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => { setError(""); setNotice(""); }}><X size={16} /></button></div>}
@@ -261,7 +261,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
             {!!trip.stops.length && <p className="list-footnote"><LockKeyhole size={12} />{trip.stops.filter((stop) => stop.fixedTime).length} fixed bookings <span>·</span> {trip.stops.filter((stop) => !stop.placeId).length} places to confirm</p>}
           </div> : <div className="itinerary-content">
             {stale && <p className="notice warning">This itinerary is out of date. Plan again after your changes.</p>}
-            {!result || stale ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>{stale ? "Schedule needs refresh" : savedPlan ? "Saved itinerary" : "A day worth taking"}</h2>{savedPlan ? <ol className="saved-order">{savedPlan.days.find((entry) => entry.day === day)?.stopIds.map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed stop"}</li>)}</ol> : <p>{stale ? "Your previous plan is retained until a new one succeeds." : "No schedule generated yet."}</p>}<button className="button primary" disabled={!trip.stops.length || Boolean(busy)} onClick={() => void generate()}><Route size={16} />{savedPlan ? "Refresh travel times" : "Plan my days"}</button></div> : <>
+            {!result || stale ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>{stale ? "Schedule needs refresh" : savedPlan ? "Saved itinerary" : "A day worth taking"}</h2>{savedPlan ? <ol className="saved-order">{savedPlan.days.find((entry) => entry.day === day)?.stopIds.map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed stop"}</li>)}</ol> : <p>{stale ? "Your previous plan is retained until a new one succeeds." : "No schedule generated yet."}</p>}<button className="button primary" disabled={!trip.stops.length || Boolean(busy)} onClick={() => setPlanningOpen(true)}><Route size={16} />{savedPlan ? "Refresh travel times" : "Plan my days"}</button></div> : <>
               <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{trip.hotel}</strong><span>Depart {trip.dailyStart}</span></div></div>
               {currentDay?.visits.map((visit, index) => {
                 const stop = trip.stops.find((entry) => entry.id === visit.stopId);
@@ -280,6 +280,15 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       </div>
     </main>
 
+    {planningOpen && <PlanningDialog trip={trip} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onPreview={generate} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
+      journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
+      editVersion.current += 1; setTrip(candidate);
+      if (response) {
+        setResult(response); setPlaces(response.places); setPlannedFor(JSON.stringify(candidate)); setTab("itinerary"); setDay(0);
+        setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: persistedPlan(response.schedule) } }));
+      }
+      setPlanningOpen(false); setError(""); setNotice(response ? "Plan accepted. Review venue hours and ticket conditions before departure." : "Planning preferences applied. Generate a preview to check the routes.");
+    }} />}
     {importOpen && <ImportReview trip={trip} canExtract={Boolean(canUseServices && config.ai)} onClose={() => setImportOpen(false)} onImport={(stops) => { edit({ stops: [...trip.stops, ...stops] }); setTab("places"); setNotice(`${stops.length} places added. Confirm each place on the map before planning.`); }} />}
     {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. Try the hotel address or a more specific name.</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small></span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
     {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Neon database", ready: config.database }, { label: "Google Maps display", ready: config.maps }, { label: "Places and routes", ready: config.routes }, { label: "Gemini extraction", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Configured" : "Not configured"}</span></div>)}</div><p className="notice">Server credentials belong in environment variables. Never include them in a trip or uploaded document.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Personal account allowlist · capped API usage</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}

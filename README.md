@@ -44,6 +44,7 @@ Set local values in an ignored `.env.local` at the project root. `.env.example` 
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Browser key restricted to Maps JavaScript API and allowed website referrers |
 | `NEXT_PUBLIC_GOOGLE_MAP_ID` | Google map ID for advanced markers; Google's demo map ID is used if omitted |
 | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL` | Paid Gemini key and an available multimodal model supporting structured output |
+| `GEMINI_TIMING_MODEL` | Optional Search-grounded timing model; defaults to `gemini-2.5-flash-lite`, independently of the import model |
 | `DAILY_USAGE_LIMIT` | Per-account daily service-unit cap; default 200 |
 
 Register `http://localhost:3000/api/auth/callback/google` and the corresponding deployed URL as OAuth redirect URIs. Use one hostname consistently: a localhost OAuth callback is different from 127.0.0.1.
@@ -72,6 +73,14 @@ A whole multi-city journey and its per-city saved orders occupy one JSONB row an
 
 ## Planning Behavior
 
+**Plan my days** opens an editable popup for the active city. Opening it does not call Google or Gemini. Change daily hours, default transport, transit preferences, a standalone walking-leg limit, daily stop capacity, and hotel return. Each visit also has editable duration, day assignment, transport override, and optional status. Fixed bookings keep their day/time and remain required. Preferences can be applied to an incomplete hotel draft without buying routes.
+
+**Optimize preview** requires confirmed places and generates a suggested day-by-day itinerary with visit times, walking/transit legs, travel totals, omitted optional places, and warnings. Nothing is accepted until **Use this plan**. Adjusting a preference invalidates the preview; closing the popup or a failed optimization preserves the previously accepted plan. **Apply preferences** saves the settings without generating a route and invalidates the previous saved order. These changes remain subject to normal trip saving/autosave and backups.
+
+Routing does not use an LLM. Google Routes/Route Matrix travel estimates feed the existing HiGHS optimizer, which jointly assigns days and orders visits. Minimizing travel tends to group nearby places together while respecting bookings and capacity. Google's waypoint-order optimization alone is unsuitable here: transit routes do not support intermediate waypoints. **Balance daily activity** adds a weighted peak-day objective for visit, booking-buffer, and travel minutes; it excludes idle waiting and is not a guarantee of equally sized days or a global optimum.
+
+Per-place walking/transit overrides take precedence over the city default; the hotel return follows the city default. The walking cap applies only to standalone walking legs, not walks within a transit journey. Google's **Less walking** and **Fewer transfers** preferences are sent on actual-departure transit route checks, not treated as hard guarantees.
+
 - Each city has one hotel, 1-7 days, and up to 25 stops; every stop is required unless explicitly marked optional.
 - Fixed appointments retain their day/time and arrival buffer. Moving a city's start preserves booked calendar dates or rejects the change.
 - Google place candidates require user confirmation. Hotel confirmation also fills the IANA timezone when Google provides it.
@@ -81,6 +90,16 @@ A whole multi-city journey and its per-city saved orders occupy one JSONB row an
 - Transit is available only within Google's date horizon (up to 7 days past and 100 days ahead); outside it the app labels walking-only planning. Transit-only requests outside the horizon are rejected.
 - Opening hours are not yet enforced. The itinerary explicitly asks users to check venue hours and ticket conditions. Accessibility, fares, and live transit reliability are not guaranteed.
 - Saved plans retain day/stop order, not Google route responses. Reopening requires route refresh; the current refresh action generates a newly checked candidate and may choose a different order. Venue hours, polylines, transit details, and Google coordinates are not persisted in Neon or backups.
+
+### Optional Timing Research
+
+Select up to five non-booked places and explicitly consent before researching timings. Only those public place names/IDs and the city are sent to Gemini and Google Search, not hotels, booking details, dates, or imported documents. The default Flash-Lite model is configurable separately from document extraction. Availability and Search support depend on the provider and selected model.
+
+The endpoint makes two bounded model calls: Search-grounded research, then structured extraction from that evidence. It requires source URLs and grounding metadata, validates stop/source references, uses a shared 45-second timeout, and does not automatically retry. The popup shows sources, original research, and sandboxed Google Search suggestions. Research failures leave manual preferences and route planning available.
+
+Suggestions never overwrite visit durations automatically. Explicitly apply a suggested duration or enter your own. Time-of-day advice is advisory only: it does not create a booking, enforce opening hours, or constrain the solver. Use explicit day assignments and existing booking controls for hard constraints. Only accepted preferences and durations are saved; research evidence and raw route previews are session-only.
+
+Each research request reserves five service units. The five-place limit, output-token limits, and two model calls are not a dollar cap: Google controls the number of grounding searches and its billing. Configure provider quotas and billing controls; review current grounding attribution and retention terms before deployment.
 
 ## Import Boundaries
 
@@ -98,7 +117,7 @@ The public-page fetcher accepts HTTPS only, validates all resolved IPs, pins the
 
 ## Cost And Security
 
-Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; an extraction batch costs three; a planning request costs 30. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
+Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; an extraction batch costs three; timing research costs five; a planning preview costs 30, including each re-optimization. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
 
 Each planning run permits at most 1,000 billable matrix elements and 100 route requests. A standard account budget therefore permits at most six full planning attempts per UTC day, less when other services are used. Also set quotas at Google/Gemini: application limits cannot protect a leaked key or direct browser-map usage. Deployment abuse controls are required before removing the personal allowlist.
 
@@ -118,6 +137,8 @@ npm run test:e2e
 Unit tests cover city presets and date rules, malformed backups, legacy restoration, atomic owner/revision-scoped saves, booking/date constraints, DST, required-stop coverage, missing routes, optional omission, import interpretation, private-address rejection, YouTube URL validation, provenance, and actual Gemini SDK video serialization with mocked HTTP. Browser tests cover preset/custom city setup, adding/removing cities, independent hotels/bookings, whole-journey backups, hotel-search configuration guidance, manual editing, repeated-source selection, duplicate warnings, YouTube consent, source links, protected APIs, and desktop/mobile layouts without external service credentials. Screenshots are written under ignored `test-results/`.
 
 Live Neon/OAuth, Google/Gemini responses, route rendering with a valid Maps key, and deployed Vercel cold-start performance still require credentialed smoke tests. Do not treat a successful local build as proof of live-provider or deployed compatibility.
+
+Planner tests also cover geographic grouping, balanced activity, daily capacity, transport inheritance/overrides, hotel returns, walking limits, actual-departure Google requests, and consented grounded research with mocked provider HTTP. Popup tests cover draft cancellation, preview acceptance, failed re-optimization, manual duration overrides, source display, and fixed bookings. Playwright starts a separate credential-free server on port 3100 (override with `PLAYWRIGHT_PORT`), uses `.next/e2e`, and never reuses a signed-in development server. Paid popup responses are mocked.
 
 ## Vercel
 

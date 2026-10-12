@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { solveTrip } from "./planner";
-import { newStop, newTrip, type Trip, type TravelEdge } from "./trip";
+import { newStop, newTrip, planningPreferences, type Trip, type TravelEdge } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 function routes(trip: Trip, minutes = 10): TravelEdge[] {
@@ -15,6 +15,47 @@ function fixture(): Trip {
   ] };
 }
 describe("schedule optimizer", () => {
+  it("honors trip transport defaults, explicit overrides and hotel return", async () => {
+    const trip = fixture();
+    trip.planning = { ...planningPreferences(trip), mode: "TRANSIT" };
+    trip.stops[1].mode = "WALK";
+    const walking = routes(trip);
+    const schedule = await solveTrip(trip, [...walking, ...walking.map((edge): TravelEdge => ({ ...edge, mode: "TRANSIT", minutes: 20 }))]);
+    for (const day of schedule.days) {
+      for (const visit of day.visits) expect(visit.leg.mode).toBe(visit.stopId === trip.stops[1].id ? "WALK" : "TRANSIT");
+      if (day.returnLeg) expect(day.returnLeg.mode).toBe("TRANSIT");
+    }
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    schedule.days[0].returnLeg!.mode = "WALK";
+    expect(validateSchedule(trip, schedule)).toContain("Day 1: hotel return violates transport preferences.");
+  });
+  it("rejects walking beyond the configured leg limit", async () => {
+    const trip = fixture();
+    trip.planning = { ...planningPreferences(trip), mode: "WALK", maxWalkMinutes: 5 };
+    await expect(solveTrip(trip, routes(trip, 10))).rejects.toThrow("No schedule fits");
+  });
+  it("clusters nearby stops into days while respecting a daily stop limit", async () => {
+    const trip = fixture();
+    trip.stops = Array.from({ length: 4 }, (_, index) => newStop(`Place ${index}`));
+    trip.planning = { ...planningPreferences(trip), maxStopsPerDay: 2 };
+    const cluster = (id: string) => Math.floor(trip.stops.findIndex((stop) => stop.id === id) / 2);
+    const edges = routes(trip).map((edge) => ({ ...edge, minutes: edge.from === "hotel" || edge.to === "hotel" ? 10 : cluster(edge.from) === cluster(edge.to) ? 2 : 60 }));
+    const schedule = await solveTrip(trip, edges);
+    for (const day of schedule.days) {
+      expect(day.visits).toHaveLength(2);
+      expect(new Set(day.visits.map((visit) => cluster(visit.stopId))).size).toBe(1);
+    }
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    trip.planning.maxStopsPerDay = 1;
+    expect(validateSchedule(trip, schedule)).toContain("Day 1: too many places.");
+  });
+  it("balances daily activity when requested instead of packing every flexible stop together", async () => {
+    const trip = fixture();
+    trip.stops = Array.from({ length: 4 }, (_, index) => ({ ...newStop(`Place ${index}`), duration: 60 }));
+    trip.planning = { ...planningPreferences(trip), goal: "BALANCED" };
+    const schedule = await solveTrip(trip, routes(trip, 5));
+    expect(schedule.days.map((day) => day.visits.length)).toEqual([2, 2]);
+  });
   it("finds the shortest small unconstrained tour", async () => {
     const trip = fixture();
     trip.days = 1;

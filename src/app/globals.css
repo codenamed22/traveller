@@ -173,6 +173,38 @@ summary::-webkit-details-marker { display: none; }
 .notice ul { padding-left: 20px; margin-bottom: 0; }
 .dialog { border: 1px solid var(--line); border-radius: 8px; padding: 25px; color: var(--ink); width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 50px); overflow: auto; box-shadow: 0 14px 70px #1a2b2630; }
 .dialog::backdrop { background: #1e2b2855; backdrop-filter: blur(2px); }
+.planning-dialog { width: min(800px, calc(100vw - 32px)); }
+.planning-context { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 12px; margin: -7px 0 20px; }
+.planning-context span, .planning-progress { display: flex; align-items: center; gap: 6px; }
+.segmented.planning-stages { display: flex; width: 100%; }
+.planning-stages button { flex: 1; justify-content: center; white-space: nowrap; }
+.planning-inputs { padding: 0; margin: 0; border: 0; min-width: 0; }
+.planning-section { padding-bottom: 18px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+.planning-section h3, .plan-preview-day h3 { font-size: 14px; font-weight: 500; margin: 0 0 12px; }
+.planning-section h3 span, .plan-preview-day h3 span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 10px; }
+.planning-visit { display: grid; gap: 11px; padding: 17px 0; border-bottom: 1px solid var(--line); }
+.planning-visit:last-child { border-bottom: 0; padding-bottom: 0; }
+.planning-visit-heading, .planning-visit-options { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 18px; }
+.planning-visit-heading strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.booking-time { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); font-size: 11px; }
+.planning-actions { position: sticky; bottom: -25px; background: var(--paper); padding: 14px 0; border-top: 1px solid var(--line); }
+.planning-progress { font-size: 12px; color: var(--green); }
+.timing-suggestion { padding: 12px 0 0 12px; border-left: 2px solid #b7cbbb; font-size: 12px; }
+.timing-suggestion p { margin: 6px 0; color: var(--muted); }
+.timing-suggestion .text-button { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
+.timing-links { display: flex; flex-wrap: wrap; gap: 7px 14px; margin: 8px 0; }
+.timing-links a { display: inline-flex; align-items: center; gap: 4px; overflow-wrap: anywhere; }
+.timing-research .quiet { margin: 12px 0; }
+.research-evidence { font-size: 12px; overflow-wrap: anywhere; }
+.research-evidence summary { cursor: pointer; margin: 12px 0; }
+.research-evidence p { white-space: pre-wrap; }
+.search-attribution { border: 0; width: 100%; height: 170px; margin-top: 12px; background: white; }
+.plan-preview-day { border-bottom: 1px solid var(--line); padding: 10px 0 16px; margin-bottom: 12px; }
+.plan-preview-day ol { list-style: none; padding: 0; margin: 12px 0; }
+.plan-preview-day li { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 12px; padding: 11px 0; }
+.preview-time { font-size: 12px; color: var(--green); font-variant-numeric: tabular-nums; }
+.plan-preview-day li strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.plan-preview-day li small { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--muted); margin-top: 3px; }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-bottom: 20px; }
 .dialog-heading h2 { margin: 0; }
 .dialog-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 9px; margin-top: 23px; }
@@ -286,6 +318,10 @@ blockquote { margin: 0; padding: 7px 11px; border-left: 2px solid #d6dece; backg
 	.section-tabs { padding: 0 20px; }
 	.dialog { padding: 19px; width: calc(100vw - 22px); max-height: calc(100dvh - 24px); }
 	.dialog-actions { gap: 7px; }
+	.planning-actions { bottom: -19px; }
+	.planning-stages button { padding: 7px 8px; }
+	.planning-section > .form-grid .field:has(select) { grid-column: 1 / -1; }
+	.plan-preview-day li { grid-template-columns: 89px minmax(0, 1fr); gap: 7px; }
 	.import-formats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.dialog-actions .button { font-size: 12px; padding: 9px 11px; }
 	.form-grid.three { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }

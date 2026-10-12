@@ -25,5 +25,6 @@ export default async function Home() {
     maps: Boolean(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY),
     routes: Boolean(process.env.GOOGLE_MAPS_API_KEY),
     ai: Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY && process.env.GEMINI_MODEL),
+    timing: Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY),
   }} />;
 }

@@ -1,5 +1,5 @@
 import loadHighs from "highs";
-import { minuteAt, tripDate, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
+import { allowsTravelEdge, minuteAt, planningPreferences, tripDate, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 let engine: ReturnType<typeof loadHighs> | undefined;
@@ -34,6 +34,8 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5):
   };
   try {
     model.options.set({ output_flag: false, time_limit: Math.min(5, Math.max(0.01, seconds)), mip_rel_gap: 0.02 });
+    const preferences = planningPreferences(trip);
+    const peakLoad = preferences.goal === "BALANCED" ? addVariable(0, infinity, 1) : null;
     for (let day = 0; day < trip.days; day++) {
       const start = minuteAt(trip, day, trip.dailyStart);
       const end = minuteAt(trip, day, trip.dailyEnd);
@@ -59,7 +61,7 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5):
           const synthetic = to === endNode && (from === 0 || !trip.returnToHotel);
           const edges: TravelEdge[] = synthetic
             ? [{ day, from: ids[from], to: "hotel", mode: "WALK", minutes: 0, meters: 0 }]
-            : travel.filter((edge) => edge.day === day && edge.from === ids[from] && edge.to === ids[to] && (!destination || destination.mode === "AUTO" || edge.mode === destination.mode));
+            : travel.filter((edge) => edge.day === day && edge.from === ids[from] && edge.to === ids[to] && allowsTravelEdge(trip, edge));
           for (const edge of edges) {
             if (!Number.isFinite(edge.minutes) || edge.minutes < 0 || edge.minutes > end - start || !Number.isFinite(edge.meters) || edge.meters < 0) continue;
             const column = addVariable(0, 1, edge.minutes + (edge.mode === "WALK" ? edge.meters * 0.00001 : 0), true);
@@ -71,6 +73,12 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5):
         }
       }
       const dayRoutes = routes.filter((route) => route.day === day);
+      addRow(dayAssignments.map((column) => [column, 1]), 0, preferences.maxStopsPerDay);
+      if (peakLoad !== null) addRow([
+        ...dayAssignments.map((column, index): [number, number] => [column, trip.stops[index].duration + (trip.stops[index].fixedTime ? trip.stops[index].buffer : 0)]),
+        ...dayRoutes.map((route): [number, number] => [route.column, route.edge.minutes]),
+        [peakLoad, -1],
+      ], -infinity, 0);
       addRow(dayRoutes.filter((route) => route.from === 0).map((route) => [route.column, 1]), 1, 1);
       addRow(dayRoutes.filter((route) => route.to === endNode).map((route) => [route.column, 1]), 1, 1);
       for (let node = 1; node < endNode; node++) {

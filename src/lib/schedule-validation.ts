@@ -1,4 +1,4 @@
-import { minuteAt, tripDate, type Schedule, type Trip } from "./trip";
+import { allowsTravelEdge, minuteAt, planningPreferences, tripDate, type Schedule, type Trip } from "./trip";
 
 export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
   const errors: string[] = [];
@@ -11,6 +11,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
       continue;
     }
     seenDays.add(day.day);
+    if (day.visits.length > planningPreferences(trip).maxStopsPerDay) errors.push(`Day ${day.day + 1}: too many places.`);
     if (day.date !== tripDate(trip, day.day)) errors.push("A sightseeing date changed.");
     let previousEnd = minuteAt(trip, day.day, trip.dailyStart);
     let previousId = "hotel";
@@ -25,7 +26,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
         continue;
       }
       if (visit.leg.day !== day.day || visit.leg.from !== previousId || visit.leg.to !== stop.id) errors.push(`${stop.name}: disconnected travel leg.`);
-      if (stop.mode !== "AUTO" && stop.mode !== visit.leg.mode) errors.push(`${stop.name}: transport choice changed.`);
+      if (!allowsTravelEdge(trip, visit.leg)) errors.push(`${stop.name}: transport choice or walking limit changed.`);
       if (stop.day !== null && stop.day !== day.day) errors.push(`${stop.name}: assigned day changed.`);
       const buffer = stop.fixedTime ? stop.buffer : 0;
       if (visit.start + 0.01 < previousEnd + duration + buffer) errors.push(`${stop.name}: not enough time to arrive.`);
@@ -40,6 +41,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
       if (!leg || leg.from !== previousId || leg.to !== "hotel" || leg.day !== day.day || !Number.isFinite(leg.minutes) || leg.minutes < 0 || previousEnd + leg.minutes > dayEnd + 0.01) {
         errors.push(`Day ${day.day + 1}: no timely return to the hotel.`);
       }
+      if (leg && !allowsTravelEdge(trip, leg)) errors.push(`Day ${day.day + 1}: hotel return violates transport preferences.`);
     }
   }
   if (seenDays.size !== trip.days) errors.push("Missing sightseeing day.");
