@@ -32,6 +32,10 @@ async function googleRequest(url: string, fields: string, body?: unknown) {
     headers: { "Content-Type": "application/json", "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": fields },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (!response.ok) {
+    const detail = await response.clone().json().catch(() => null) as { error?: { status?: string; message?: string; details?: { reason?: string }[] } } | null;
+    console.error("[google-maps]", response.status, detail?.error?.status, detail?.error?.details?.[0]?.reason, detail?.error?.message);
+  }
   if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, response.status === 429 ? "Google Maps quota reached. Try again later." : "Google Maps could not complete the request. Check the enabled APIs and key restrictions.");
   return response.json();
 }
