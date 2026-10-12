@@ -8,9 +8,9 @@ import { validateSchedule } from "./schedule-validation";
 const placeResponse = z.object({ id: z.string(), displayName: z.object({ text: z.string() }), formattedAddress: z.string().optional(), location: z.object({ latitude: z.number(), longitude: z.number() }), timeZone: z.object({ id: z.string() }).optional() });
 const routeResponse = z.object({ routes: z.array(z.object({
   duration: z.string(), distanceMeters: z.number().default(0), polyline: z.object({ encodedPolyline: z.string() }).optional(),
-  localizedValues: z.object({ transitFare: z.object({ text: z.string() }).optional() }).optional(),
+  localizedValues: z.object({ transitFare: z.object({ text: z.string().optional() }).optional() }).optional(),
   legs: z.array(z.object({ steps: z.array(z.object({
-    travelMode: z.string().optional(), navigationInstruction: z.object({ instructions: z.string() }).optional(),
+    travelMode: z.string().optional(), navigationInstruction: z.object({ instructions: z.string().optional() }).optional(),
     transitDetails: z.object({ transitLine: z.object({ nameShort: z.string().optional(), name: z.string().optional() }).optional(), stopDetails: z.object({ departureStop: z.object({ name: z.string() }).optional(), arrivalStop: z.object({ name: z.string() }).optional(), departureTime: z.string().optional(), arrivalTime: z.string().optional() }).optional() }).optional(),
   })).default([]) })).default([]),
 })).default([]) });
@@ -92,7 +92,7 @@ async function matrixRow(trip: Trip, day: number, from: string, targets: string[
     destinations: targets.map((target) => ({ waypoint: { placeId: places[target].id } })),
     travelMode: mode, ...(mode === "TRANSIT" ? { departureTime: instantAt(trip, day, trip.dailyStart).toString() } : {}),
   });
-  const entries = z.array(z.object({ destinationIndex: z.number().int(), condition: z.string().optional(), status: z.object({ code: z.number().optional() }).optional(), duration: z.string().optional(), distanceMeters: z.number().optional() })).parse(response);
+  const entries = z.array(z.object({ destinationIndex: z.number().int().default(0), condition: z.string().optional(), status: z.object({ code: z.number().optional() }).optional(), duration: z.string().optional(), distanceMeters: z.number().optional() })).parse(response);
   return entries.flatMap((entry): TravelEdge[] => {
     if (entry.status?.code || entry.condition !== "ROUTE_EXISTS" || !entry.duration || !targets[entry.destinationIndex]) return [];
     return [{ day, from, to: targets[entry.destinationIndex], mode, minutes: minutesFromDuration(entry.duration), meters: entry.distanceMeters ?? 0 }];
@@ -117,7 +117,8 @@ export async function planWithGoogle(trip: Trip) {
   const walking = (await mapConcurrent(ids, (from) => matrixRow(trip, 0, from, ids.filter((to) => to !== from), "WALK", places, budget))).flat();
   let edges: TravelEdge[] = Array.from({ length: trip.days }, (_, day) => walking.map((edge) => ({ ...edge, day }))).flat();
   const warnings = ["Opening hours have not been verified. Check venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."];
-  const transitTargets = Math.max(0, Math.floor((1000 - budget.matrix) / (trip.days * ids.length)));
+  const dayIds = Array.from({ length: trip.days }, (_, day) => ids.filter((id) => id === "hotel" || ((trip.stops.find((stop) => stop.id === id)?.day ?? day) === day)));
+  const transitTargets = Math.max(0, Math.floor((1000 - budget.matrix) / dayIds.reduce((total, nodes) => total + nodes.length, 0)));
   for (let day = 0; day < trip.days; day++) {
     const transitStops = trip.stops.filter((stop) => (stop.day === null || stop.day === day) && travelModes(trip, stop).includes("TRANSIT"));
     const transitReturn = trip.returnToHotel && travelModes(trip).includes("TRANSIT");
