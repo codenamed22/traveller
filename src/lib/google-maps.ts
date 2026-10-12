@@ -129,8 +129,8 @@ export async function planWithGoogle(trip: Trip) {
       warnings.push(`Day ${day + 1}: transit is outside the available date range; walking only.`);
       continue;
     }
-    const rows = await mapConcurrent(ids, (from) => {
-      const targets = ids.filter((to) => to !== from && (to === "hotel" ? transitReturn : transitStops.some((stop) => stop.id === to))).sort((left, right) => {
+    const rows = await mapConcurrent(dayIds[day], (from) => {
+      const targets = dayIds[day].filter((to) => to !== from && (to === "hotel" ? transitReturn : transitStops.some((stop) => stop.id === to))).sort((left, right) => {
         const leftRequired = travelModes(trip, trip.stops.find((stop) => stop.id === left)).length === 1 ? 1 : 0;
         const rightRequired = travelModes(trip, trip.stops.find((stop) => stop.id === right)).length === 1 ? 1 : 0;
         const duration = (to: string) => walking.find((edge) => edge.from === from && edge.to === to)?.minutes ?? 1000;
