@@ -1,8 +1,69 @@
 import { describe, expect, it } from "vitest";
 import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, mapsQuery, mergeDuplicateDetails, youtubeUrl } from "./import";
 import { newStop, newTrip, stopSchema } from "./trip";
+import { duplicateStopPairs, mergeDuplicateStops, mergeReviewedDuplicate } from "./duplicates";
 
 describe("itinerary import", () => {
+  it.each([
+    ["Sango", "Sango Specialty Coffee"],
+    ["The Begijnhof", "Begijnhof"],
+    ["The Nine Little Streets", "Nine Little Streets (Negen Straatjes)"],
+    ["Toki Specialty Coffee", "Toki"],
+  ])("flags the reported alias %s / %s in both the city and import review", (firstName, secondName) => {
+    const first = { ...newStop(firstName), placeId: "confirmed-place" };
+    const second = newStop(secondName);
+    expect(duplicateStopPairs([first, second])).toHaveLength(1);
+    expect([...duplicateCandidateIndexes(manualCandidates(secondName), [first])]).toEqual([0]);
+    expect([...duplicateCandidateIndexes(manualCandidates(`${firstName}\n${secondName}`), [])]).toEqual([1]);
+    expect(duplicateStopPairs([first, { ...second, placeId: "different-confirmed-place" }])).toEqual([]);
+  });
+  it("does not collapse different parenthetical location qualifiers", () => {
+    expect(duplicateStopPairs([newStop("Museum (East)"), newStop("Museum (West)")])).toEqual([]);
+    expect([...duplicateCandidateIndexes(manualCandidates("Museum (West)"), [newStop("Museum (East)")])]).toEqual([]);
+  });
+  it("flags aliases of the same confirmed place even when bookings and source notes differ", () => {
+    const first = { ...newStop("Sango"), placeId: "sango-place", day: 0, fixedTime: "15:13", source: "First itinerary" };
+    const second = { ...newStop("Sango Specialty Coffee"), placeId: "sango-place", day: 1, fixedTime: "10:00", duration: 30, source: "Second itinerary" };
+    expect(duplicateStopPairs([first, second])).toEqual([{ first, second, match: "Same confirmed Google place" }]);
+    expect(mergeDuplicateStops([first, second]).removed).toEqual([]);
+    const merged = mergeReviewedDuplicate([first, second], second.id, first.id);
+    expect(merged).toEqual([{ ...second, source: "Second itinerary\nFirst itinerary" }]);
+    expect(first.fixedTime).toBe("15:13");
+  });
+  it("flags matching unconfirmed names but never merges distinct confirmed branches", () => {
+    const first = { ...newStop("Sango Coffee"), placeId: "first-branch" };
+    const second = { ...newStop(" SANGO   COFFEE "), placeId: "second-branch" };
+    expect(duplicateStopPairs([first, second])).toEqual([]);
+    expect(() => mergeReviewedDuplicate([first, second], first.id, second.id)).toThrow("no longer match");
+    const unconfirmed = { ...second, placeId: null };
+    expect(duplicateStopPairs([first, unconfirmed])).toHaveLength(1);
+    expect(mergeReviewedDuplicate([first, unconfirmed], unconfirmed.id, first.id)[0]).toMatchObject({ id: unconfirmed.id, placeId: first.placeId });
+  });
+  it("flags Sango name aliases without a second place ID but respects distinct confirmed locations", () => {
+    const first = { ...newStop("Sango"), placeId: "sango-place" };
+    const second = newStop("Sango Specialty Coffee");
+    expect(duplicateStopPairs([first, second])).toEqual([{ first, second, match: "Possible name alias; location needs review" }]);
+    expect(duplicateStopPairs([first, { ...second, placeId: "different-place" }])).toEqual([]);
+    expect(duplicateStopPairs([newStop("Coffee"), newStop("Other Coffee")])).toEqual([]);
+  });
+  it("preserves both source links and rejects evidence overflow without removing visits", () => {
+    const first = { ...newStop("Sango"), source: "First note", sourceUrl: "https://example.com/first" };
+    const second = { ...newStop("Sango"), source: "Second note", sourceUrl: "https://example.com/second" };
+    expect(mergeReviewedDuplicate([first, second], first.id, second.id)[0]).toMatchObject({ source: "First note\nSecond note\nhttps://example.com/second", sourceUrl: first.sourceUrl });
+    const long = { ...second, source: "x".repeat(1000) };
+    expect(() => mergeReviewedDuplicate([first, long], first.id, long.id)).toThrow("neither visit was changed");
+    expect(long.source).toHaveLength(1000);
+  });
+  it("deduplicates only identical visits without losing bookings or source evidence", () => {
+    const stop = { ...newStop("Museum"), day: 0, fixedTime: "10:00" };
+    const copy = { ...stop, id: crypto.randomUUID(), name: " MUSEUM " };
+    const differentDay = { ...copy, id: crypto.randomUUID(), day: 1 };
+    const differentDuration = { ...copy, id: crypto.randomUUID(), duration: 90 };
+    const differentSource = { ...copy, id: crypto.randomUUID(), source: "Second ticket" };
+    const stops = [stop, copy, differentDay, differentDuration, differentSource];
+    expect(mergeDuplicateStops(stops)).toEqual({ stops: [stop, differentDay, differentDuration, differentSource], removed: [copy.name] });
+    expect(stops).toHaveLength(5);
+  });
   it("preserves each source and requires review of plain text dates", () => {
     expect(manualCandidates("- Louvre\n10:00 Museum")[1]).toMatchObject({ name: "10:00 Museum", time: null, source: "10:00 Museum" });
   });
@@ -45,15 +106,50 @@ describe("itinerary import", () => {
     expect(stops).toHaveLength(1);
     expect(candidates).toHaveLength(4);
   });
-  it("copies non-default details from skipped duplicates onto the existing stop", () => {
+  it("proposes missing booking details without overwriting any existing duration", () => {
     const trip = { ...newTrip(), startDate: "2026-10-12", days: 3 };
     const stop = newStop("Louvre Museum");
     const place = { name: "louvre museum", date: "2026-10-13", time: "10:00", duration: 90, source: "", warning: "" };
     const result = mergeDuplicateDetails([{ place, included: false }], [stop], trip);
-    expect(result.stops[0]).toMatchObject({ day: 1, fixedTime: "10:00", duration: 90 });
+    expect(result.stops[0]).toMatchObject({ day: 1, fixedTime: "10:00", duration: 45 });
     expect(result.merged).toBe(1);
+    expect(result.changes[0]).toContain("day: unassigned -> 2026-10-13");
+    expect(stop.day).toBeNull();
     const kept = mergeDuplicateDetails([{ place, included: false }], [{ ...stop, duration: 30 }], trip);
     expect(kept.stops[0].duration).toBe(30);
+  });
+  it.each([
+    { date: "2026-11-01", time: "10:00", duration: 90 },
+    { date: "2026-10-14", time: "10:00", duration: 90 },
+    { date: null, time: "10:00", duration: 90 },
+    { date: "2026-02-30", time: null, duration: 90 },
+    { date: null, time: null, duration: -5 },
+  ])("does not merge conflicting or invalid duplicate details: %j", (patch) => {
+    const trip = { ...newTrip(), startDate: "2026-10-12", days: 3 };
+    const stop = { ...newStop("Museum"), day: 1 };
+    const result = mergeDuplicateDetails([{ place: { ...manualCandidates("Museum")[0], ...patch }, included: false }], [stop], trip);
+    expect(result.stops).toEqual([stop]);
+    expect(result.merged).toBe(0);
+    expect(result.issues).toHaveLength(1);
+  });
+  it("fills only missing fields in an earlier candidate and refuses ambiguous existing visits", () => {
+    const trip = { ...newTrip(), startDate: "2026-10-12", days: 3 };
+    const place = { ...manualCandidates("Museum")[0], date: "2026-10-13", time: "10:00", duration: 90 };
+    const result = mergeDuplicateDetails([{ place: manualCandidates("Museum")[0], included: true }, { place, included: false }], [], trip);
+    expect(result.entries[0].place).toMatchObject({ date: place.date, time: place.time, duration: 90 });
+    const ambiguous = mergeDuplicateDetails([{ place, included: false }], [newStop("Museum"), newStop("Museum")], trip);
+    expect(ambiguous.merged).toBe(0);
+    expect(ambiguous.issues[0]).toContain("multiple existing visits");
+  });
+  it("preserves merged source evidence and handles invalid draft values without throwing", () => {
+    const trip = { ...newTrip(), startDate: "2026-10-12", days: 3 };
+    const stop = { ...newStop("Museum"), source: "Original note", sourceUrl: "https://example.com/original" };
+    const place = { ...manualCandidates("Museum")[0], date: "2026-10-13", time: "10:00", source: "Ticket at 10:00", sourceUrl: "https://example.com/ticket" };
+    const result = mergeDuplicateDetails([{ place, included: false }], [stop], trip);
+    expect(result.stops[0].source).toBe("Original note\nTicket at 10:00\nhttps://example.com/ticket");
+    expect(result.stops[0].sourceUrl).toBe(stop.sourceUrl);
+    const invalid = { ...stop, duration: 0 };
+    expect(mergeDuplicateDetails([{ place, included: false }], [invalid], trip).stops).toEqual([invalid]);
   });
   it("retains safe source links and makes only non-booked ideas optional", () => {
     const trip = { ...newTrip(), startDate: "2026-10-12" };

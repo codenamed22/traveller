@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { solveTrip } from "./planner";
-import { newStop, newTrip, planningPreferences, type Trip, type TravelEdge } from "./trip";
+import { describe, expect, it, vi } from "vitest";
+import { bookingConflicts, PlanningError, solveTrip, solveTripByDays, type SolverStage } from "./planner";
+import { bookingConflictDetails, bookingTimeSuggestion, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
 import { validateSchedule } from "./schedule-validation";
+import { solveWithDurationRelaxation } from "./duration-relaxation";
 
 function routes(trip: Trip, minutes = 10): TravelEdge[] {
   const ids = ["hotel", ...trip.stops.map((stop) => stop.id)];
@@ -15,6 +16,233 @@ function fixture(): Trip {
   ] };
 }
 describe("schedule optimizer", () => {
+  it("plans day by day around locked days, bookings and an exclusive day trip", async () => {
+    const locked = Array.from({ length: 6 }, (_, index) => ({ ...newStop(`Locked ${index}`), day: index % 2, duration: 60 }));
+    const flexible = Array.from({ length: 4 }, (_, index) => ({ ...newStop(`Flexible ${index}`), duration: 45, ...(index === 0 ? { durationOptions: [45, 41, 36] } : {}) }));
+    const trips = [{ ...newStop("Day trip A"), duration: 60 }, { ...newStop("Day trip B"), duration: 60 }];
+    const booking = { ...newStop("Booked show"), day: 1, fixedTime: "17:00", duration: 90 };
+    const trip = { ...fixture(), days: 3, dailyStart: "09:00", dailyEnd: "19:00", stops: [...locked, ...flexible, ...trips, booking], dayGroups: [{ id: crypto.randomUUID(), name: "Day trip", stopIds: trips.map((stop) => stop.id), allowedDays: [0, 1, 2], exclusive: true }] };
+    const original = structuredClone(trip);
+    const schedule = await solveTripByDays(trip, routes(trip, 15), 5);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([]);
+    const dayOf = (id: string) => schedule.days.find((day) => day.visits.some((visit) => visit.stopId === id))!.day;
+    expect(dayOf(trips[0].id)).toBe(2);
+    expect(schedule.days[2].visits.map((visit) => visit.stopId).sort()).toEqual(trips.map((stop) => stop.id).sort());
+    locked.forEach((stop) => expect(dayOf(stop.id)).toBe(stop.day));
+    expect(trip).toEqual(original);
+  });
+  it("keeps duration preservation ahead of optional utility and never promotes optional group members", async () => {
+    const required = { ...newStop("Required lunch"), duration: 60, durationOptions: [60, 54, 48] };
+    const optional = { ...newStop("Optional cafe"), duration: 60, optional: true };
+    const trip = { ...fixture(), days: 1, dailyEnd: "11:24", stops: [required, optional] };
+    const schedule = await solveTrip(trip, routes(trip), 2);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([optional.id]);
+    expect(schedule.optimization).toMatchObject({ weightedDurationLoss: 0, durationOptimal: true, optionalOptimal: true });
+    const grouped = { ...trip, days: 2, stops: [{ ...required, day: 1 }, { ...optional, day: 0 }], dayGroups: [{ id: crypto.randomUUID(), name: "Day trip", stopIds: [required.id, optional.id], allowedDays: [0, 1], exclusive: true }] };
+    const groupSchedule = await solveTrip(grouped, routes(grouped), 2);
+    expect(validateSchedule(grouped, groupSchedule)).toEqual([]);
+    expect(groupSchedule.omitted).toEqual([optional.id]);
+    expect(groupSchedule.days[1].visits[0].stopId).toBe(required.id);
+  });
+  it.each([2, 3])("jointly assigns an exclusive day trip and preserves individual durations across %i days", async (days) => {
+    const stops = [
+      { ...newStop("Priority Amsterdam lunch"), day: 0, duration: 60, durationOptions: [60, 54, 48], priority: 5 },
+      { ...newStop("Flexible Amsterdam cafe"), duration: 60, durationOptions: [60, 54, 48] },
+      { ...newStop("Utrecht canal"), duration: 30 }, { ...newStop("Utrecht lunch"), duration: 30 },
+    ];
+    const trip = { ...fixture(), days, dailyEnd: "11:24", stops, dayGroups: [{ id: crypto.randomUUID(), name: "Utrecht", stopIds: stops.slice(2).map((stop) => stop.id), allowedDays: Array.from({ length: days - 1 }, (_, index) => index + 1), exclusive: true }] };
+    const original = structuredClone(trip);
+    const stages: SolverStage[] = [];
+    const schedule = await solveTrip(trip, routes(trip), 3, { onStage: (stage) => stages.push(stage) });
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const visits = schedule.days.flatMap((day) => day.visits);
+    expect(stops.map((stop) => { const visit = visits.find((entry) => entry.stopId === stop.id)!; return visit.end - visit.start; })).toEqual([60, days === 2 ? 54 : 60, 30, 30]);
+    const grouped = schedule.days.find((day) => day.visits.some((visit) => visit.stopId === stops[2].id))!;
+    expect(new Set(grouped.visits.map((visit) => visit.stopId))).toEqual(new Set(stops.slice(2).map((stop) => stop.id)));
+    expect(schedule.optimization).toMatchObject({ weightedDurationLoss: days === 2 ? 6 : 0, durationOptimal: true });
+    expect(stages[0].objective).toBe("duration");
+    expect(trip).toEqual(original);
+  });
+  it("selectively restores eatery time and permits approved 15-to-10 minute visits", async () => {
+    const trip = { ...fixture(), days: 1, dailyEnd: "11:24", stops: [
+      { ...newStop("Priority lunch"), duration: 60, durationOptions: [60, 54, 48], priority: 5 },
+      { ...newStop("Cafe"), duration: 60, durationOptions: [60, 54, 48] },
+    ] };
+    const original = structuredClone(trip);
+    const edges = routes(trip);
+    const levels: number[] = [];
+    const schedule = await solveWithDurationRelaxation(trip, edges, 3, (candidate, seconds, level) => { levels.push(level); return solveTrip(candidate, edges, seconds); });
+    expect(levels).toEqual([0, 1]);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const durations = new Map(schedule.days[0].visits.map((visit) => [visit.stopId, visit.end - visit.start]));
+    expect(trip.stops.map((stop) => durations.get(stop.id))).toEqual([60, 54]);
+    expect(trip).toEqual(original);
+    const short = { ...trip, dailyEnd: "09:20", stops: [{ ...newStop("Small visit"), duration: 15, durationOptions: [15, 10] }] };
+    const shortEdges = routes(short, 5);
+    const fitted = await solveWithDurationRelaxation(short, shortEdges, 3, (candidate, seconds) => solveTrip(candidate, shortEdges, seconds));
+    expect(validateSchedule(short, fitted)).toEqual([]);
+    expect(fitted.days[0].visits[0].end - fitted.days[0].visits[0].start).toBe(10);
+  });
+  it("does not shorten visits to conceal route gaps or incomplete search", async () => {
+    const trip = { ...fixture(), stops: [{ ...newStop("Cafe"), duration: 60, durationOptions: [60, 54, 48] }] };
+    const solve = vi.fn().mockRejectedValue(new PlanningError("Search incomplete."));
+    await expect(solveWithDurationRelaxation(trip, [], 3, solve)).rejects.toThrow("Route coverage is incomplete");
+    expect(solve).not.toHaveBeenCalled();
+    await expect(solveWithDurationRelaxation(trip, routes(trip), 3, solve)).rejects.toThrow("Search incomplete");
+    expect(solve).toHaveBeenCalledTimes(1);
+    expect(solve.mock.calls[0][0].stops[0].duration).toBe(60);
+  });
+  it.each(["optimized", "feasibility-first"] as const)("validates %s incumbents and retains optional-visit rewards", async (strategy) => {
+    const trip = fixture();
+    trip.stops[1].optional = true;
+    const stages: SolverStage[] = [];
+    const schedule = await solveTrip(trip, routes(trip), 2, { strategy, onStage: (stage) => stages.push(stage) });
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([]);
+    expect(stages.map((stage) => stage.stage)).toEqual(strategy === "optimized" ? ["optimization"] : ["feasibility", "optimization"]);
+    expect(stages.every((stage) => stage.outcome === "feasible" && stage.columns !== null && stage.columns > 0 && stage.elapsedMs >= 0)).toBe(true);
+  });
+  it.each(["departure", "return"])("identifies missing hotel %s routes instead of asking to change bookings", async (direction) => {
+    const trip = fixture();
+    trip.days = 1;
+    trip.stops = trip.stops.map((stop) => ({ ...stop, day: 0, fixedTime: null }));
+    await expect(solveTrip(trip, routes(trip).filter((edge) => (direction === "departure" ? edge.from : edge.to) !== "hotel"))).rejects.toThrow(direction === "departure" ? "Day 1: no allowed sampled route connects the hotel to the required visits" : "Day 1: no allowed sampled route connects the required visits back to the hotel");
+  });
+  it("names disconnected required flexible visits but permits explicit optional omissions", async () => {
+    const trip = fixture();
+    const isolated = trip.stops[1];
+    const edges = routes(trip).filter((edge) => edge.from !== isolated.id && edge.to !== isolated.id);
+    await expect(solveTrip(trip, edges)).rejects.toThrow(`Any available day: ${isolated.name} has no allowed sampled connection`);
+    isolated.optional = true;
+    const schedule = await solveTrip(trip, edges);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([isolated.id]);
+  });
+  it("does not count paths through visits assigned to another day as hotel connections", async () => {
+    const trip = fixture();
+    trip.stops = trip.stops.map((stop, index) => ({ ...stop, fixedTime: null, day: index === 0 ? 0 : 1 }));
+    const edges = routes(trip).filter((edge) => edge.day !== 0 || edge.from !== "hotel" || edge.to !== trip.stops[0].id);
+    await expect(solveTrip(trip, edges)).rejects.toThrow("Day 1: no allowed sampled route connects the hotel to the required visits");
+  });
+  it("identifies conflicting visits by ID and recalculates after an explicit release", () => {
+    const trip = fixture();
+    trip.stops = [
+      { ...newStop("Same name"), day: 0, fixedTime: "10:00" },
+      { ...newStop("Same name"), day: 0, fixedTime: "10:20" },
+      { ...newStop("Later visit"), day: 0, fixedTime: "10:40" },
+      { ...newStop("Early visit"), day: 1, fixedTime: "08:30" },
+    ];
+    const details = bookingConflictDetails(trip);
+    expect(details.map((issue) => issue.stopIds)).toEqual([
+      [trip.stops[0].id, trip.stops[1].id], [trip.stops[1].id, trip.stops[2].id], [trip.stops[3].id],
+    ]);
+    expect(details.map((issue) => issue.message)).toEqual(bookingConflicts(trip));
+    const changed = resolvePlanningConstraints(trip, { keepTimeIds: [trip.stops[0].id, trip.stops[2].id], movableDayIds: [], optionalIds: [] });
+    expect(bookingConflictDetails(changed).map((issue) => issue.stopIds)).toEqual([[trip.stops[0].id, trip.stops[2].id]]);
+    expect(bookingConflictDetails(resolvePlanningConstraints(trip, { keepTimeIds: [], movableDayIds: [], optionalIds: [] }))).toEqual([]);
+    expect(trip.stops.every((stop) => stop.fixedTime)).toBe(true);
+  });
+  it.each([0, 10, 20] as const)("reduces flexible durations by at most %i percent without changing locked reservations or omitting visits", (durationReductionPercent) => {
+    const trip = fixture();
+    trip.stops.push({ ...newStop("Short visit"), duration: 5, day: 0 });
+    const original = structuredClone(trip);
+    const choices = { keepTimeIds: [trip.stops[0].id], movableDayIds: trip.stops.slice(1).map((stop) => stop.id), optionalIds: [], durationReductionPercent };
+    const candidate = resolvePlanningConstraints(trip, choices);
+    expect(candidate.stops[0]).toEqual(trip.stops[0]);
+    candidate.stops.slice(1).forEach((stop, index) => {
+      const before = trip.stops[index + 1];
+      expect(stop).toEqual({ ...before, day: null, fixedTime: null, duration: Math.max(5, Math.ceil(before.duration * (100 - durationReductionPercent) / 100)) });
+      expect(stop.duration).toBeGreaterThanOrEqual(before.duration * (100 - durationReductionPercent) / 100);
+      expect(stop.optional).toBe(false);
+    });
+    expect(resolvePlanningConstraints(trip, { ...choices, durationReductionPercent: 0 }).stops.map((stop) => stop.duration)).toEqual(trip.stops.map((stop) => stop.duration));
+    expect(trip).toEqual(original);
+  });
+  it("releases only approved constraints without changing the original trip", () => {
+    const trip = fixture();
+    const original = structuredClone(trip);
+    const keepTimeIds = trip.stops.filter((stop) => stop.fixedTime).map((stop) => stop.id);
+    expect(resolvePlanningConstraints(trip, { keepTimeIds, movableDayIds: [], optionalIds: [] })).toEqual(trip);
+    const candidate = resolvePlanningConstraints(trip, { keepTimeIds: [trip.stops[2].id], movableDayIds: [], optionalIds: [] });
+    expect(candidate.stops[0]).toEqual({ ...trip.stops[0], fixedTime: null });
+    expect(candidate.stops[2]).toEqual(trip.stops[2]);
+    const relaxed = resolvePlanningConstraints(trip, { keepTimeIds: [trip.stops[2].id], movableDayIds: [trip.stops[0].id], optionalIds: [trip.stops[0].id] });
+    expect(relaxed.stops[0]).toEqual({ ...trip.stops[0], fixedTime: null, day: null, optional: true });
+    expect(trip).toEqual(original);
+    expect(() => resolvePlanningConstraints(trip, { keepTimeIds, movableDayIds: [trip.stops[0].id], optionalIds: [] })).toThrow("fixed reservation");
+    expect(() => resolvePlanningConstraints(trip, { keepTimeIds, movableDayIds: [], optionalIds: [trip.stops[0].id] })).toThrow("fixed reservation");
+    expect(() => resolvePlanningConstraints(trip, { keepTimeIds, movableDayIds: ["missing"], optionalIds: [] })).toThrow("no longer in this trip");
+  });
+  it("names bookings whose visit and buffer leave no time for sampled travel", async () => {
+    const trip = { ...fixture(), days: 1, dailyStart: "08:00", dailyEnd: "21:00", stops: [
+      { ...newStop("DAK Showroom"), day: 0, fixedTime: "08:30" },
+      { ...newStop("Vondelpark"), day: 0, fixedTime: "09:30" },
+    ] };
+    expect(bookingConflicts(trip)).toEqual([]);
+    const error = await solveTrip(trip, routes(trip, 5)).catch((cause: Error) => cause);
+    expect(error).toMatchObject({ reason: "conflict", detailed: false });
+    expect((error as Error).message).toContain("DAK Showroom (08:30) to Vondelpark (09:30) leaves 0 min for travel; sampled routes need at least 5 min");
+  });
+  it("explains sampled hotel departure and return shortfalls", async () => {
+    const trip = { ...fixture(), days: 1, stops: [{ ...newStop("Museum"), day: 0, fixedTime: "09:05", duration: 5, buffer: 0 }] };
+    await expect(solveTrip(trip, routes(trip, 10))).rejects.toThrow("hotel start (09:00) to Museum (09:05) leaves 5 min for travel; sampled routes need at least 10 min");
+    trip.stops[0].fixedTime = "17:55";
+    await expect(solveTrip(trip, routes(trip, 10))).rejects.toThrow("Museum (17:55) to hotel return (18:00) leaves 0 min for travel; sampled routes need at least 10 min");
+    trip.returnToHotel = false;
+    expect(validateSchedule(trip, await solveTrip(trip, routes(trip, 10)))).toEqual([]);
+  });
+  it("suggests the nearest same-day gap without changing any bookings", () => {
+    const trip = fixture();
+    trip.dailyStart = "09:00";
+    trip.dailyEnd = "18:00";
+    trip.stops = [
+      { ...newStop("Sango Specialty Coffee"), day: 0, fixedTime: "14:45" },
+      { ...newStop("Sango"), day: 0, fixedTime: "15:13" },
+      { ...newStop("Canal cruise"), day: 0, fixedTime: "17:00" },
+    ];
+    const before = structuredClone(trip);
+    expect(bookingTimeSuggestion(trip, trip.stops[0].id)).toBe("14:13");
+    expect(bookingTimeSuggestion(trip, trip.stops[1].id)).toBe("15:45");
+    expect(bookingTimeSuggestion(trip, trip.stops[2].id)).toBeNull();
+    expect(trip).toEqual(before);
+    trip.stops[1].fixedTime = "15:45";
+    expect(bookingConflicts(trip)).toEqual([]);
+    expect(bookingTimeSuggestion(trip, trip.stops[1].id)).toBeNull();
+  });
+  it("does not suggest a slot that overruns the day or another booking's arrival buffer", () => {
+    const trip = fixture();
+    trip.dailyStart = "09:00";
+    trip.dailyEnd = "11:00";
+    trip.stops = [
+      { ...newStop("First"), day: 0, fixedTime: "09:15", duration: 45 },
+      { ...newStop("Second"), day: 0, fixedTime: "10:15", duration: 45 },
+      { ...newStop("Overlapping"), day: 0, fixedTime: "10:00", duration: 15 },
+    ];
+    expect(bookingTimeSuggestion(trip, trip.stops[2].id)).toBeNull();
+    trip.dailyEnd = "11:30";
+    expect(bookingTimeSuggestion(trip, trip.stops[2].id)).toBe("11:15");
+    trip.stops[2].fixedTime = null;
+    expect(bookingTimeSuggestion(trip, trip.stops[2].id)).toBeNull();
+    expect(bookingTimeSuggestion(trip, "missing")).toBeNull();
+  });
+  it("does not blame valid bookings when an intermediate route is faster", async () => {
+    const trip = fixture();
+    trip.days = 1;
+    trip.stops = [
+      { ...newStop("First"), day: 0, fixedTime: "10:00", duration: 5, buffer: 0 },
+      { ...newStop("Intermediate"), duration: 5, buffer: 0 },
+      { ...newStop("Second"), day: 0, fixedTime: "10:20", duration: 5, buffer: 0 },
+    ];
+    const [first, middle, last] = trip.stops;
+    const leg = (from: string, to: string, minutes: number): TravelEdge => ({ day: 0, from, to, minutes, meters: 500, mode: "TRANSIT" });
+    const edges = [leg("hotel", first.id, 5), leg(first.id, middle.id, 5), leg(middle.id, last.id, 5), leg(first.id, last.id, 60), leg(last.id, "hotel", 5)];
+    expect(validateSchedule(trip, await solveTrip(trip, edges))).toEqual([]);
+    expect(bookingConflicts(trip)).toEqual([]);
+    trip.stops.push(newStop("Unreachable"));
+    await expect(solveTrip(trip, edges)).rejects.toMatchObject({ detailed: false });
+  });
   it("honors trip transport defaults, explicit overrides and hotel return", async () => {
     const trip = fixture();
     trip.planning = { ...planningPreferences(trip), mode: "TRANSIT" };

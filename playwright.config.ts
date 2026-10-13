@@ -14,12 +14,12 @@ export default defineConfig({
     { name: "mobile", use: { browserName: "chromium", viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
   ],
   webServer: {
-    command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
+    command: `node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 --port ${port}`,
     url: baseURL,
     reuseExistingServer: false,
     env: {
       PLAYWRIGHT_TEST: "1", DATABASE_URL: "", AUTH_SECRET: "", AUTH_GOOGLE_ID: "", AUTH_GOOGLE_SECRET: "", ALLOWED_EMAILS: "", AUTH_URL: baseURL,
-      GOOGLE_MAPS_API_KEY: "", NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: "", GOOGLE_GENERATIVE_AI_API_KEY: "",
+      GOOGLE_MAPS_API_KEY: "", NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: "", GOOGLE_GENERATIVE_AI_API_KEY: "", OPENROUTER_API_KEY: "", OPENROUTER_MODEL: "", GEMINI_MODEL: "",
     },
   },
 });

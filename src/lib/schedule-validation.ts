@@ -1,6 +1,8 @@
-import { allowsTravelEdge, minuteAt, planningPreferences, tripDate, type Schedule, type Trip } from "./trip";
+import { allowsTravelEdge, groupAllowedDays, minuteAt, planningPreferences, tripDate, type Schedule, type Trip } from "./trip";
 
-export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
+export type ScheduleBoundary = { startId: string; startMinute: number };
+
+export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: ScheduleBoundary): string[] {
   const errors: string[] = [];
   const seen = new Set<string>();
   const seenDays = new Set<number>();
@@ -13,8 +15,8 @@ export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
     seenDays.add(day.day);
     if (day.visits.length > planningPreferences(trip).maxStopsPerDay) errors.push(`Day ${day.day + 1}: too many places.`);
     if (day.date !== tripDate(trip, day.day)) errors.push("A sightseeing date changed.");
-    let previousEnd = minuteAt(trip, day.day, trip.dailyStart);
-    let previousId = "hotel";
+    let previousEnd = boundary?.startMinute ?? minuteAt(trip, day.day, trip.dailyStart);
+    let previousId = boundary?.startId ?? "hotel";
     const dayEnd = minuteAt(trip, day.day, trip.dailyEnd);
     for (const visit of day.visits) {
       const stop = stops.get(visit.stopId);
@@ -31,17 +33,25 @@ export function validateSchedule(trip: Trip, schedule: Schedule): string[] {
       const buffer = stop.fixedTime ? stop.buffer : 0;
       if (visit.start + 0.01 < previousEnd + duration + buffer) errors.push(`${stop.name}: not enough time to arrive.`);
       if (stop.fixedTime && Math.abs(visit.start - minuteAt(trip, day.day, stop.fixedTime)) > 0.01) errors.push(`${stop.name}: booking time changed.`);
-      if (Math.abs(visit.end - visit.start - stop.duration) > 0.01) errors.push(`${stop.name}: visit duration changed.`);
+      if (!(stop.fixedTime ? [stop.duration] : stop.durationOptions ?? [stop.duration]).some((allowed) => Math.abs(visit.end - visit.start - allowed) <= 0.01)) errors.push(`${stop.name}: visit duration changed beyond the approved choices.`);
       if (visit.end > dayEnd + 0.01) errors.push(`${stop.name}: outside sightseeing hours.`);
       previousEnd = visit.end;
       previousId = stop.id;
     }
-    if (day.visits.length && trip.returnToHotel) {
+    if ((day.visits.length || boundary) && trip.returnToHotel) {
       const leg = day.returnLeg;
       if (!leg || leg.from !== previousId || leg.to !== "hotel" || leg.day !== day.day || !Number.isFinite(leg.minutes) || leg.minutes < 0 || previousEnd + leg.minutes > dayEnd + 0.01) {
         errors.push(`Day ${day.day + 1}: no timely return to the hotel.`);
       }
       if (leg && !allowsTravelEdge(trip, leg)) errors.push(`Day ${day.day + 1}: hotel return violates transport preferences.`);
+    }
+  }
+  for (const group of trip.dayGroups ?? []) {
+    const days = schedule.days.filter((day) => day.visits.some((visit) => group.stopIds.includes(visit.stopId)));
+    if (days.length > 1) errors.push(`${group.name}: grouped visits must stay on one day.`);
+    for (const day of days) {
+      if (!groupAllowedDays(trip, group).includes(day.day)) errors.push(`${group.name}: group is outside its allowed days.`);
+      if (group.exclusive && day.visits.some((visit) => !group.stopIds.includes(visit.stopId))) errors.push(`${group.name}: this day is reserved for the group.`);
     }
   }
   if (seenDays.size !== trip.days) errors.push("Missing sightseeing day.");

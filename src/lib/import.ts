@@ -1,6 +1,11 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { newStop, sourceUrlSchema, timeSchema, type Stop, type Trip } from "./trip";
+import { newStop, sourceUrlSchema, stopSchema, timeSchema, tripDate, type Stop, type Trip } from "./trip";
+import { duplicateNames } from "./duplicates";
+
+export const extractionProviderSchema = z.object({ provider: z.enum(["gemini", "openrouter"]), model: z.string().min(1).max(200) }).strict();
+export type ExtractionProvider = z.infer<typeof extractionProviderSchema>;
+export type ExtractionServices = { standard: ExtractionProvider | null; youtube: ExtractionProvider | null };
 
 export const candidateSchema = z.object({
   name: z.string().min(1).max(200),
@@ -27,12 +32,11 @@ export function youtubeUrl(value: string): string | null {
 }
 
 export function duplicateCandidateIndexes(candidates: ImportCandidate[], stops: Stop[]): Set<number> {
-  const seen = new Set(stops.map((stop) => normalizeName(stop.name)));
+  const seen = stops.map((stop) => stop.name);
   const duplicates = new Set<number>();
   candidates.forEach((candidate, index) => {
-    const name = normalizeName(candidate.name);
-    if (seen.has(name)) duplicates.add(index);
-    seen.add(name);
+    if (seen.some((name) => duplicateNames(name, candidate.name))) duplicates.add(index);
+    seen.push(candidate.name);
   });
   return duplicates;
 }
@@ -41,35 +45,59 @@ function normalizeName(name: string) {
   return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-// Skipped duplicates fill in dates, times and durations that the matching stop or earlier candidate still has at defaults.
 export function mergeDuplicateDetails(entries: { place: ImportCandidate; included: boolean }[], stops: Stop[], trip: Trip) {
   let merged = 0;
   const nextStops = stops.map((stop) => ({ ...stop }));
   const nextEntries = entries.map((entry) => ({ ...entry, place: { ...entry.place } }));
+  const changes: string[] = [];
+  const issues: string[] = [];
   nextEntries.forEach((entry, index) => {
     if (entry.included) return;
-    const source = entry.place;
-    const name = normalizeName(source.name);
-    const day = source.date ? Temporal.PlainDate.from(trip.startDate).until(Temporal.PlainDate.from(source.date)).days : null;
-    const validDay = day !== null && day >= 0 && day < trip.days ? day : null;
-    const stop = nextStops.find((candidate) => normalizeName(candidate.name) === name);
-    if (stop) {
-      const before = JSON.stringify(stop);
-      if (validDay !== null && stop.day === null) stop.day = validDay;
-      if (source.time && !stop.fixedTime && stop.day !== null && (validDay === null || stop.day === validDay)) { stop.fixedTime = source.time; stop.optional = false; }
-      if (source.duration && stop.duration === newStop().duration) stop.duration = source.duration;
-      if (JSON.stringify(stop) !== before) merged++;
-      return;
+    const name = normalizeName(entry.place.name);
+    const matches = nextStops.filter((candidate) => normalizeName(candidate.name) === name);
+    const candidates = nextEntries.filter((other, otherIndex) => otherIndex < index && other.included && normalizeName(other.place.name) === name);
+    const target = candidates[0]?.place;
+    if (!matches.length && !target) return;
+    const parsed = importResultSchema.shape.places.element.safeParse(entry.place);
+    if (!parsed.success) { issues.push(`${entry.place.name}: invalid duplicate details; no updates proposed.`); return; }
+    const source = parsed.data;
+    if (matches.length + candidates.length > 1) { issues.push(`${source.name}: multiple existing visits match; edit the intended visit directly.`); return; }
+    let day: number | null = null;
+    try { day = source.date ? Temporal.PlainDate.from(trip.startDate).until(Temporal.PlainDate.from(source.date)).days : null; }
+    catch { issues.push(`${source.name}: invalid trip or visit date; no updates proposed.`); return; }
+    if (day !== null && (day < 0 || day >= trip.days)) { issues.push(`${source.name}: duplicate date is outside this trip; no updates proposed.`); return; }
+    if (source.time && day === null) { issues.push(`${source.name}: a booked time needs its own date; no updates proposed.`); return; }
+    const stop = matches[0] ? { ...matches[0] } : undefined;
+    if (stop && !stopSchema.safeParse(stop).success) { issues.push(`${source.name}: fix the existing visit before merging details.`); return; }
+    const existingDate = stop ? stop.day === null ? null : tripDate(trip, stop.day) : target?.date;
+    const existingTime = stop ? stop.fixedTime : target?.time;
+    if ((existingDate && source.date && existingDate !== source.date) || (existingTime && source.time && existingTime !== source.time)) {
+      issues.push(`${source.name}: dates or booking times conflict; keep these as separate visits or edit them directly.`); return;
     }
-    const target = nextEntries.find((other, otherIndex) => otherIndex < index && other.included && normalizeName(other.place.name) === name)?.place;
-    if (!target) return;
-    const before = JSON.stringify(target);
-    if (source.date && !target.date) target.date = source.date;
-    if (source.time && !target.time && target.date && target.date === source.date) target.time = source.time;
-    if (source.duration && !target.duration) target.duration = source.duration;
-    if (JSON.stringify(target) !== before) merged++;
+    const details: string[] = [];
+    const recipient = stop ?? target!;
+    const evidence = [...new Set([recipient.source, source.source, recipient.sourceUrl && source.sourceUrl !== recipient.sourceUrl ? source.sourceUrl : ""].filter(Boolean))].join("\n");
+    if (evidence.length > 1000) { issues.push(`${source.name}: combined source evidence is too long; edit the visit directly.`); return; }
+    if (stop) {
+      if (day !== null && stop.day === null) { stop.day = day; details.push(`day: unassigned -> ${source.date}`); }
+      if (source.time && !stop.fixedTime && stop.day === day) {
+        stop.fixedTime = source.time; details.push(`booking: none -> ${source.time}`);
+        if (stop.optional) details.push("optional -> required");
+        stop.optional = false;
+      }
+    } else if (target) {
+      if (source.date && !target.date) { target.date = source.date; details.push(`date: none -> ${source.date}`); }
+      if (source.time && !target.time) { target.time = source.time; details.push(`booking: none -> ${source.time}`); }
+      if (source.duration && target.duration === null) { target.duration = source.duration; details.push(`duration: unspecified -> ${source.duration} min`); }
+    }
+    if (details.length) {
+      recipient.source = evidence;
+      if (!recipient.sourceUrl && source.sourceUrl) recipient.sourceUrl = source.sourceUrl;
+      if (stop) Object.assign(matches[0], stopSchema.parse(stop));
+      merged++; changes.push(`${source.name}: ${details.join("; ")}`);
+    }
   });
-  return { entries: nextEntries, stops: nextStops, merged };
+  return { entries: nextEntries, stops: nextStops, merged, changes, issues };
 }
 
 export function manualCandidates(text: string): ImportCandidate[] {

@@ -114,6 +114,10 @@ summary::-webkit-details-marker { display: none; }
 .dot-separator { padding: 0 3px; }
 .booking-icon { color: var(--amber); }
 .confirmed-icon { color: var(--green); }
+.unconfirmed-icon { color: var(--amber); }
+.stop-statuses { display: grid; grid-template-columns: repeat(2, 16px); gap: 6px; align-items: center; flex-shrink: 0; }
+.booking-status { display: inline-flex; grid-column: 1; }
+.location-status { display: inline-flex; grid-column: 2; }
 .unconfirmed-dot { width: 6px; height: 6px; border-radius: 50%; background: #c4cbbf; flex-shrink: 0; }
 .stop-details { display: grid; gap: 12px; padding: 1px 13px 12px; }
 .stop-detail-actions { display: flex; align-items: center; justify-content: space-between; padding-top: 4px; border-top: 1px solid var(--line); }
@@ -174,6 +178,17 @@ summary::-webkit-details-marker { display: none; }
 .dialog { border: 1px solid var(--line); border-radius: 8px; padding: 25px; color: var(--ink); width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 50px); overflow: auto; box-shadow: 0 14px 70px #1a2b2630; }
 .dialog::backdrop { background: #1e2b2855; backdrop-filter: blur(2px); }
 .planning-dialog { width: min(800px, calc(100vw - 32px)); }
+.today-summary { padding-bottom: 15px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+.recovery-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 12px 0; }
+.recovery-fact { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; overflow-wrap: anywhere; }
+.recovery-fact svg { flex: 0 0 14px; }
+.recovery-permissions { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+.recovery-permissions .field { max-width: 350px; }
+.recovery-dialog .field, .recovery-dialog .checkbox { min-width: 0; overflow-wrap: anywhere; }
+.recovery-dialog input[type="radio"] { width: 16px; height: 16px; min-height: 16px; flex: 0 0 16px; accent-color: var(--green); }
+.recovery-option { margin-top: 24px; }
+.recovery-option li { font-size: 13px; margin: 8px 0; overflow-wrap: anywhere; }
+.current-marker { display: grid; place-items: center; width: 35px; height: 35px; color: #fff; background: #287aab; border: 3px solid #fff; border-radius: 50%; box-shadow: 0 2px 7px #0003; }
 .planning-context { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 12px; margin: -7px 0 20px; }
 .planning-context span, .planning-progress { display: flex; align-items: center; gap: 6px; }
 .segmented.planning-stages { display: flex; width: 100%; }
@@ -186,6 +201,13 @@ summary::-webkit-details-marker { display: none; }
 .planning-visit:last-child { border-bottom: 0; padding-bottom: 0; }
 .planning-visit-heading, .planning-visit-options { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 18px; }
 .planning-visit-heading strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.resolution-connections { list-style: none; padding: 0; display: grid; gap: 10px; }
+.resolution-connections li { display: grid; gap: 5px; margin: 0; overflow-wrap: anywhere; }
+.resolution-release { max-width: 100%; text-align: left; white-space: normal; }
+.resolution-release span { min-width: 0; overflow-wrap: anywhere; }
+.resolution-comparison { display: grid; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr); align-items: center; gap: 12px; font-size: 12px; overflow-wrap: anywhere; }
+.resolution-comparison small { display: block; color: var(--muted); margin-bottom: 4px; }
+.resolution-durations { max-width: 100%; flex-wrap: wrap; }
 .booking-time { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); font-size: 11px; }
 .planning-actions { position: sticky; bottom: -25px; background: var(--paper); padding: 14px 0; border-top: 1px solid var(--line); }
 .planning-progress { font-size: 12px; color: var(--green); }
@@ -202,6 +224,9 @@ summary::-webkit-details-marker { display: none; }
 .plan-preview-day { border-bottom: 1px solid var(--line); padding: 10px 0 16px; margin-bottom: 12px; }
 .plan-preview-day ol { list-style: none; padding: 0; margin: 12px 0; }
 .plan-preview-day li { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 12px; padding: 11px 0; }
+.provisional-stop-list { list-style: none; padding: 0; margin: 12px 0; }
+.plan-preview-day .provisional-stop-list li { grid-template-columns: minmax(0, 1fr) auto; padding: 8px 0; }
+.provisional-stop-list li > span { min-width: 0; overflow-wrap: anywhere; }
 .preview-time { font-size: 12px; color: var(--green); font-variant-numeric: tabular-nums; }
 .plan-preview-day li strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 .plan-preview-day li small { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--muted); margin-top: 3px; }
@@ -223,6 +248,16 @@ summary::-webkit-details-marker { display: none; }
 .image-previews img { object-fit: contain; background: #f2f5ee; border: 1px solid var(--line); border-radius: 4px; max-width: 100%; }
 .image-previews figcaption { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 10px; overflow-wrap: anywhere; }
 .review-item { padding: 0 0 17px; margin-bottom: 17px; border-bottom: 1px solid var(--line); display: grid; gap: 11px; }
+.duplicate-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; border: 0; padding: 0; margin: 18px 0; min-width: 0; }
+.duplicate-options legend { padding: 0; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
+.duplicate-option { display: grid; align-content: start; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
+.duplicate-option .checkbox { align-items: flex-start; }
+.duplicate-option input[type="radio"] { width: 16px; height: 16px; min-height: 0; flex: 0 0 16px; margin: 2px 0 0; padding: 0; accent-color: var(--green); }
+.duplicate-option .checkbox strong { min-width: 0; flex: 1; font-size: 13px; font-weight: 500; }
+.duplicate-option dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; font-size: 12px; margin: 0; }
+.duplicate-option dt { color: var(--muted); }
+.duplicate-option dd { margin: 0; }
+@media (max-width: 600px) { .duplicate-options { grid-template-columns: minmax(0, 1fr); } }
 .import-inputs { border: 0; padding: 0; margin: 0; min-width: 0; }
 .import-formats { width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .import-formats button { justify-content: center; padding: 7px 6px; }

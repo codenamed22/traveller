@@ -38,7 +38,7 @@ export async function readJson(request: Request, maxBytes = 3_500_000): Promise<
 }
 
 export async function reserveUsage(owner: string, units: number, operationId?: string) {
-  if (!process.env.DATABASE_URL) throw new HttpError(503, "Connect Neon before using paid services.");
+  if (!process.env.DATABASE_URL) throw new HttpError(503, "Paid services are unavailable. Check your connections.");
   const db = database();
   if (operationId) {
     z.uuid().parse(operationId);
@@ -60,5 +60,5 @@ export function apiError(error: unknown) {
   if (error instanceof HttpError) return Response.json({ error: error.message }, { status: error.status });
   if (error instanceof ZodError) return Response.json({ error: error.issues[0]?.message ?? "Invalid input." }, { status: 400 });
   console.error("Traveller request failed", error instanceof Error ? error.name : "UnknownError");
-  return Response.json({ error: "The service could not complete this request. Check configuration or try again." }, { status: 502 });
+  return Response.json({ error: "Could not complete the request. Try again." }, { status: 502 });
 }

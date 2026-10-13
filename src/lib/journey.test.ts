@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { asJourney, cityPreset, createJourney, journeySchema, restoreJourney, stayDates, type CityStay } from "./journey";
-import { newStop, newTrip } from "./trip";
+import { newStop, newTrip, persistedPlan, type Schedule } from "./trip";
+import { applyDayRecovery, newDayProgress } from "./day-recovery";
 
 const stays: CityStay[] = [
   { city: "Paris, France", timeZone: "Europe/Paris", startDate: null, days: 3 },
@@ -9,6 +10,31 @@ const stays: CityStay[] = [
 ];
 
 describe("multi-city journeys", () => {
+  it("round-trips accepted timings, complete routes and places through saves and backups", () => {
+    const stop = newStop("Museum");
+    const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: [stop] };
+    const leg = { day: 0, from: "hotel", to: stop.id, mode: "TRANSIT" as const, minutes: 15, meters: 1800,
+      polyline: "encoded-route", fare: "EUR 2.50", sampledDeparture: 540, estimated: true, timetableDate: "2026-10-12",
+      steps: [{ instruction: "Take the metro", mode: "TRANSIT", line: "M1", from: "Hotel station", to: "Museum station", departure: "09:00", arrival: "09:15" }],
+      alternatives: [{ day: 0, from: "hotel", to: stop.id, mode: "WALK" as const, minutes: 25, meters: 1400 }] };
+    const schedule: Schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: ["Estimated future transit"], omitted: [],
+      days: [{ day: 0, date: trip.startDate, visits: [{ stopId: stop.id, start: 555, end: 600, leg }], returnLeg: { ...leg, from: stop.id, to: "hotel" } }] };
+    const places = { hotel: { id: "hotel-place", name: "Hotel", address: "Paris", location: { lat: 48.85, lng: 2.35 } } };
+    const plan = persistedPlan(schedule, trip, places);
+    const journey = journeySchema.parse(JSON.parse(JSON.stringify(asJourney(trip, plan))));
+    expect(journey.plans[trip.id].snapshot).toEqual({ trip, schedule, places });
+    const progress = applyDayRecovery(newDayProgress(trip, 0, [stop.id]), { label: "Checked", day: schedule.days[0], durations: { [stop.id]: 45 }, skipped: [] },
+      { trip, day: schedule.days[0], places, checkedAt: schedule.generatedAt, departureAt: schedule.generatedAt, origin: { id: "hotel" } });
+    const withRecovery = journeySchema.parse(JSON.parse(JSON.stringify({ ...journey, execution: { [trip.id]: { [trip.startDate]: progress } } })));
+    expect(withRecovery.execution![trip.id][trip.startDate].remaining!.snapshot!.day).toEqual(schedule.days[0]);
+    const nextRecovery = applyDayRecovery(progress, { label: "Second", day: schedule.days[0], durations: { [stop.id]: 45 }, skipped: [] });
+    expect(nextRecovery.previousRemaining!.snapshot).toEqual(progress.remaining!.snapshot);
+    expect(restoreJourney({ journey }).plans[trip.id]).toEqual(plan);
+    expect(restoreJourney({ trip, plan }).plans[trip.id]).toEqual(plan);
+    expect(journeySchema.safeParse({ ...journey, plans: { [trip.id]: { ...plan, days: [] } } }).success).toBe(false);
+    expect(journeySchema.safeParse({ ...journey, plans: { [trip.id]: { ...plan, snapshot: { ...plan.snapshot, trip: { ...trip, id: crypto.randomUUID() } } } } }).success).toBe(false);
+    expect(journeySchema.safeParse({ ...journey, plans: { [trip.id]: { ...plan, snapshot: { ...plan.snapshot, schedule: { ...schedule, generatedAt: "invalid" } } } } }).success).toBe(false);
+  });
   it("finds presets without requiring exact capitalization or country", () => {
     expect(cityPreset(" paris ")?.timeZone).toBe("Europe/Paris");
     expect(cityPreset("Amsterdam, Netherlands")?.days).toBe(3);

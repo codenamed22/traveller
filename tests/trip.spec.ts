@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { newStop, newTrip, tripDate, type Trip, type PlanResult } from "../src/lib/trip";
+import { newStop, newTrip, persistedPlan, tripDate, type Trip, type PlanResult } from "../src/lib/trip";
+import { liveRouteKey, recoveryContext, recoveryMinute, remainingIds, type RecoveryRequest, type RecoveryResult } from "../src/lib/day-recovery";
 
 test("edit bookings, preserve calendar dates, and export a draft", async ({ page }, testInfo) => {
   const errors: string[] = [];
@@ -47,11 +48,101 @@ test("edit bookings, preserve calendar dates, and export a draft", async ({ page
   expect(errors).toEqual([]);
 });
 
+test("map-status icons remain visible independently of booking locks", async ({ page }, testInfo) => {
+  const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: [
+    { ...newStop("Confirmed museum"), placeId: "museum-id" },
+    newStop("Unconfirmed garden"),
+    { ...newStop("Booked theatre"), placeId: "theatre-id", day: 0, fixedTime: "10:00" },
+    { ...newStop("Booked unconfirmed gallery with a long name near the riverside"), day: 0, fixedTime: "12:00" },
+  ] };
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "status-icons.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip })) });
+  const rows = page.locator(".stop-summary");
+  await expect(rows).toHaveCount(4);
+  for (const index of [0, 2]) await expect(rows.nth(index).getByRole("img", { name: "Location confirmed on map", exact: true })).toBeVisible();
+  for (const index of [1, 3]) {
+    await expect(rows.nth(index).getByRole("img", { name: "Location not confirmed on map", exact: true })).toBeVisible();
+    await expect(rows.nth(index).getByTitle("Location not confirmed on map")).toBeVisible();
+    await expect(rows.nth(index).locator(".lucide-map-pin-off")).toBeVisible();
+  }
+  for (const index of [0, 1]) await expect(rows.nth(index).getByRole("img", { name: "Booked appointment" })).toHaveCount(0);
+  for (const index of [2, 3]) await expect(rows.nth(index).getByRole("img", { name: "Booked appointment" })).toBeVisible();
+  await rows.nth(2).click();
+  await page.getByLabel("Place name", { exact: true }).fill("Renamed theatre");
+  await expect(rows.nth(2).getByRole("img", { name: "Location not confirmed on map", exact: true })).toBeVisible();
+  await expect(rows.nth(2).getByRole("img", { name: "Booked appointment" })).toBeVisible();
+  await rows.nth(2).click();
+  for (const row of await rows.all()) expect(await row.evaluate((element) => element.querySelector(".stop-heading")!.getBoundingClientRect().right <= element.querySelector(".stop-statuses")!.getBoundingClientRect().left)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("place-status-icons.png"), fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+for (const duplicate of [{ label: "confirmed", placeId: "sango-place", match: "Same confirmed Google place" }, { label: "unconfirmed", placeId: null, match: "Possible name alias; location needs review" }]) test(`reviews ${duplicate.label} Sango aliases and preserves the chosen booking and both sources`, async ({ page }, testInfo) => {
+  const trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", startDate: "2026-12-24", stops: [
+    { ...newStop("Sango"), placeId: "sango-place", day: 0, fixedTime: "15:13", source: "First itinerary" },
+    { ...newStop("Sango Specialty Coffee"), placeId: duplicate.placeId, day: 0, fixedTime: "14:45", source: "Second itinerary" },
+  ] };
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "duplicate-places.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip })) });
+  await page.getByRole("button", { name: "Review duplicates (1)", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Review duplicate places" });
+  await expect(dialog.getByText(duplicate.match, { exact: true })).toBeVisible();
+  await expect(dialog.getByText("15:13", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("14:45", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Merge visits" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Keep both visits" }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.locator(".stop-item")).toHaveCount(2);
+  await page.getByRole("button", { name: "Review duplicates (1)", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Keep Sango Specialty Coffee, visit 2", exact: true }).check();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  for (const radio of await dialog.getByRole("radio").all()) {
+    const bounds = await radio.boundingBox();
+    expect(bounds?.width).toBe(16);
+    expect(bounds?.height).toBe(16);
+  }
+  await dialog.getByRole("heading").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("duplicate-comparison.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await expect(page.locator(".stop-item")).toHaveCount(2);
+  await page.getByRole("button", { name: "Review duplicates (1)", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Merge visits" })).toBeDisabled();
+  await dialog.getByRole("radio", { name: "Keep Sango Specialty Coffee, visit 2", exact: true }).check();
+  await dialog.getByRole("button", { name: "Merge visits" }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.locator(".stop-item")).toHaveCount(1);
+  await page.locator(".stop-summary").click();
+  await expect(page.getByLabel("Booked time")).toHaveValue("14:45");
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("merged-duplicate.json");
+  await (await download).saveAs(output);
+  const saved = JSON.parse(await readFile(output, "utf8"));
+  expect(saved.trip.stops).toHaveLength(1);
+  expect(saved.trip.stops[0]).toMatchObject({ id: trip.stops[1].id, placeId: "sango-place", name: "Sango Specialty Coffee", fixedTime: "14:45", day: 0, duration: 45, source: "Second itinerary\nFirst itinerary" });
+  expect(errors).toEqual([]);
+});
+
 test("review pasted places and keep AI off without consent", async ({ page }) => {
   const extractionRequests: string[] = [];
   page.on("request", (request) => { if (request.url().endsWith("/api/import")) extractionRequests.push(request.url()); });
   await page.goto("/");
+  await expect(page).toHaveTitle("Traveller | Trip planner");
+  await expect(page.getByRole("heading", { name: "No places yet", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  const connections = page.getByRole("dialog", { name: "Connections", exact: true });
+  await expect(connections).toContainText("Trip storage");
+  await expect(connections).not.toContainText(/Neon|environment variables|allowlist/);
+  await connections.getByRole("button", { name: "Close dialog", exact: true }).click();
   await page.getByRole("button", { name: "Import", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText("AI import is unavailable.");
   await page.getByLabel("Places or itinerary").fill("Louvre Museum\nLuxembourg Gardens");
   await expect(page.getByRole("button", { name: "Extract itinerary" })).toBeDisabled();
   await page.getByRole("button", { name: "Review place list" }).click();
@@ -64,12 +155,176 @@ test("review pasted places and keep AI off without consent", async ({ page }) =>
 });
 
 test("paid and persistence endpoints reject unauthenticated access", async ({ request }) => {
-  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/timing"]) {
+  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/timing", "/api/day-recovery"]) {
     const response = await request.post(path, { data: {} });
     expect([401, 503]).toContain(response.status());
   }
   const response = await request.get("/api/trips");
   expect([401, 503]).toContain(response.status());
+});
+
+test("recovery records progress, checks a selected route, previews and applies only today's decisions", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-10-13T12:00:00Z") });
+  page.on("dialog", (dialog) => dialog.accept());
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", timeZone: "UTC", days: 2, stops: [
+    { ...newStop("Coffee"), placeId: "coffee-id", day: 0 },
+    { ...newStop("Canal"), placeId: "canal-id", day: 0, duration: 15 },
+    { ...newStop("Riverside sculpture garden and contemporary art pavilion"), placeId: "garden-id", day: 0 },
+    { ...newStop("Booked museum"), placeId: "museum-id", day: 0, fixedTime: "14:00", duration: 60, buffer: 10 },
+    { ...newStop("Tomorrow's park"), placeId: "park-id", day: 1 },
+  ] };
+  const plan = { days: [{ day: 0, stopIds: trip.stops.slice(0, 4).map((stop) => stop.id) }, { day: 1, stopIds: [trip.stops[4].id] }], omitted: [] };
+  const requests: RecoveryRequest[] = [];
+  const selectedLeg = { day: 0, from: "current", to: trip.stops[1].id, mode: "TRANSIT" as const, minutes: 20, meters: 500, polyline: "observed-transit", steps: [{ instruction: "Board tram", mode: "TRANSIT" as const, line: "Tram 2", from: "Coffee", to: "Canal" }] };
+  await page.route("**/api/day-recovery", async (route) => {
+    const body = route.request().postDataJSON() as RecoveryRequest; requests.push(body);
+    const departure = recoveryMinute(body.trip, body.day, body.departureAt);
+    const result: RecoveryResult = body.mode === "route" ? { status: "route-checked", context: recoveryContext(body), departureAt: body.departureAt, checkedAt: "2026-10-13T12:00:00Z", routes: [{ ...selectedLeg, mode: "WALK", minutes: 10, polyline: "observed-walk", steps: [] }, selectedLeg] } : {
+      status: "recovery-checked", context: recoveryContext(body), departureAt: body.departureAt, checkedAt: "2026-10-13T12:00:00Z", options: [{ label: "Shorten Canal and skip garden", durations: { [trip.stops[1].id]: 10, [trip.stops[3].id]: 60 }, skipped: [trip.stops[2].id], day: { day: 0, date: trip.startDate, visits: [
+        { stopId: trip.stops[1].id, start: departure + 20, end: departure + 30, leg: selectedLeg },
+        { stopId: trip.stops[3].id, start: 840, end: 900, leg: { day: 0, from: trip.stops[1].id, to: trip.stops[3].id, mode: "WALK", minutes: 10, meters: 700 } },
+      ], returnLeg: { day: 0, from: trip.stops[3].id, to: "hotel", mode: "TRANSIT", minutes: 20, meters: 2000 } } }],
+    };
+    await route.fulfill({ json: result });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "recovery.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  await page.getByRole("button", { name: "Itinerary", exact: true }).click();
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Today", exact: true });
+  await dialog.getByRole("button", { name: "Done", exact: true }).first().click();
+  await dialog.getByLabel("Actual start", { exact: true }).fill("11:00");
+  await dialog.getByLabel("Actual finish", { exact: true }).fill("12:00");
+  await dialog.getByRole("button", { name: "Confirm completed visit" }).click();
+  await expect(dialog.getByRole("button", { name: "Edit actual times for Coffee", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Edit actual times for Coffee", exact: true }).click();
+  await dialog.getByRole("button", { name: "Confirm completed visit" }).click();
+  await dialog.getByRole("button", { name: "+20 min", exact: true }).click();
+  await dialog.getByLabel("Minimum minutes for Canal", { exact: true }).fill("10");
+  await dialog.getByLabel(`Allow skipping ${trip.stops[2].name}`, { exact: true }).check();
+  expect(requests).toHaveLength(0);
+  await dialog.getByRole("button", { name: "Leave now / Refresh route", exact: true }).click();
+  await dialog.getByRole("radio", { name: /Transit · 20 min/ }).check();
+  await dialog.getByRole("button", { name: "Use this route", exact: true }).nth(1).click();
+  expect(requests).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Keep current plan", exact: true }).click();
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  await expect(dialog.getByText("Selected next route: Canal", { exact: false })).toBeVisible();
+  await dialog.getByLabel("Minimum minutes for Canal", { exact: true }).fill("10");
+  await dialog.getByLabel(`Allow skipping ${trip.stops[2].name}`, { exact: true }).check();
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Use this plan" })).toBeVisible();
+  expect(requests[1].preferredRoute).toEqual({ to: selectedLeg.to, key: liveRouteKey(selectedLeg) });
+  expect(remainingIds(requests[1].stopIds, requests[1].progress)).toEqual(trip.stops.slice(1, 4).map((stop) => stop.id));
+  await expect(dialog.getByText("Shortened from 15 to 10 min", { exact: false })).toBeVisible();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("recovery-preview.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Keep current plan", exact: true }).click();
+  const downloadBackup = async (filename: string) => { const download = page.waitForEvent("download"); await page.getByRole("button", { name: "Download trip backup" }).click(); const output = testInfo.outputPath(filename); await (await download).saveAs(output); return JSON.parse(await readFile(output, "utf8")); };
+  const cancelled = await downloadBackup("cancelled-recovery.json");
+  expect(cancelled.journey.execution[trip.id][trip.startDate].remaining).toBeUndefined();
+  expect(cancelled.journey.execution[trip.id][trip.startDate].completed).toEqual([{ stopId: trip.stops[0].id, start: 660, end: 720 }]);
+  expect(cancelled.plan).toEqual(plan);
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  await dialog.getByLabel("Minimum minutes for Canal", { exact: true }).fill("10");
+  await dialog.getByLabel(`Allow skipping ${trip.stops[2].name}`, { exact: true }).check();
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await dialog.getByRole("button", { name: "Use this plan", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const accepted = await downloadBackup("accepted-recovery.json");
+  expect(accepted.trip.stops).toEqual(trip.stops);
+  expect(accepted.plan).toEqual(plan);
+  const progress = accepted.journey.execution[trip.id][trip.startDate];
+  expect(progress.remaining).toMatchObject({ stopIds: [trip.stops[1].id, trip.stops[3].id], durations: { [trip.stops[1].id]: 10 }, skipped: [trip.stops[2].id] });
+  expect(progress.remaining.snapshot.day.visits[0].leg).toEqual(selectedLeg);
+  expect(progress.remaining.snapshot.origin).toEqual(requests[2].origin);
+  await page.getByRole("button", { name: /Day 2/ }).click();
+  await expect(page.getByRole("button", { name: "Today", exact: true })).toHaveCount(0);
+  await expect(page.locator(".saved-order")).toContainText("Tomorrow's park");
+  await page.reload();
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "restored-recovery.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(accepted)) });
+  await page.getByRole("button", { name: "Itinerary", exact: true }).click();
+  await expect(page.locator(".today-summary")).toContainText("Actual 11:00 - 12:00");
+  await expect(page.locator(".itinerary-stop").first()).toContainText("Canal");
+  await expect(page.locator(".itinerary-stop").first()).toContainText("12:41 - 12:51 · 10 min");
+  await expect(page.getByText("Saved day plan", { exact: false })).toBeVisible();
+  await expect(page.getByText("Not a live travel check.", { exact: false })).toBeVisible();
+  await page.locator(".travel-leg summary").first().click();
+  await expect(page.locator(".leg-details").first()).toContainText("Tram 2 Coffee to Canal");
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  await dialog.getByRole("button", { name: "Undo last change", exact: true }).click();
+  await dialog.getByRole("button", { name: "Keep current plan", exact: true }).click();
+  const undone = await downloadBackup("undone-recovery.json");
+  expect(undone.journey.execution[trip.id][trip.startDate].remaining).toBeUndefined();
+  expect(undone.journey.execution[trip.id][trip.startDate].completed).toEqual(progress.completed);
+  expect(requests).toHaveLength(3);
+  await page.getByLabel("City timezone", { exact: true }).fill("Europe/");
+  await expect(page.locator(".today-summary")).toContainText("Actual 11:00 - 12:00");
+  await page.getByLabel("City timezone", { exact: true }).fill("UTC");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("recovery-restored.png"), fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test("recovery rejects stale approval and requires an explicit fresh replan", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-10-13T12:00:00Z") });
+  const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", hotelPlaceId: "hotel", startDate: "2026-10-13", timeZone: "UTC", stops: [{ ...newStop("Canal"), placeId: "canal" }] };
+  let calls = 0;
+  await page.route("**/api/day-recovery", async (route) => {
+    calls++; const body = route.request().postDataJSON() as RecoveryRequest; const minute = recoveryMinute(trip, 0, body.departureAt);
+    const checkedAt = await page.evaluate(() => new Date().toISOString());
+    await route.fulfill({ json: { status: "recovery-checked", context: recoveryContext(body), checkedAt, departureAt: body.departureAt, options: [{ label: "Keep Canal", durations: { [trip.stops[0].id]: 45 }, skipped: [], day: { day: 0, date: trip.startDate, visits: [{ stopId: trip.stops[0].id, start: minute + 10, end: minute + 55, leg: { day: 0, from: "current", to: trip.stops[0].id, mode: "WALK", minutes: 10, meters: 700 } }], returnLeg: { day: 0, from: trip.stops[0].id, to: "hotel", mode: "WALK", minutes: 10, meters: 700 } } }] } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "stale-recovery.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan: { days: [{ day: 0, stopIds: [trip.stops[0].id] }], omitted: [] } })) });
+  await page.getByRole("button", { name: "Itinerary", exact: true }).click();
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Today", exact: true });
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Use this plan" })).toBeVisible();
+  await page.clock.runFor(180_000);
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("preview is stale");
+  expect(calls).toBe(1);
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(calls).toBe(2);
+});
+
+test("recovery ignores superseded responses and handles denied device location without paid work", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-10-13T12:00:00Z") });
+  await page.addInitScript(() => { navigator.geolocation.getCurrentPosition = (_success, failure) => failure?.({ code: 1, message: "Denied", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }); });
+  const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", hotelPlaceId: "hotel", startDate: "2026-10-13", timeZone: "UTC", stops: [{ ...newStop("Canal"), placeId: "canal" }] };
+  let calls = 0;
+  let release: (() => void) | undefined;
+  await page.route("**/api/day-recovery", async (route) => {
+    calls++; const body = route.request().postDataJSON() as RecoveryRequest;
+    await new Promise<void>((resolve) => { release = resolve; });
+    await route.fulfill({ json: { status: "unresolved", context: recoveryContext(body), checkedAt: body.departureAt, departureAt: body.departureAt, message: "Superseded provider response" } }).catch(() => {});
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "abort-recovery.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan: { days: [{ day: 0, stopIds: [trip.stops[0].id] }], omitted: [] } })) });
+  await page.getByRole("button", { name: "Itinerary", exact: true }).click();
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Today", exact: true });
+  await dialog.getByRole("button", { name: "Use device location", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("denied or unavailable");
+  expect(calls).toBe(0);
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await expect.poll(() => calls).toBe(1);
+  await dialog.getByRole("button", { name: "+10 min", exact: true }).click();
+  release!();
+  await expect(dialog.getByRole("button", { name: "Replan today", exact: true })).toBeEnabled();
+  await expect(dialog.getByText("Superseded provider response")).toHaveCount(0);
+  expect(calls).toBe(1);
+  await dialog.getByRole("button", { name: "Keep current plan", exact: true }).click();
 });
 
 test("reads a PDF locally and previews images without cloud transmission", async ({ page }) => {
@@ -185,6 +440,44 @@ test("import duplicates require explicit approval again after edits", async ({ p
   expect(requests).toEqual([]);
 });
 
+test("duplicate updates require fresh approval and reject invalid details", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await page.getByLabel("Start date").fill("2026-10-12");
+  await page.getByLabel("New place name").fill("Museum");
+  await page.getByRole("button", { name: "Add place", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  await page.getByLabel("Places or itinerary").fill("Museum");
+  await page.getByRole("button", { name: "Review place list" }).click();
+  const review = page.getByRole("dialog", { name: "Review imported places" });
+  await review.getByLabel("Date", { exact: true }).fill("2026-11-01");
+  await review.getByLabel("Booked time").fill("10:00");
+  await expect(review.getByText(/duplicate date is outside/)).toBeVisible();
+  await expect(review.getByLabel("Apply these duplicate updates")).toHaveCount(0);
+  await review.getByLabel("Date", { exact: true }).fill("2026-10-13");
+  await expect(review.getByRole("button", { name: "Confirm 0 places" })).toBeDisabled();
+  const approval = review.getByLabel("Apply these duplicate updates");
+  await approval.check();
+  await review.getByLabel("Visit minutes").fill("-5");
+  await expect(approval).toHaveCount(0);
+  await expect(review.getByText(/invalid duplicate details/)).toBeVisible();
+  await review.getByLabel("Visit minutes").fill("90");
+  await expect(approval).not.toBeChecked();
+  await approval.check();
+  await review.getByLabel("Booked time").fill("10:30");
+  await expect(approval).not.toBeChecked();
+  await approval.check();
+  expect(await review.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("merge-proposal.png"), fullPage: true });
+  await review.getByRole("button", { name: "Update 1 existing place", exact: true }).click();
+  await expect(review).toHaveCount(0);
+  await expect(page.getByLabel("Visit minutes")).toHaveValue("45");
+  await expect(page.getByLabel("Assigned day")).toHaveValue("1");
+  await expect(page.getByLabel("Booked time")).toHaveValue("10:30");
+  expect(errors).toEqual([]);
+});
+
 test("offers YouTube input with separate consent and no hidden document preview", async ({ page }, testInfo) => {
   const requests: string[] = [];
   const errors: string[] = [];
@@ -214,13 +507,13 @@ test("offers YouTube input with separate consent and no hidden document preview"
 
 test("retains source links in backups and allows selection at the trip limit", async ({ page }) => {
   const sourceUrl = "https://www.youtube.com/watch?v=abcdefghijk";
-  const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: Array.from({ length: 24 }, (_, index) => ({ ...newStop(`Place ${index + 1} ${"a".repeat(170)}`), source: "a".repeat(1000), sourceUrl: index === 0 ? sourceUrl : `${sourceUrl}&context=${"a".repeat(2900)}` })) };
+  const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: Array.from({ length: 59 }, (_, index) => ({ ...newStop(`Place ${index + 1} ${"a".repeat(170)}`), source: "a".repeat(1000), sourceUrl: index === 0 ? sourceUrl : `${sourceUrl}&context=${"a".repeat(2900)}` })) };
   const backup = Buffer.from(JSON.stringify({ trip }));
   expect(backup.byteLength).toBeGreaterThan(100_000);
   await page.goto("/");
   await page.getByRole("button", { name: "Connections and settings" }).click();
   await page.getByLabel("Open trip backup").setInputFiles({ name: "ideas.json", mimeType: "application/json", buffer: backup });
-  await expect(page.locator(".stop-item")).toHaveCount(24);
+  await expect(page.locator(".stop-item")).toHaveCount(59);
   await page.locator(".stop-summary").first().click();
   await expect(page.getByRole("link", { name: "Source link" })).toHaveAttribute("href", sourceUrl);
   await expect(page.getByRole("button", { name: "Confirm place on map" })).toBeVisible();
@@ -231,7 +524,7 @@ test("retains source links in backups and allows selection at the trip limit", a
   await page.getByLabel("Select all places").uncheck();
   await page.getByLabel("Include New garden").check();
   await page.getByRole("button", { name: "Confirm 1 place", exact: true }).click();
-  await expect(page.locator(".stop-item")).toHaveCount(25);
+  await expect(page.locator(".stop-item")).toHaveCount(60);
 });
 
 test("quickly creates three cities and keeps hotels and bookings separate through backup restore", async ({ page }, testInfo) => {
@@ -327,19 +620,19 @@ test("hotel search uses the active city and explains missing connections", async
   await page.getByRole("button", { name: "Find hotel on map" }).click();
   const search = page.getByRole("dialog", { name: "Find your hotel" });
   await expect(search.getByLabel("Place or address")).toHaveValue("The Hoxton Paris");
-  await expect(search.getByRole("alert")).toContainText("Google Places server key");
+  await expect(search.getByRole("alert")).toHaveText("Place search is unavailable. Check your sign-in and connections.");
   expect(requests).toEqual([]);
 });
 
-async function openPlanningTrip(page: Page, hotel = "Private hotel") {
+async function openPlanningTrip(page: Page, hotel = "Private hotel", stops?: Trip["stops"]) {
   const trip: Trip = {
     ...newTrip(), city: "Paris", hotel, hotelPlaceId: hotel ? "hotel-id" : null, startDate: "2026-10-12", timeZone: "Europe/Paris", days: 2,
-    stops: [{ ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:30" }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id" }],
+    stops: stops ?? [{ ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:30" }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id" }],
   };
   await page.goto("/");
   await page.getByRole("button", { name: "Connections and settings" }).click();
   await page.getByLabel("Open trip backup").setInputFiles({ name: "planning.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ journey: { id: trip.id, title: trip.title, cities: [trip], plans: {} } })) });
-  await expect(page.locator(".stop-item")).toHaveCount(2);
+  await expect(page.locator(".stop-item")).toHaveCount(trip.stops.length);
   await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
   return trip;
 }
@@ -353,6 +646,525 @@ function previewFixture(trip: Trip): PlanResult {
   });
   return { verified: true, places: {}, schedule: { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: tripDate(trip, 0), visits, returnLeg: { day: 0, from: trip.stops.at(-1)!.id, to: "hotel", mode: "WALK", minutes: 12, meters: 900 } }, { day: 1, date: tripDate(trip, 1), visits: [] }] } };
 }
+
+test("refresh travel times retains saved order and requires approval without optimization", async ({ page }, testInfo) => {
+  page.on("dialog", (dialog) => dialog.accept());
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel", startDate: "2026-10-12", timeZone: "Europe/Paris", days: 2,
+    stops: [{ ...newStop("Booked museum"), placeId: "museum", day: 0, fixedTime: "10:30" }, { ...newStop("Park"), placeId: "park" }] };
+  const original = previewFixture(trip);
+  const plan = persistedPlan(original.schedule, trip, original.places);
+  const requests: { mode: string; plan: unknown; trip: Trip }[] = [];
+  let fail = false;
+  await page.route("**/api/plan", async (route) => {
+    const body = route.request().postDataJSON(); requests.push(body);
+    expect(body.mode).toBe("refresh");
+    if (fail) { await route.fulfill({ status: 422, json: { error: "Refreshed travel does not fit the saved itinerary. Your saved plan was kept." } }); return; }
+    const refreshed = structuredClone(original);
+    refreshed.schedule.generatedAt = "2026-10-13T09:00:00Z";
+    refreshed.schedule.days[0].visits[1].leg.minutes += 20;
+    refreshed.schedule.days[0].visits[1].start += 20; refreshed.schedule.days[0].visits[1].end += 20;
+    await route.fulfill({ json: refreshed });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "refresh.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  const downloadBackup = async (filename: string) => { const download = page.waitForEvent("download"); await page.getByRole("button", { name: "Download trip backup" }).click(); const output = testInfo.outputPath(filename); await (await download).saveAs(output); return JSON.parse(await readFile(output, "utf8")); };
+  await page.getByRole("button", { name: "Refresh travel times", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Refresh travel times", exact: true });
+  await expect(dialog.getByLabel("Refreshed itinerary preview")).toContainText("Park");
+  await expect(dialog.getByRole("button", { name: "Use refreshed times" })).toBeVisible();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("refresh-preview.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Keep saved itinerary" }).click();
+  expect((await downloadBackup("cancelled-refresh.json")).plan).toEqual(plan);
+  fail = true;
+  await page.getByRole("button", { name: "Refresh travel times", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Your saved plan was kept");
+  await expect(dialog.getByRole("button", { name: "Use refreshed times" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Replan itinerary" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep saved itinerary" }).click();
+  expect((await downloadBackup("failed-refresh.json")).plan).toEqual(plan);
+  fail = false;
+  await page.getByRole("button", { name: "Refresh travel times", exact: true }).click();
+  await dialog.getByRole("button", { name: "Use refreshed times" }).click();
+  const accepted = await downloadBackup("accepted-refresh.json");
+  expect(accepted.plan.days).toEqual(plan.days);
+  expect(accepted.trip).toEqual(trip);
+  expect(accepted.plan.snapshot.schedule.days[0].visits[1].start).toBe(original.schedule.days[0].visits[1].start + 20);
+  expect(accepted.plan.snapshot.schedule.days[0].visits[0].start).toBe(630);
+  expect(requests).toHaveLength(3);
+  expect(requests.every((request) => request.mode === "refresh" && JSON.stringify(request.plan) === JSON.stringify(plan))).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("itinerary persistence restores timings and complete routes without regeneration", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let calls = 0;
+  let generated: PlanResult | undefined;
+  await page.route("**/api/plan", async (route) => {
+    calls++;
+    const candidate = route.request().postDataJSON().trip as Trip;
+    generated = previewFixture(candidate);
+    const first = generated.schedule.days[0].visits[0];
+    first.leg = { ...first.leg, mode: "TRANSIT", polyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@", fare: "EUR 2.50", sampledDeparture: 620,
+      estimated: true, timetableDate: "2026-10-12", steps: [{ instruction: "Take the metro", mode: "TRANSIT", line: "M1", from: "Hotel station", to: "Museum station", departure: "10:20", arrival: "10:30" }],
+      alternatives: [{ ...first.leg, polyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@" }] };
+    generated.places = Object.fromEntries([ ["hotel", { id: candidate.hotelPlaceId!, name: candidate.hotel, address: "Paris", location: { lat: 48.85, lng: 2.35 } }],
+      ...candidate.stops.map((stop) => [stop.id, { id: stop.placeId!, name: stop.name, address: "Paris", location: { lat: 48.86, lng: 2.34 } }]) ]);
+    await route.fulfill({ json: generated });
+  });
+  const trip = await openPlanningTrip(page);
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  const timings = await page.locator(".itinerary-stop").allTextContents();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const path = testInfo.outputPath("timed-itinerary.json");
+  await (await download).saveAs(path);
+  const backup = JSON.parse(await readFile(path, "utf8"));
+  expect(backup.plan.snapshot.schedule).toEqual(generated!.schedule);
+  expect(backup.plan.snapshot.places).toEqual(generated!.places);
+  await page.reload();
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles(path);
+  await expect(page.locator(".stop-item")).toHaveCount(trip.stops.length);
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.locator(".itinerary-stop")).toHaveText(timings);
+  await expect(page.getByText("Not a live travel check.", { exact: false })).toBeVisible();
+  await page.locator(".travel-leg summary").first().click();
+  await expect(page.locator(".leg-details").first()).toContainText("M1 Hotel station to Museum station");
+  await expect(page.locator(".leg-details").first()).toContainText("Estimated fare: EUR 2.50");
+  await expect(page.locator(".travel-leg summary").first()).toContainText("timetable of 2026-10-12");
+  await expect(page.locator(".itinerary-start").last()).toContainText("Back to Private hotel");
+  expect(calls).toBe(1);
+  await expect(page.locator(".confirmed-hotel")).toContainText("Private hotel");
+  await page.getByLabel("Hotel or starting point").fill("Another hotel");
+  await expect(page.locator(".confirmed-hotel")).toHaveCount(0);
+  await expect(page.locator(".itinerary-start").last()).toContainText("Back to Private hotel");
+  await page.getByLabel("City timezone").fill("UTC");
+  await expect(page.getByText("This itinerary is out of date. Plan again after your changes.")).toBeVisible();
+  await expect(page.locator(".itinerary-stop")).toHaveText(timings);
+  const retainedDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const retainedPath = testInfo.outputPath("retained-timed-itinerary.json");
+  await (await retainedDownload).saveAs(retainedPath);
+  expect(JSON.parse(await readFile(retainedPath, "utf8")).plan).toEqual(backup.plan);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("saved-itinerary.png"), fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test("day-trip groups distinguish provisional outlines from approved itineraries", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const submitted: Trip[] = [];
+  let provisional = true;
+  await page.route("**/api/plan", async (route) => {
+    const body = route.request().postDataJSON();
+    if (body.mode === "check") { await route.fulfill({ json: { connections: [], warnings: [] } }); return; }
+    const trip = body.trip as Trip;
+    submitted.push(trip);
+    const group = trip.dayGroups![0];
+    if (provisional) {
+      await route.fulfill({ json: { status: "provisional", verified: false, code: "missing-data", message: "Return transit has not been found in the sampled departures.", outline: [{ groupId: group.id, stopIds: group.stopIds, allowedDays: group.allowedDays }, ...trip.stops.filter((stop) => !group.stopIds.includes(stop.id)).map((stop) => ({ stopIds: [stop.id], allowedDays: [0] }))], unresolved: [{ groupId: group.id, day: 1, direction: "return", outcome: "noRoute" }], warnings: ["Untimed outline only. No saved itinerary was changed."] } });
+      return;
+    }
+    const result = previewFixture({ ...trip, stops: trip.stops.filter((stop) => !group.stopIds.includes(stop.id)) });
+    const dayTrip = previewFixture({ ...trip, stops: trip.stops.filter((stop) => group.stopIds.includes(stop.id)) }).schedule.days[0];
+    result.schedule.days[1] = { ...dayTrip, day: 1, date: tripDate(trip, 1), visits: dayTrip.visits.map((visit) => ({ ...visit, leg: { ...visit.leg, day: 1 } })), returnLeg: { ...dayTrip.returnLeg!, day: 1 } };
+    await route.fulfill({ json: result });
+  });
+  const trip = await openPlanningTrip(page, "Hotel", [
+    { ...newStop("Amsterdam museum"), placeId: "museum", day: 0, fixedTime: "10:30" },
+    { ...newStop("Oudegracht canal walk"), placeId: "canal" },
+    { ...newStop("Stadskasteel Oudaen lunch"), placeId: "lunch" },
+  ]);
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  const addGroup = async () => {
+    await dialog.getByRole("button", { name: "Add day trip" }).click();
+    await dialog.getByLabel("Day-trip name 1").fill("Utrecht");
+    await dialog.getByLabel("Include Oudegracht canal walk in Utrecht").check();
+    await dialog.getByLabel("Include Stadskasteel Oudaen lunch in Utrecht").check();
+    await dialog.getByLabel("Day 1 allowed for Utrecht").uncheck();
+    await expect(dialog.getByLabel("Exclusive day for Utrecht")).toBeChecked();
+  };
+  const downloadBackup = async (name: string) => {
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download trip backup" }).click();
+    const path = testInfo.outputPath(name);
+    await (await download).saveAs(path);
+    return JSON.parse(await readFile(path, "utf8"));
+  };
+  await addGroup();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("group", { name: "Utrecht group" }).screenshot({ path: testInfo.outputPath("day-trip-groups.png") });
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await expect(dialog.getByLabel("Provisional itinerary outline")).toContainText("Return travel: No route found at the checked departure times");
+  await expect(dialog.getByRole("heading", { name: "Plan my days", exact: true })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "Use this plan" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Approve changes" })).toHaveCount(0);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("day-trip-provisional.png"), fullPage: true });
+  expect(submitted[0].dayGroups![0]).toMatchObject({ name: "Utrecht", allowedDays: [1], exclusive: true, stopIds: trip.stops.slice(1).map((stop) => stop.id) });
+  expect(submitted[0].stops).toEqual(trip.stops);
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  const discarded = await downloadBackup("discarded-group.json");
+  expect(discarded.trip.dayGroups).toBeUndefined();
+  expect(discarded.trip.stops).toEqual(trip.stops);
+  expect(discarded.plan).toBeNull();
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  await expect(dialog.getByLabel("Day-trip name 1")).toHaveCount(0);
+  await addGroup();
+  provisional = false;
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await expect(dialog.getByLabel("Suggested itinerary")).toContainText("Oudegracht canal walk");
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  const accepted = await downloadBackup("approved-group.json");
+  expect(accepted.trip.dayGroups).toEqual(submitted[1].dayGroups);
+  expect(new Set(accepted.plan.days[1].stopIds)).toEqual(new Set(trip.stops.slice(1).map((stop) => stop.id)));
+  provisional = true;
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  await dialog.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  const resolver = page.getByRole("dialog", { name: "Resolve conflicts", exact: true });
+  await resolver.getByRole("button", { name: "Check travel gaps" }).click();
+  await resolver.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(resolver.getByLabel("Provisional itinerary outline")).toBeVisible();
+  await expect(resolver.getByRole("button", { name: "Approve changes" })).toHaveCount(0);
+  await resolver.getByRole("button", { name: "Cancel", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  const unchanged = await downloadBackup("preserved-group.json");
+  expect(unchanged.trip).toEqual(accepted.trip);
+  expect(unchanged.plan).toEqual(accepted.plan);
+  await page.getByRole("combobox", { name: "Days", exact: true }).selectOption("1");
+  await expect(page.getByRole("combobox", { name: "Days", exact: true })).toHaveValue("2");
+  await expect(page.getByText("A day-trip group includes later days. Adjust its eligible days explicitly first.")).toBeVisible();
+  await page.locator(".section-tabs").getByRole("button", { name: /^Places/ }).click();
+  const canal = page.locator(".stop-item").filter({ hasText: "Oudegracht canal walk" });
+  await canal.getByRole("button").first().click();
+  await canal.getByRole("button", { name: "Remove", exact: true }).click();
+  const reduced = await downloadBackup("removed-group-member.json");
+  expect(reduced.trip.dayGroups[0].stopIds).toEqual([trip.stops[2].id]);
+  const lunch = page.locator(".stop-item").filter({ hasText: "Stadskasteel Oudaen lunch" });
+  await lunch.getByRole("button").first().click();
+  await lunch.getByRole("button", { name: "Remove", exact: true }).click();
+  expect((await downloadBackup("removed-empty-group.json")).trip.dayGroups).toBeUndefined();
+  expect(errors).toEqual([]);
+});
+
+test("conflict resolution checks Google first and requires approval before changing bookings", async ({ page }, testInfo) => {
+  const requests: { trip: Trip; mode?: string }[] = [];
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/plan", async (route) => {
+    const body = route.request().postDataJSON(); requests.push(body);
+    await route.fulfill({ json: body.mode === "check" ? { connections: [{ day: 0, from: body.trip.stops[0].id, to: body.trip.stops[1].id, availableMinutes: -50, minutes: 10, mode: "WALK" }], warnings: ["Direct Google estimates; alternatives may exist."] } : previewFixture(body.trip) });
+  });
+  const trip = await openPlanningTrip(page, "Hotel", [
+    { ...newStop("Louvre Museum"), placeId: "museum", day: 0, fixedTime: "10:30", source: "Confirmed ticket" },
+    { ...newStop("Luxembourg Gardens"), placeId: "garden", day: 0, fixedTime: "10:40", source: "Suggested walk" },
+  ]);
+  await page.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Resolve conflicts", exact: true });
+  expect(requests).toHaveLength(0);
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await expect(dialog.getByLabel("Google travel estimates")).toContainText("10 min estimated walking");
+  await expect(dialog.getByLabel("Keep Louvre Museum fixed")).toBeChecked();
+  await expect(dialog.getByLabel("Keep Luxembourg Gardens fixed")).toBeChecked();
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Selected fixed reservations still overlap");
+  await expect(dialog.getByRole("heading", { name: "Selected fixed reservations still overlap" })).toBeFocused();
+  await expect(dialog.getByLabel("Additional flexibility")).toHaveCount(0);
+  expect(requests).toHaveLength(1);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("resolution-decisions.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Make Luxembourg Gardens flexible", exact: true }).click();
+  await expect(dialog.getByLabel("Reservations needing a decision")).toHaveCount(0);
+  await expect(dialog.getByLabel("Keep Louvre Museum fixed")).toBeChecked();
+  await expect(dialog.getByLabel("Keep Luxembourg Gardens fixed")).not.toBeChecked();
+  expect(requests).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByLabel("Proposed changes")).toContainText("11:25");
+  expect(requests[1].trip.stops[0]).toEqual(trip.stops[0]);
+  expect(requests[1].trip.stops[1]).toEqual({ ...trip.stops[1], fixedTime: null });
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("heading", { name: "Resolve conflicts", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("resolution-proposal.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  const planning = page.getByRole("dialog", { name: "Plan my days" });
+  await expect(planning.getByLabel("Booked time for Luxembourg Gardens")).toHaveValue("10:40");
+  await planning.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await expect(dialog.getByLabel("Keep Luxembourg Gardens fixed")).toBeChecked();
+  await dialog.getByRole("button", { name: "Allow all visit times to move", exact: true }).click();
+  await expect(dialog.getByLabel("Keep Louvre Museum fixed")).not.toBeChecked();
+  await expect(dialog.getByLabel("Keep Luxembourg Gardens fixed")).not.toBeChecked();
+  await expect(dialog.getByLabel("Timing permissions")).toContainText("0 booking times locked / 2 released");
+  await expect(dialog.getByLabel("Reservations needing a decision")).toHaveCount(0);
+  expect(requests).toHaveLength(3);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(planning.getByLabel("Booked time for Louvre Museum")).toHaveValue("10:30");
+  await expect(planning.getByLabel("Booked time for Luxembourg Gardens")).toHaveValue("10:40");
+  await planning.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await dialog.getByRole("button", { name: "Allow all visit times to move", exact: true }).click();
+  await dialog.getByLabel("Keep Louvre Museum fixed").check();
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await dialog.getByRole("button", { name: "Approve changes" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("approved-resolution.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.trip.stops[0]).toEqual(trip.stops[0]);
+  expect(backup.trip.stops[1]).toEqual({ ...trip.stops[1], fixedTime: null });
+  expect(backup.plan.days[0].stopIds).toHaveLength(2);
+  expect(errors).toEqual([]);
+});
+
+test("conflict resolution selectively shortens visits and releases days only with approval", async ({ page }, testInfo) => {
+  const submitted: Trip[] = [];
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/plan", async (route) => {
+    const body = route.request().postDataJSON();
+    if (body.mode === "check") { await route.fulfill({ json: { connections: [], warnings: [] } }); return; }
+    submitted.push(body.trip);
+    const selected = { ...body.trip, stops: body.trip.stops.map((stop: Trip["stops"][number]) => ({ ...stop, duration: stop.durationOptions?.at(-1) ?? stop.duration })) };
+    await route.fulfill({ json: previewFixture(selected) });
+  });
+  const trip = await openPlanningTrip(page, "Hotel", [
+    { ...newStop("Louvre Museum"), placeId: "museum", day: 0, fixedTime: "10:30", source: "Confirmed ticket" },
+    { ...newStop("Canal Cafe"), placeId: "cafe", day: 0, fixedTime: "10:40", source: "Suggested lunch" },
+  ]);
+  await page.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Resolve conflicts", exact: true });
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await expect(dialog.getByLabel("Duration flexibility for Canal Cafe")).toHaveCount(0);
+  await dialog.getByLabel("Keep Canal Cafe fixed").uncheck();
+  const allDays = dialog.getByLabel("Allow all flexible visits to change days", { exact: true });
+  await expect(allDays).not.toBeChecked();
+  await allDays.check();
+  await dialog.getByLabel("Duration flexibility for Canal Cafe").selectOption("eatery20");
+  await dialog.getByLabel("Duration flexibility for Canal Cafe").selectOption("eatery10");
+  expect(submitted).toHaveLength(0);
+  await dialog.getByLabel("Timing permissions").scrollIntoViewIfNeeded();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("resolution-shorter-controls.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Preview adjusted plan", exact: true }).click();
+  await expect(dialog.getByLabel("Proposed changes")).toContainText("41 min");
+  expect(submitted[0].stops[0]).toEqual(trip.stops[0]);
+  expect(submitted[0].stops[1]).toEqual({ ...trip.stops[1], day: null, fixedTime: null, durationOptions: [45, 41] });
+  await page.screenshot({ path: testInfo.outputPath("resolution-shorter-proposal.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  const planning = page.getByRole("dialog", { name: "Plan my days" });
+  await expect(planning.getByLabel("Visit minutes for Canal Cafe")).toHaveValue("45");
+  await planning.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await dialog.getByLabel("Keep Canal Cafe fixed").uncheck();
+  await expect(dialog.getByLabel("Duration flexibility for Canal Cafe")).toHaveValue("original");
+  await expect(allDays).not.toBeChecked();
+  await allDays.check();
+  await dialog.getByLabel("Duration flexibility for Canal Cafe").selectOption("eatery20");
+  await dialog.getByLabel("Keep Canal Cafe fixed").check();
+  await dialog.getByLabel("Keep Canal Cafe fixed").uncheck();
+  await expect(dialog.getByLabel("Duration flexibility for Canal Cafe")).toHaveValue("original");
+  await allDays.check();
+  await dialog.getByLabel("Duration flexibility for Canal Cafe").selectOption("eatery20");
+  await dialog.getByRole("button", { name: "Preview adjusted plan", exact: true }).click();
+  await expect(dialog.getByLabel("Proposed changes")).toContainText("36 min");
+  await dialog.getByRole("button", { name: "Approve changes", exact: true }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("shorter-resolution.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.trip.stops[0]).toEqual(trip.stops[0]);
+  expect(backup.trip.stops[1]).toEqual({ ...trip.stops[1], day: null, fixedTime: null, duration: 36 });
+  expect(backup.plan.omitted).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+for (const permission of ["day", "omission"] as const) test(`conflict resolution asks before allowing ${permission} after a failed preview`, async ({ page }, testInfo) => {
+  const submitted: Trip[] = [];
+  await page.route("**/api/plan", async (route) => {
+    const body = route.request().postDataJSON();
+    if (body.mode === "check") { await route.fulfill({ json: { connections: [], warnings: [] } }); return; }
+    submitted.push(body.trip);
+    if (submitted.length === 1) { await route.fulfill({ status: 422, json: { error: "No schedule fits these bookings and available routes." } }); return; }
+    const result = previewFixture(body.trip);
+    const garden = result.schedule.days[0].visits.pop()!;
+    result.schedule.days[0].returnLeg!.from = body.trip.stops[0].id;
+    if (permission === "day") {
+      result.schedule.days[1].visits = [{ ...garden, start: 600, end: 600 + body.trip.stops[1].duration, leg: { ...garden.leg, day: 1, from: "hotel" } }];
+      result.schedule.days[1].returnLeg = { ...result.schedule.days[0].returnLeg!, day: 1, from: garden.stopId };
+    } else result.schedule.omitted = [garden.stopId];
+    await route.fulfill({ json: result });
+  });
+  const trip = await openPlanningTrip(page, "Hotel", [
+    { ...newStop("Louvre Museum"), placeId: "museum", day: 0, fixedTime: "10:30", source: "Confirmed ticket" },
+    { ...newStop("Luxembourg Gardens"), placeId: "garden", day: 0, fixedTime: "10:40", source: "Suggested walk" },
+  ]);
+  await page.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Resolve conflicts", exact: true });
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await dialog.getByLabel("Keep Luxembourg Gardens fixed").uncheck();
+  await expect(dialog.getByLabel("Additional flexibility")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("No schedule fits");
+  await expect(dialog.getByLabel("Additional flexibility")).toBeVisible();
+  await expect(dialog.getByLabel("Allow another day for Louvre Museum")).toHaveCount(0);
+  const anotherDay = dialog.getByLabel("Allow another day for Luxembourg Gardens");
+  const optional = dialog.getByLabel("Allow omission of Luxembourg Gardens");
+  await expect(anotherDay).not.toBeChecked();
+  await expect(optional).not.toBeChecked();
+  await anotherDay.check(); await optional.check();
+  await dialog.getByLabel("Keep Luxembourg Gardens fixed").check();
+  await dialog.getByLabel("Keep Luxembourg Gardens fixed").uncheck();
+  await expect(anotherDay).not.toBeChecked();
+  await expect(optional).not.toBeChecked();
+  await (permission === "day" ? anotherDay : optional).check();
+  expect(submitted).toHaveLength(1);
+  await dialog.getByLabel("Additional flexibility").scrollIntoViewIfNeeded();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("resolution-permissions.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByLabel("Proposed changes")).toContainText(permission === "day" ? "2026-10-13, 10:00" : "Not scheduled (optional)");
+  expect(submitted[1].stops[0]).toEqual(trip.stops[0]);
+  const expected = { ...trip.stops[1], fixedTime: null, day: permission === "day" ? null : 0, optional: permission === "omission" };
+  expect(submitted[1].stops[1]).toEqual(expected);
+  await dialog.getByRole("button", { name: "Approve changes" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("permission-resolution.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.trip.stops[0]).toEqual(trip.stops[0]);
+  expect(backup.trip.stops[1]).toEqual(expected);
+  expect(backup.trip.stops).toHaveLength(2);
+  if (permission === "day") expect(backup.plan.days[1].stopIds).toEqual([trip.stops[1].id]);
+  else expect(backup.plan.omitted).toEqual([trip.stops[1].id]);
+});
+
+test("conflict resolution handles lookup failures and refuses unverified or changed reservations", async ({ page }, testInfo) => {
+  let requests = 0;
+  await page.route("**/api/plan", async (route) => {
+    requests++;
+    const body = route.request().postDataJSON();
+    if (body.mode === "check") { await route.fulfill({ status: 502, json: { error: "Google Maps could not complete the request." } }); return; }
+    const result = previewFixture(body.trip);
+    if (requests === 2) result.verified = false;
+    else { result.schedule.days[0].visits[0].start += 5; result.schedule.days[0].visits[0].end += 5; }
+    await route.fulfill({ json: result });
+  });
+  const trip = await openPlanningTrip(page);
+  await page.getByRole("button", { name: "Resolve conflicts", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Resolve conflicts", exact: true });
+  await dialog.getByRole("button", { name: "Check travel gaps" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Google Maps could not complete");
+  expect(requests).toBe(1);
+  await dialog.getByRole("button", { name: "Review without estimates" }).click();
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("not passed route verification");
+  await expect(dialog.getByRole("button", { name: "Approve changes" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Preview adjusted plan" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Louvre Museum: booking time changed");
+  await expect(dialog.getByRole("button", { name: "Approve changes" })).toHaveCount(0);
+  expect(requests).toBe(3);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("dialog", { name: "Plan my days" }).getByRole("button", { name: "Close dialog" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("failed-resolution.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.trip.stops).toEqual(trip.stops);
+  expect(backup.plan).toBeNull();
+});
+
+test("planning overlaps offer time suggestions and an explicit any-time checkbox", async ({ page }, testInfo) => {
+  const requests: string[] = [];
+  const errors: string[] = [];
+  page.on("request", (request) => { if (/\/api\/(plan|timing)$/.test(request.url())) requests.push(request.url()); });
+  page.on("pageerror", (error) => errors.push(error.message));
+  const trip = await openPlanningTrip(page, "Private hotel", [
+    { ...newStop("Sango Specialty Coffee"), placeId: "sango-id", day: 0, fixedTime: "14:45", source: "14:45 - 15:30 | Sango Specialty Coffee" },
+    { ...newStop("Sango"), placeId: "sango-id", day: 0, fixedTime: "15:13" },
+    { ...newStop("Canal cruise"), placeId: "cruise-id", day: 0, fixedTime: "17:00", source: "Reserved ticket" },
+  ]);
+  const dialog = page.getByRole("dialog", { name: "Plan my days" });
+  const optimize = dialog.getByRole("button", { name: "Optimize preview" });
+  const flexible = dialog.getByLabel("Any time slot for Sango Specialty Coffee", { exact: true });
+  await expect(dialog.getByRole("alert")).toContainText("60 min needed, 28 available");
+  await expect(optimize).toBeDisabled();
+  await expect(optimize).toHaveAccessibleDescription(/1 fixed booking conflict remains/);
+  await dialog.getByRole("button", { name: "Review visit times", exact: true }).last().click();
+  await expect(dialog.getByRole("heading", { name: "Visits", exact: true })).toBeFocused();
+  await expect(flexible).not.toBeChecked();
+  expect(requests).toEqual([]);
+  await dialog.getByLabel("Visit minutes for Sango Specialty Coffee", { exact: true }).fill("20");
+  await dialog.getByLabel("Arrival buffer for Sango", { exact: true }).fill("5");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(optimize).toBeEnabled();
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  await expect(dialog.getByLabel("Visit minutes for Sango Specialty Coffee", { exact: true })).toHaveValue("45");
+  await expect(dialog.getByLabel("Arrival buffer for Sango", { exact: true })).toHaveValue("15");
+  await dialog.getByRole("heading", { name: "Plan my days", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("booking-conflicts.png"), fullPage: true });
+  const suggestion = dialog.getByRole("button", { name: "Use suggested time 15:45 for Sango", exact: true });
+  await suggestion.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("booking-suggestions.png"), fullPage: true });
+  await suggestion.click();
+  await expect(dialog.getByLabel("Booked time for Sango", { exact: true })).toHaveValue("15:45");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(optimize).toBeEnabled();
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  await expect(dialog.getByLabel("Booked time for Sango", { exact: true })).toHaveValue("15:13");
+  await flexible.check();
+  await expect(dialog.getByLabel("Booked time for Sango Specialty Coffee", { exact: true })).toHaveValue("");
+  await expect(dialog.locator("#planning-blocker")).toHaveCount(0);
+  await expect(dialog.getByLabel("Booked time for Sango Specialty Coffee", { exact: true })).toBeDisabled();
+  await expect(dialog.getByLabel("Day for Sango Specialty Coffee", { exact: true })).toHaveValue("0");
+  await expect(dialog.getByLabel("Day for Sango Specialty Coffee", { exact: true })).toBeEnabled();
+  await expect(optimize).toBeEnabled();
+  await flexible.uncheck();
+  await expect(dialog.getByLabel("Booked time for Sango Specialty Coffee", { exact: true })).toHaveValue("14:45");
+  await expect(optimize).toBeDisabled();
+  await flexible.check();
+  await dialog.getByLabel("Optional Sango Specialty Coffee", { exact: true }).check();
+  await flexible.uncheck();
+  await expect(dialog.getByLabel("Optional Sango Specialty Coffee", { exact: true })).not.toBeChecked();
+  await expect(dialog.getByLabel("Optional Sango Specialty Coffee", { exact: true })).toBeDisabled();
+  await flexible.check();
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  await expect(flexible).not.toBeChecked();
+  await flexible.check();
+  await dialog.getByText("Original source", { exact: true }).first().click();
+  await expect(dialog.getByText(trip.stops[0].source, { exact: true })).toBeVisible();
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await flexible.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("booking-controls.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Apply preferences" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("released-time.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.trip.stops).toHaveLength(3);
+  expect(backup.trip.stops[0]).toEqual({ ...trip.stops[0], fixedTime: null });
+  expect(backup.trip.stops[1]).toEqual(trip.stops[1]);
+  expect(backup.trip.stops[2]).toEqual(trip.stops[2]);
+  expect(requests).toEqual([]);
+  expect(errors).toEqual([]);
+});
 
 test("planning popup keeps drafts separate and preserves fixed bookings", async ({ page }, testInfo) => {
   const requests: string[] = [];
@@ -371,7 +1183,7 @@ test("planning popup keeps drafts separate and preserves fixed bookings", async 
   await dialog.getByLabel("Day grouping").selectOption("BALANCED");
   await dialog.getByLabel("Default transport").selectOption("TRANSIT");
   await dialog.getByLabel("Maximum places per day").fill("2");
-  await dialog.getByLabel("Standalone walking leg limit (min)").fill("15");
+  await dialog.getByLabel(/^Standalone walking leg limit/).fill("15");
   await dialog.getByLabel("Visit minutes for Luxembourg Gardens").fill("85");
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await dialog.getByRole("heading", { name: "Plan my days", exact: true }).scrollIntoViewIfNeeded();

@@ -1,6 +1,9 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { maxStopsPerCity, newTrip, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
+import { newTrip, savedPlanSchema, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
+import { dayProgressSchema } from "./day-recovery";
+
+export { savedPlanSchema } from "./trip";
 
 export const popularCities = [
   { name: "Paris", country: "France", timeZone: "Europe/Paris", days: 3 },
@@ -22,16 +25,12 @@ export function cityPreset(value: string) {
   return popularCities.find((city) => city.name.toLowerCase() === name || `${city.name}, ${city.country}`.toLowerCase() === name);
 }
 
-export const savedPlanSchema = z.object({
-  days: z.array(z.object({ day: z.number().int().min(0).max(6), stopIds: z.array(z.uuid()).max(maxStopsPerCity) }).strict()).max(7),
-  omitted: z.array(z.uuid()).max(maxStopsPerCity),
-}).strict();
-
 const cityTripSchema = tripSchema.safeExtend({ hotel: z.string().trim().max(200) });
 export const journeySchema = z.object({
   id: z.uuid(), title: z.string().trim().min(1).max(150),
   cities: z.array(cityTripSchema).min(1).max(10),
   plans: z.record(z.uuid(), savedPlanSchema).default({}),
+  execution: z.record(z.uuid(), z.record(z.iso.date(), dayProgressSchema)).optional(),
 }).strict().superRefine((journey, context) => {
   if (new Set(journey.cities.map((city) => city.id)).size !== journey.cities.length) context.addIssue({ code: "custom", message: "City visit identifiers must be unique.", path: ["cities"] });
   journey.cities.forEach((city, index) => {
@@ -41,6 +40,18 @@ export const journeySchema = z.object({
   });
   for (const cityId of Object.keys(journey.plans)) {
     if (!journey.cities.some((city) => city.id === cityId)) context.addIssue({ code: "custom", message: "A saved plan belongs to an unknown city.", path: ["plans", cityId] });
+    if (journey.plans[cityId].snapshot && journey.plans[cityId].snapshot.trip.id !== cityId) context.addIssue({ code: "custom", message: "The itinerary snapshot belongs to another city.", path: ["plans", cityId, "snapshot"] });
+  }
+  for (const [cityId, days] of Object.entries(journey.execution ?? {})) {
+    if (!journey.cities.some((city) => city.id === cityId) || Object.entries(days).some(([date, progress]) => date !== progress.date)) context.addIssue({ code: "custom", message: "Progress belongs to an unknown city or mismatched date.", path: ["execution", cityId] });
+    for (const [date, progress] of Object.entries(days)) {
+      for (const remainder of [progress.remaining, progress.previousRemaining]) {
+        const snapshot = remainder?.snapshot;
+        if (snapshot && (snapshot.trip.id !== cityId || snapshot.day.date !== date || JSON.stringify(snapshot.day.visits.map((visit) => visit.stopId)) !== JSON.stringify(remainder!.stopIds))) {
+          context.addIssue({ code: "custom", message: "Saved recovery must match its city, date and remaining visit order.", path: ["execution", cityId, date] });
+        }
+      }
+    }
   }
 });
 export type Journey = z.infer<typeof journeySchema>;

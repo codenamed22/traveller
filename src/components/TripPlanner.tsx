@@ -4,21 +4,26 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
-import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, FileInput, FolderOpen, Footprints, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, Plus, Route, Save, Search, Settings2, ShieldCheck, TrainFront, Trash2, UserRound, X } from "lucide-react";
+import { Temporal } from "@js-temporal/polyfill";
+import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, FileInput, FolderOpen, Footprints, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, TrainFront, Trash2, UserRound, X } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
 import { NewTripDialog } from "./NewTripDialog";
 import { PlanningDialog } from "./PlanningDialog";
-import { mergeDuplicateStops } from "@/lib/duplicates";
+import { DayRecoveryDialog } from "./DayRecoveryDialog";
+import { applyDayRecovery, newDayProgress, recoveryMinute, recoveryPlanKey, remainingIds, validateDayRecovery, type CheckedNextRoute, type DayProgress, type RecoveryRequest } from "@/lib/day-recovery";
+import { duplicateStopPairs, mergeReviewedDuplicate } from "@/lib/duplicates";
+import type { ExtractionServices } from "@/lib/import";
 import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, type Journey, type StoredTrip } from "@/lib/journey";
-import { changeStartDate, formatMinute, maxStopsPerCity, newStop, newTrip, persistedPlan, tripDate, tripSchema, type Place, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
+import { validateSchedule } from "@/lib/schedule-validation";
+import { changeStartDate, formatMinute, maxStopsPerCity, minuteAt, newStop, newTrip, persistedPlan, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
 
-export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; timing?: boolean; email: string | null };
+export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; updatedAt: string };
 
-async function requestJson(url: string, body?: unknown, method = "POST") {
-  const response = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+async function requestJson(url: string, body?: unknown, method = "POST", signal?: AbortSignal) {
+  const response = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined, signal });
   const data = response.status === 204 ? null : await response.json();
   if (!response.ok) throw new Error(data?.error ?? "The request failed.");
   return data;
@@ -29,6 +34,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [journey, setJourney] = useState(() => restored ?? asJourney(initialTrip));
   const [activeCity, setActiveCity] = useState(() => (restored ?? asJourney(initialTrip)).cities[0].id);
   const trip = journey.cities.find((city) => city.id === activeCity) ?? journey.cities[0];
+  const savedPlan = journey.plans[trip.id] ?? null;
   const [revision, setRevision] = useState(restored && initialSaved ? initialSaved.revision : 0);
   const [savedFor, setSavedFor] = useState(restored ? JSON.stringify(restored) : "");
   const [placeState, setPlaces] = useState<Record<string, Place>>({});
@@ -36,18 +42,28 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     const stored: Record<string, Place> = {};
     if (trip.hotelPlaceId && trip.hotelLocation) stored.hotel = { id: trip.hotelPlaceId, name: trip.hotel, address: "", location: trip.hotelLocation };
     for (const stop of trip.stops) if (stop.placeId && stop.location) stored[stop.id] = { id: stop.placeId, name: stop.name, address: "", location: stop.location };
-    return { ...stored, ...placeState };
-  }, [trip, placeState]);
-  const [result, setResult] = useState<PlanResult | null>(null);
+    const confirmed = Object.fromEntries(Object.entries(savedPlan?.snapshot?.places ?? {}).filter(([id, place]) => id === "hotel"
+      ? trip.hotelPlaceId === place.id : trip.stops.some((stop) => stop.id === id && stop.placeId === place.id)));
+    return { ...confirmed, ...stored, ...placeState };
+  }, [trip, placeState, savedPlan]);
+  const [resultState, setResult] = useState<PlanResult | null>(null);
+  const result: PlanResult | null = resultState ?? (savedPlan?.snapshot ? { schedule: savedPlan.snapshot.schedule, places: savedPlan.snapshot.places, verified: false } : null);
   const [plannedFor, setPlannedFor] = useState("");
-  const savedPlan = journey.plans[trip.id] ?? null;
   const [day, setDay] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<"list" | "map">("list");
   const [tab, setTab] = useState<"places" | "itinerary">("places");
   const [importOpen, setImportOpen] = useState(false);
+  const [duplicateReview, setDuplicateReview] = useState<{ ignored: string[]; keepId: string | null; error: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [planningOpen, setPlanningOpen] = useState(false);
+  const [refreshOpen, setRefreshOpen] = useState(false);
+  const [refreshPreview, setRefreshPreview] = useState<{ result: PlanResult; trip: Trip; tripKey: string; planKey: string } | null>(null);
+  const refreshAbort = useRef<AbortController | null>(null);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [now, setNow] = useState(() => Temporal.Now.instant());
+  const [liveDay, setLiveDay] = useState<{ cityId: string; version: number; planKey: string; day: DayPlan; checkedAt: string; departureAt: string; origin: RecoveryRequest["origin"] }>();
+  const [liveRoute, setLiveRoute] = useState<CheckedNextRoute & { cityId: string; day: number; version: number; planKey: string }>();
   const [setup, setSetup] = useState<"new" | "add" | null>(null);
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
@@ -61,10 +77,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const editVersion = useRef(0);
   const cityViews = useRef<Record<string, { places: Record<string, Place>; result: PlanResult | null; plannedFor: string }>>({});
   const snapshot = JSON.stringify(journey);
-  const stale = Boolean(result && plannedFor !== JSON.stringify(trip));
   const canUseServices = Boolean(config.email && config.database);
   const canPlan = canUseServices && config.routes;
   const saving = useRef(false);
+  useEffect(() => { const timer = setInterval(() => setNow(Temporal.Now.instant()), 60_000); return () => clearInterval(timer); }, []);
 
   useEffect(() => {
     if (!canUseServices || snapshot === savedFor || busy) return;
@@ -81,20 +97,52 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     }, 1500);
     return () => clearTimeout(timer);
   }, [snapshot, savedFor, busy, canUseServices, revision, journey]);
-  const currentDay = result?.schedule.days.find((entry) => entry.day === day);
+  const baselineDay = result?.schedule.days.find((entry) => entry.day === day);
+  const date = tripDate(trip, day);
+  const execution = journey.execution?.[trip.id]?.[date];
+  const savedRecovery = execution?.remaining?.snapshot;
+  const stale = savedRecovery ? JSON.stringify(savedRecovery.trip) !== JSON.stringify(trip) : Boolean(result && (plannedFor || JSON.stringify(savedPlan?.snapshot?.trip)) !== JSON.stringify(trip));
+  const dayStopIds = savedPlan?.days.find((entry) => entry.day === day)?.stopIds ?? baselineDay?.visits.map((visit) => visit.stopId) ?? execution?.baselineStopIds;
+  const progress = execution ?? newDayProgress(trip, day, dayStopIds ?? []);
+  function formatActual(minute: number) {
+    try { return formatMinute({ ...trip, timeZone: progress.timeZone ?? trip.timeZone }, day, minute); }
+    catch { return `${Math.round(minute)} elapsed min`; }
+  }
+  const checkedDay = liveDay?.cityId === trip.id && liveDay.day.day === day && liveDay.version === progress.version && liveDay.planKey === recoveryPlanKey(trip, day, dayStopIds ?? []) ? liveDay : undefined;
+  const checkedRoute = liveRoute?.cityId === trip.id && liveRoute.day === day && liveRoute.version === progress.version && liveRoute.planKey === recoveryPlanKey(trip, day, dayStopIds ?? []) ? liveRoute : undefined;
+  const currentDay = checkedDay?.day ?? savedRecovery?.day ?? (execution ? undefined : baselineDay);
+  const itineraryTrip = checkedDay ? trip : savedRecovery?.trip ?? savedPlan?.snapshot?.trip ?? trip;
+  let isToday = false;
+  try { isToday = date === now.toZonedDateTimeISO(trip.timeZone).toPlainDate().toString(); } catch { isToday = false; }
+  function recordProgress(next: DayProgress) {
+    editVersion.current++; setLiveDay(undefined); setLiveRoute(undefined);
+    setJourney((current) => ({ ...current, execution: { ...current.execution, [trip.id]: { ...current.execution?.[trip.id], [date]: next } } }));
+  }
+  const mapSchedule = tab === "places" ? null : checkedDay ? { generatedAt: checkedDay.checkedAt, warnings: [], omitted: [], days: [checkedDay.day] } : savedRecovery ? { generatedAt: savedRecovery.checkedAt, warnings: [], omitted: [], days: [savedRecovery.day] } : execution ? null : result?.schedule ?? null;
+  const mapOrigin = checkedRoute?.origin ?? checkedDay?.origin ?? savedRecovery?.origin;
+  const mapLocation = mapOrigin?.location ?? (mapOrigin ? places[mapOrigin.id]?.location : undefined);
+  const itineraryPlaces = savedRecovery?.places ?? savedPlan?.snapshot?.places ?? places;
+  const recoveryOrigin = checkedDay?.origin ?? savedRecovery?.origin;
+  const recoveryPlaces = recoveryOrigin ? { ...(checkedDay ? places : itineraryPlaces), current: { id: recoveryOrigin.location ? "" : itineraryPlaces[recoveryOrigin.id]?.id ?? "", name: recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name ?? "Current location", address: "", location: recoveryOrigin.location ?? itineraryPlaces[recoveryOrigin.id]?.location ?? { lat: 0, lng: 0 } } } : itineraryPlaces;
   const plannedCount = result?.schedule.days.reduce((sum, entry) => sum + entry.visits.length, 0) ?? 0;
-  const duplicateCount = mergeDuplicateStops(trip.stops).removed.length;
+  const duplicatePairs = duplicateStopPairs(trip.stops);
+  const duplicatePair = duplicatePairs.find(({ first, second }) => !duplicateReview?.ignored.includes(`${first.id}:${second.id}`));
   function mergeDuplicates() {
-    const merged = mergeDuplicateStops(trip.stops);
-    edit({ stops: merged.stops });
-    setNotice(`Merged ${merged.removed.length} duplicate${merged.removed.length === 1 ? "" : "s"}: ${merged.removed.join(", ")}.`);
+    if (!duplicatePair || ![duplicatePair.first.id, duplicatePair.second.id].includes(duplicateReview?.keepId ?? "")) return;
+    const kept = duplicatePair.first.id === duplicateReview!.keepId ? duplicatePair.first : duplicatePair.second;
+    const removed = kept === duplicatePair.first ? duplicatePair.second : duplicatePair.first;
+    try {
+      const stops = mergeReviewedDuplicate(trip.stops, kept.id, removed.id);
+      edit({ stops });
+      setPlaces((current) => { const next = { ...current }; if (!next[kept.id] && next[removed.id]) next[kept.id] = next[removed.id]; delete next[removed.id]; return next; });
+      if (selected === removed.id) setSelected(kept.id);
+      setDuplicateReview((current) => ({ ignored: current?.ignored ?? [], keepId: null, error: "" }));
+      setNotice(`Merged duplicate visits. Kept ${kept.name} and its selected booking details.`);
+    } catch (cause) { setDuplicateReview((current) => ({ ignored: current?.ignored ?? [], keepId: null, error: cause instanceof Error ? cause.message : "Could not merge these visits." })); }
   }
 
   function setTrip(update: Trip | ((current: Trip) => Trip)) {
-    setJourney((current) => {
-      const plans = { ...current.plans }; delete plans[trip.id];
-      return { ...current, plans, cities: current.cities.map((city) => city.id === trip.id ? typeof update === "function" ? update(city) : update : city) };
-    });
+    setJourney((current) => ({ ...current, cities: current.cities.map((city) => city.id === trip.id ? typeof update === "function" ? update(city) : update : city) }));
   }
 
   function switchCity(cityId: string) {
@@ -102,13 +150,13 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     cityViews.current[trip.id] = { places, result, plannedFor };
     const cached = cityViews.current[cityId];
     editVersion.current += 1; setActiveCity(cityId); setPlaces(cached?.places ?? {}); setResult(cached?.result ?? null); setPlannedFor(cached?.plannedFor ?? "");
-    setDay(0); setSelected(null); setTab("places"); setView("list"); setAdding(""); setError(""); setNotice(""); setSearch(null);
+    setDay(0); setSelected(null); setTab("places"); setView("list"); setAdding(""); setError(""); setNotice(""); setSearch(null); setLiveDay(undefined); setLiveRoute(undefined); setRecoveryOpen(false);
   }
 
   function openJourney(next: Journey, savedRevision = 0, saved = false) {
     editVersion.current += 1; cityViews.current = {};
     setJourney(next); setActiveCity(next.cities[0].id); setRevision(savedRevision); setSavedFor(saved ? JSON.stringify(next) : "");
-    setResult(null); setPlaces({}); setPlannedFor(""); setSelected(null); setDay(0); setTab("places"); setView("list"); setAdding("");
+    setResult(null); setPlaces({}); setPlannedFor(""); setSelected(null); setDay(0); setTab("places"); setView("list"); setAdding(""); setLiveDay(undefined); setLiveRoute(undefined); setRecoveryOpen(false);
     setSetup(null); setSettingsOpen(false); setSavedTrips(null); setSearch(null); setNotice(""); setError("");
   }
 
@@ -116,8 +164,21 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     return snapshot === savedFor || (journey.cities.length === 1 && !trip.city && !trip.hotel && !trip.stops.length && journey.title === "Untitled trip") || window.confirm("Replace this unsaved trip? Save or export all cities first.");
   }
 
-  function edit(patch: Partial<Trip>) { editVersion.current += 1; setTrip((current) => ({ ...current, ...patch })); setNotice(""); }
-  function editStop(id: string, patch: Partial<Stop>) { editVersion.current += 1; setTrip((current) => ({ ...current, stops: current.stops.map((stop) => stop.id === id ? { ...stop, ...patch } : stop) })); }
+  function edit(patch: Partial<Trip>) {
+    editVersion.current += 1;
+    setLiveDay(undefined); setLiveRoute(undefined);
+    setTrip((current) => {
+      const next = { ...current, ...patch };
+      if (patch.stops && current.dayGroups && !("dayGroups" in patch)) {
+        const retained = new Set(patch.stops.map((stop) => stop.id));
+        const groups = current.dayGroups.map((group) => ({ ...group, stopIds: group.stopIds.filter((id) => retained.has(id)) })).filter((group) => group.stopIds.length);
+        next.dayGroups = groups.length ? groups : undefined;
+      }
+      return next;
+    });
+    setNotice("");
+  }
+  function editStop(id: string, patch: Partial<Stop>) { editVersion.current += 1; setLiveDay(undefined); setLiveRoute(undefined); setTrip((current) => ({ ...current, stops: current.stops.map((stop) => stop.id === id ? { ...stop, ...patch } : stop) })); }
 
   async function perform(label: string, action: () => Promise<void>) {
     setBusy(label); setError(""); setNotice("");
@@ -135,7 +196,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
 
   async function findPlaces(query: string) {
     await perform("Finding places", async () => {
-      if (!canUseServices || !config.routes) throw new Error("Hotel and place search requires Google sign-in, Neon, and the Google Places server key.");
+      if (!canUseServices || !config.routes) throw new Error("Place search is unavailable. Check your sign-in and connections.");
       if (!query.trim()) throw new Error("Enter a hotel name or address.");
       setMatches((await requestJson("/api/places", { query })).places); setHasSearched(true);
     });
@@ -165,26 +226,49 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     await perform("Saving", async () => {
       const validated = journeySchema.parse(journey);
       const response = await requestJson(`/api/trips/${journey.id}`, { journey: validated, revision }, "PUT");
-      setRevision(response.revision); setSavedFor(JSON.stringify(validated)); setNotice("All cities saved to Neon.");
+      setRevision(response.revision); setSavedFor(JSON.stringify(validated)); setNotice("Saved");
     });
   }
 
-  async function generate(candidate: Trip): Promise<PlanResult> {
+  async function generate(candidate: Trip): Promise<PlanningPreview> {
     setBusy("Planning your days");
     try {
       const version = editVersion.current;
       journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
       const validated = tripSchema.parse(candidate);
-      const response: PlanResult = await requestJson("/api/plan", { trip: validated, operationId: crypto.randomUUID() });
+      const response: PlanningPreview = await requestJson("/api/plan", { trip: validated, operationId: crypto.randomUUID() });
       if (version !== editVersion.current) throw new Error("The trip changed while planning. Your edits were kept; generate a new route.");
-      return response;
+      return response.status === "provisional" ? provisionalPlanSchema.parse(response) : response;
     } finally { setBusy(null); }
+  }
+
+  async function refreshTimes() {
+    if (!savedPlan || busy) return;
+    const controller = new AbortController();
+    refreshAbort.current = controller;
+    setRefreshOpen(true); setRefreshPreview(null); setBusy("Refreshing travel times"); setError(""); setNotice("");
+    const version = editVersion.current;
+    try {
+      const validated = tripSchema.parse(trip);
+      const response: PlanResult = await requestJson("/api/plan", { trip: validated, plan: savedPlan, mode: "refresh", operationId: crypto.randomUUID() }, "POST", controller.signal);
+      if (controller.signal.aborted) return;
+      if (version !== editVersion.current) throw new Error("The trip changed during refresh. Your saved itinerary was kept.");
+      if (!response.verified || validateSchedule(validated, response.schedule).length) throw new Error("Refreshed routes did not pass itinerary validation. Your saved plan was kept.");
+      const order = response.schedule.days.map(({ day, visits }) => ({ day, stopIds: visits.map((visit) => visit.stopId) })).sort((left, right) => left.day - right.day);
+      if (JSON.stringify(order) !== JSON.stringify([...savedPlan.days].sort((left, right) => left.day - right.day)) || JSON.stringify(response.schedule.omitted) !== JSON.stringify(savedPlan.omitted)) throw new Error("Refresh changed saved days, order or omissions. Your saved plan was kept.");
+      persistedPlan(response.schedule, validated, response.places);
+      setRefreshPreview({ result: response, trip: validated, tripKey: JSON.stringify(trip), planKey: JSON.stringify(savedPlan) });
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Travel-time refresh failed. Your saved plan was kept.");
+    } finally {
+      if (refreshAbort.current === controller) { refreshAbort.current = null; setBusy(null); }
+    }
   }
 
   function loadSaved(entry: SavedTrip) {
     if (!confirmDiscard()) return;
     openJourney(journeySchema.parse(asJourney(entry.data, entry.plan)), entry.revision, true);
-    setNotice("Trip loaded. Refresh routes for current travel times.");
+    setNotice("Trip loaded. Saved routes are not a live travel check.");
   }
 
   function download() {
@@ -213,7 +297,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       <div className="journey-cities"><div className="city-tabs" aria-label="Trip cities">{journey.cities.map((city) => <button key={city.id} disabled={Boolean(busy)} aria-pressed={trip.id === city.id} onClick={() => switchCity(city.id)}><MapPin size={15} /><span><strong>{city.city || "First city"}</strong><small>{city.startDate} to {tripDate(city, city.days - 1)}</small></span></button>)}</div><div className="row"><button className="text-button" disabled={Boolean(busy) || journey.cities.length >= 10} onClick={() => setSetup(journey.cities.length === 1 && !trip.city.trim() ? "new" : "add")}><Plus size={15} />Add cities</button>{journey.cities.length > 1 && <button className="icon-button danger" title="Remove current city" aria-label="Remove current city" disabled={Boolean(busy)} onClick={() => {
         if (!window.confirm(`Remove ${trip.city} and its places from this trip?`)) return;
         const nextCity = journey.cities.find((city) => city.id !== trip.id)!; switchCity(nextCity.id);
-        setJourney((current) => { const plans = { ...current.plans }; delete plans[trip.id]; return { ...current, cities: current.cities.filter((city) => city.id !== trip.id), plans }; });
+        setJourney((current) => { const plans = { ...current.plans }; const execution = { ...current.execution }; delete plans[trip.id]; delete execution[trip.id]; return { ...current, cities: current.cities.filter((city) => city.id !== trip.id), plans, execution }; });
         delete cityViews.current[trip.id];
       }}><Trash2 size={15} /></button>}</div></div>
 
@@ -237,6 +321,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
               }} /></label><label className="field">Days<select value={trip.days} onChange={(event) => {
                 const days = Number(event.target.value);
                 if (trip.stops.some((stop) => stop.day !== null && stop.day >= days)) { setError("A place is assigned beyond these dates. Adjust its date explicitly first."); return; }
+                if (trip.dayGroups?.some((group) => group.allowedDays.some((allowed) => allowed >= days))) { setError("A day-trip group includes later days. Adjust its eligible days explicitly first."); return; }
                 edit({ days }); setDay(Math.min(day, days - 1));
               }}>{Array.from({ length: 7 }, (_, index) => <option key={index} value={index + 1}>{index + 1} {index === 0 ? "day" : "days"}</option>)}</select></label></div>
               <div className="form-grid"><label className="field">Day starts<input type="time" value={trip.dailyStart} onChange={(event) => edit({ dailyStart: event.target.value })} /></label><label className="field">Day ends<input type="time" value={trip.dailyEnd} onChange={(event) => edit({ dailyEnd: event.target.value })} /></label></div>
@@ -248,11 +333,25 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
           <div className="section-tabs"><button className={tab === "places" ? "active" : ""} onClick={() => setTab("places")}>Places <span>{trip.stops.length}</span></button><button className={tab === "itinerary" ? "active" : ""} onClick={() => setTab("itinerary")}>Itinerary {result && <span>{plannedCount}</span>}</button><button className="text-button import-trigger" onClick={() => setImportOpen(true)}><FileInput size={15} />Import</button></div>
 
           {tab === "places" ? <div className="places-editor">
+            {duplicateReview && <Dialog title="Review duplicate places" onClose={() => setDuplicateReview(null)}>
+              {duplicateReview.error && <p className="notice error" role="alert">{duplicateReview.error}</p>}
+              {duplicatePair ? <>
+                <p className="notice">{duplicatePair.match}</p>
+                <fieldset className="duplicate-options"><legend>Visit details to keep</legend>{[duplicatePair.first, duplicatePair.second].map((stop) => <div className="duplicate-option" key={stop.id}>
+                  <label className="checkbox"><input type="radio" name="keep-duplicate" aria-label={`Keep ${stop.name}, visit ${trip.stops.findIndex((entry) => entry.id === stop.id) + 1}`} checked={duplicateReview.keepId === stop.id} onChange={() => setDuplicateReview((current) => ({ ignored: current?.ignored ?? [], keepId: stop.id, error: "" }))} /><strong>{stop.name}</strong></label>
+                  <dl><dt>Date</dt><dd>{stop.day === null ? "Flexible" : tripDate(trip, stop.day)}</dd><dt>Booked time</dt><dd>{stop.fixedTime ?? "None"}</dd><dt>Duration</dt><dd>{stop.duration} min</dd><dt>Arrival buffer</dt><dd>{stop.buffer} min</dd><dt>Visit</dt><dd>{stop.optional ? "Optional" : "Required"}, priority {stop.priority}</dd><dt>Transport</dt><dd>{stop.mode === "AUTO" ? "City default" : stop.mode === "WALK" ? "Walking" : "Public transit"}</dd><dt>Location</dt><dd>{stop.placeId ? "Confirmed" : "Not confirmed"}</dd></dl>
+                  {stop.source && <blockquote>{stop.source}</blockquote>}
+                  {stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}
+                </div>)}</fieldset>
+                <p className="notice warning">After merging: one visit with the selected date, time, duration and settings. Both source notes retained. The other visit is removed.</p>
+                <div className="dialog-actions"><button className="button secondary" onClick={() => setDuplicateReview((current) => ({ ignored: [...current!.ignored, `${duplicatePair.first.id}:${duplicatePair.second.id}`], keepId: null, error: "" }))}>Keep both visits</button><button className="button primary" disabled={![duplicatePair.first.id, duplicatePair.second.id].includes(duplicateReview.keepId ?? "")} onClick={mergeDuplicates}><Check size={16} />Merge visits</button></div>
+              </> : <><p className="notice" role="status">No more duplicate pairs to review.</p><div className="dialog-actions"><button className="button primary" onClick={() => setDuplicateReview(null)}>Done</button></div></>}
+            </Dialog>}
             <form className="add-place" onSubmit={(event) => { event.preventDefault(); addPlace(); }}><MapPin size={17} /><input aria-label="New place name" placeholder="Add a place to visit" value={adding} maxLength={200} onChange={(event) => setAdding(event.target.value)} /><button type="submit" className="icon-button" aria-label="Add place" title="Add place" disabled={!adding.trim() || trip.stops.length >= maxStopsPerCity}><Plus size={20} /></button></form>
-            {duplicateCount > 0 && <button className="button secondary small" onClick={mergeDuplicates}>Merge {duplicateCount} duplicate{duplicateCount === 1 ? "" : "s"}</button>}
-            {!trip.stops.length && <div className="empty-stops"><span className="empty-icon"><MapPin size={24} strokeWidth={1.4} /></span><h2>Your places, all together</h2><p>No places added yet.</p><button className="button secondary" onClick={() => setImportOpen(true)}><FileInput size={16} />Import itinerary</button></div>}
+            {duplicatePairs.length > 0 && <button className="button secondary small" onClick={() => setDuplicateReview({ ignored: [], keepId: null, error: "" })}><Search size={15} />Review duplicates ({duplicatePairs.length})</button>}
+            {!trip.stops.length && <div className="empty-stops"><span className="empty-icon"><MapPin size={24} strokeWidth={1.4} /></span><h2>No places yet</h2><button className="button secondary" onClick={() => setImportOpen(true)}><FileInput size={16} />Import itinerary</button></div>}
             <div className="stop-list">{trip.stops.map((stop, index) => <article key={stop.id} className={`stop-item ${selected === stop.id ? "selected" : ""}`}>
-              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span>{stop.fixedTime ? <LockKeyhole size={15} className="booking-icon" /> : stop.placeId ? <Check size={15} className="confirmed-icon" /> : <span className="unconfirmed-dot" title="Place not yet confirmed" />}<ChevronDown size={14} /></button>
+              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span><span className="stop-statuses">{stop.fixedTime && <span className="booking-status" role="img" aria-label="Booked appointment" title="Fixed booking date and time"><LockKeyhole size={16} className="booking-icon" /></span>}<span className="location-status" role="img" aria-label={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"} title={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"}>{stop.placeId ? <Check size={16} className="confirmed-icon" /> : <MapPinOff size={16} className="unconfirmed-icon" />}</span></span><ChevronDown size={14} /></button>
               {selected === stop.id && <div className="stop-details">
                 <label className="field">Place name<input value={stop.name} maxLength={200} onChange={(event) => { editStop(stop.id, { name: event.target.value, placeId: null, location: undefined }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }} /></label>
                 <button className="text-button" disabled={Boolean(busy)} onClick={() => openSearch(stop.id, stop.name)}>{stop.placeId ? <Check size={14} /> : <Search size={14} />}{stop.placeId ? "Place confirmed · change" : "Confirm place on map"}</button>
@@ -268,38 +367,64 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
             </article>)}</div>
             {!!trip.stops.length && <p className="list-footnote"><LockKeyhole size={12} />{trip.stops.filter((stop) => stop.fixedTime).length} fixed bookings <span>·</span> {trip.stops.filter((stop) => !stop.placeId).length} places to confirm</p>}
           </div> : <div className="itinerary-content">
+            {(isToday || execution) && <section className="today-summary"><div className="recovery-toolbar"><strong>{isToday ? "Today" : "Day progress"} · {execution?.completed.length ?? 0} completed</strong>{isToday && dayStopIds && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => setRecoveryOpen(true)}><Route size={15} />Today</button>}</div>{execution?.completed.map((visit) => <p className="recovery-fact" key={visit.stopId}><Check size={14} />{trip.stops.find((stop) => stop.id === visit.stopId)?.name ?? "Removed visit"} · Actual {formatActual(visit.start)} - {formatActual(visit.end)}</p>)}{[...progress.skipped, ...(progress.remaining?.skipped ?? [])].map((id) => <p className="recovery-fact" key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed visit"} · {progress.missedBookings.includes(id) ? "Missed booking" : "Skipped today"}</p>)}{checkedDay && <p className="quiet">Checked with Google at {new Date(checkedDay.checkedAt).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", timeZone: trip.timeZone })}</p>}</section>}
+            {checkedRoute && <div className="notice"><strong>Selected next route</strong><p>{checkedRoute.edge.mode === "WALK" ? "Walk" : "Transit"} · {checkedRoute.edge.minutes} min · {trip.stops.find((stop) => stop.id === checkedRoute.edge.to)?.name ?? trip.hotel}</p><span className="quiet">Checked with Google at {new Date(checkedRoute.checkedAt).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", timeZone: trip.timeZone })}; remaining travel is not refreshed.</span></div>}
             {stale && <p className="notice warning">This itinerary is out of date. Plan again after your changes.</p>}
-            {!result || stale ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>{stale ? "Schedule needs refresh" : savedPlan ? "Saved itinerary" : "A day worth taking"}</h2>{savedPlan ? <ol className="saved-order">{savedPlan.days.find((entry) => entry.day === day)?.stopIds.map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed stop"}</li>)}</ol> : <p>{stale ? "Your previous plan is retained until a new one succeeds." : "No schedule generated yet."}</p>}<button className="button primary" disabled={!trip.stops.length || Boolean(busy)} onClick={() => setPlanningOpen(true)}><Route size={16} />{savedPlan ? "Refresh travel times" : "Plan my days"}</button></div> : <>
-              <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{trip.hotel}</strong><span>Depart {trip.dailyStart}</span></div></div>
+            {!currentDay ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>{execution ? "Remaining today" : stale ? "Schedule needs refresh" : savedPlan ? "Saved itinerary" : "No itinerary yet"}</h2>{dayStopIds ? <ol className="saved-order">{remainingIds(dayStopIds, progress).map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed stop"}{progress.remaining?.durations[id] ? ` · ${progress.remaining.durations[id]} min` : ""}</li>)}</ol> : stale && <p>Your saved itinerary is unchanged.</p>}{execution ? <p className="quiet">Travel times need refreshing.</p> : <button className="button primary" disabled={!trip.stops.length || Boolean(busy)} onClick={() => savedPlan ? void refreshTimes() : setPlanningOpen(true)}><Route size={16} />{savedPlan ? "Refresh travel times" : "Plan my days"}</button>}</div> : <>
+              {!checkedDay && (savedRecovery || savedPlan?.snapshot) && <div className="notice"><strong>Saved {savedRecovery ? "day plan" : "itinerary"} · {currentDay.date} · {itineraryTrip.timeZone}</strong><p>Routes generated {savedRecovery?.checkedAt ?? savedPlan?.snapshot?.schedule.generatedAt}. Not a live travel check.</p>{!execution && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void refreshTimes()}><Route size={15} />Refresh travel times</button>}</div>}
+              <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{recoveryOrigin ? recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name : itineraryTrip.hotel}</strong><span>Depart {checkedDay || savedRecovery ? new Date(checkedDay?.departureAt ?? savedRecovery!.departureAt).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", timeZone: itineraryTrip.timeZone }) : itineraryTrip.dailyStart}</span></div></div>
               {currentDay?.visits.map((visit, index) => {
-                const stop = trip.stops.find((entry) => entry.id === visit.stopId);
+                const stop = itineraryTrip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={places} onMode={(mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => setSelected(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(trip, day, visit.start)} - {formatMinute(trip, day, visit.end)} · {stop.duration} min</span></span>{stop.fixedTime && <LockKeyhole size={15} />}</button></div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => setSelected(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span></span>{stop.fixedTime && <LockKeyhole size={15} />}</button></div>;
               })}
-              {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={places} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>Back to {trip.hotel}</strong><span>{formatMinute(trip, day, (currentDay.visits.at(-1)?.end ?? 0) + currentDay.returnLeg.minutes)}</span></div></div></>}
+              {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={recoveryPlaces} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>Back to {itineraryTrip.hotel}</strong><span>{formatMinute(itineraryTrip, day, (currentDay.visits.at(-1)?.end ?? (checkedDay || savedRecovery ? recoveryMinute(itineraryTrip, day, checkedDay?.departureAt ?? savedRecovery!.departureAt) : minuteAt(itineraryTrip, day, itineraryTrip.dailyStart))) + currentDay.returnLeg.minutes)}</span></div></div></>}
               {!currentDay?.visits.length && <p className="notice">No sights assigned to this day.</p>}
-              {!!result.schedule.omitted.length && <div className="notice warning"><strong>Optional places not scheduled</strong><ul>{result.schedule.omitted.map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name}</li>)}</ul></div>}
-              <div className="route-notices">{result.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>Walking routes may lack clear sidewalks or pedestrian paths. Use caution.</p><span>Route information: Google Maps</span></div>
+              {!checkedDay && !!result?.schedule.omitted.length && <div className="notice warning"><strong>Optional places not scheduled</strong><ul>{result.schedule.omitted.map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name}</li>)}</ul></div>}
+              <div className="route-notices">{!checkedDay && result?.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>Walking routes may lack clear sidewalks or pedestrian paths. Use caution.</p><span>Route information: Google Maps</span></div>
             </>}
           </div>}
         </section>
 
-        <section className="map-panel" aria-label="City map"><TripMap trip={trip} places={places} schedule={tab === "places" || stale ? null : result?.schedule ?? null} day={day} selected={selected} onSelect={setSelected} /><div className="map-heading"><span className="map-heading-dot" /><span>{trip.city || "Your city"}</span><span className="map-heading-divider" />{tab === "places" ? "All places" : `Day ${day + 1}`}</div>{tab === "itinerary" && result && !stale && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
+        <section className="map-panel" aria-label="City map"><TripMap trip={tab === "itinerary" ? itineraryTrip : trip} places={tab === "itinerary" ? recoveryPlaces : places} schedule={mapSchedule} currentLocation={tab === "itinerary" ? mapLocation : undefined} selectedRoute={tab === "itinerary" ? checkedRoute?.edge : undefined} day={day} selected={selected} onSelect={setSelected} /><div className="map-heading"><span className="map-heading-dot" /><span>{trip.city || "Your city"}</span><span className="map-heading-divider" />{tab === "places" ? "All places" : `Day ${day + 1}`}</div>{tab === "itinerary" && (checkedRoute || mapSchedule) && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
       </div>
     </main>
 
-    {planningOpen && <PlanningDialog trip={trip} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onPreview={generate} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
+    {refreshOpen && <Dialog title="Refresh travel times" onClose={() => { refreshAbort.current?.abort(); setRefreshOpen(false); setRefreshPreview(null); }}>
+      {busy === "Refreshing travel times" && <p className="notice" role="status"><LoaderCircle size={16} className="spin" />Checking the saved itinerary</p>}
+      {error && <p className="notice error" role="alert">{error}</p>}
+      {refreshPreview && <div aria-label="Refreshed itinerary preview">
+        {refreshPreview.result.schedule.days.map((entry) => <section key={entry.day}><h3>Day {entry.day + 1} · {entry.date}</h3>
+          {entry.visits.map((visit) => <div key={visit.stopId}><LegDetails edge={visit.leg} places={refreshPreview.result.places} /><p><strong>{refreshPreview.trip.stops.find((stop) => stop.id === visit.stopId)?.name}</strong> · {formatMinute(refreshPreview.trip, entry.day, visit.start)} - {formatMinute(refreshPreview.trip, entry.day, visit.end)}</p></div>)}
+          {entry.returnLeg && <><LegDetails edge={entry.returnLeg} places={refreshPreview.result.places} /><p>Back to {refreshPreview.trip.hotel} · {formatMinute(refreshPreview.trip, entry.day, (entry.visits.at(-1)?.end ?? minuteAt(refreshPreview.trip, entry.day, refreshPreview.trip.dailyStart)) + entry.returnLeg.minutes)}</p></>}
+        </section>)}
+        <div className="route-notices">{refreshPreview.result.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<span>Route information: Google Maps</span></div>
+      </div>}
+      <div className="dialog-actions"><button className="button secondary" onClick={() => { refreshAbort.current?.abort(); setRefreshOpen(false); setRefreshPreview(null); }}>Keep saved itinerary</button>
+        {refreshPreview && <button className="button primary" disabled={Boolean(busy) || refreshPreview.tripKey !== JSON.stringify(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan)} onClick={() => {
+          if (refreshPreview.tripKey !== JSON.stringify(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan) || validateSchedule(trip, refreshPreview.result.schedule).length) { setError("The trip changed. Refresh again before accepting new timings."); return; }
+          const accepted = persistedPlan(refreshPreview.result.schedule, trip, refreshPreview.result.places);
+          setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: accepted } }));
+          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(JSON.stringify(trip));
+          setRefreshOpen(false); setRefreshPreview(null); setError(""); setNotice("Travel times updated.");
+        }}><Check size={16} />Use refreshed times</button>}
+        {!busy && !refreshPreview && <button className="button secondary" onClick={() => { setRefreshOpen(false); setPlanningOpen(true); }}><Route size={16} />Replan itinerary</button>}
+      </div>
+    </Dialog>}
+    {planningOpen && <PlanningDialog trip={trip} places={places} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onPreview={generate} onCheck={(candidate) => requestJson("/api/plan", { trip: { ...candidate, dayGroups: undefined }, mode: "check", operationId: crypto.randomUUID() })} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
       journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
+      if (response && (!response.verified || validateSchedule(candidate, response.schedule).length)) throw new Error("Only a verified itinerary that respects the current preferences can be accepted.");
+      const acceptedPlan = response ? persistedPlan(response.schedule, candidate, response.places) : undefined;
       editVersion.current += 1; setTrip(candidate);
       if (response) {
         setResult(response); setPlaces(response.places); setPlannedFor(JSON.stringify(candidate)); setTab("itinerary"); setDay(0);
-        setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: persistedPlan(response.schedule) } }));
+        setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: acceptedPlan! } }));
       }
-      setPlanningOpen(false); setError(""); setNotice(response ? "Plan accepted. Review venue hours and ticket conditions before departure." : "Planning preferences applied. Generate a preview to check the routes.");
+      setPlanningOpen(false); setError(""); setNotice(response ? "Itinerary updated. Check venue hours and ticket conditions before departure." : "Planning preferences updated.");
     }} />}
-    {importOpen && <ImportReview trip={trip} canExtract={Boolean(canUseServices && config.ai)} onClose={() => setImportOpen(false)} onImport={(stops, existing) => { edit({ stops: [...existing, ...stops] }); setTab("places"); setNotice(`${stops.length} places added. Confirm each place on the map before planning.`); }} />}
+    {importOpen && <ImportReview trip={trip} extraction={config.extraction} canExtract={Boolean(canUseServices && config.ai)} onClose={() => setImportOpen(false)} onImport={(stops, existing) => { const combined = tripSchema.shape.stops.parse([...existing, ...stops]); if (combined.some((stop) => stop.day !== null && stop.day >= trip.days)) throw new Error("A visit is assigned outside this trip."); edit({ stops: combined }); setTab("places"); setNotice(stops.length ? `${stops.length} places added. Confirm each place on the map before planning.` : "Approved duplicate updates applied."); }} />}
     {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. Try the hotel address or a more specific name.</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small></span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
-    {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Neon database", ready: config.database }, { label: "Google Maps display", ready: config.maps }, { label: "Places and routes", ready: config.routes }, { label: "Gemini extraction", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Configured" : "Not configured"}</span></div>)}</div><p className="notice">Server credentials belong in environment variables. Never include them in a trip or uploaded document.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Personal account allowlist · capped API usage</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}
+    {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Trip storage", ready: config.database }, { label: "Google Maps", ready: config.maps }, { label: "Place search and routes", ready: config.routes }, { label: "AI import", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Enabled" : "Not set up"}</span></div>)}</div><p className="notice">Do not include passwords or API keys in trips or uploaded documents.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Restricted access · Usage limits apply</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}
     {savedTrips && <Dialog title="My trips" onClose={() => setSavedTrips(null)}><div className="saved-trips">{savedTrips.length ? savedTrips.map((entry) => <div key={entry.data.id}><button className="saved-trip" disabled={Boolean(busy)} onClick={() => loadSaved(entry)}><span className="saved-trip-icon"><MapPin size={22} /></span><span><strong>{entry.data.title}</strong><small>{asJourney(entry.data).cities.map((city) => city.city).join(" / ")} · {asJourney(entry.data).cities[0].startDate}</small></span><ArrowUpRight size={17} /></button><button className="icon-button danger" title={`Delete ${entry.data.title}`} aria-label={`Delete ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => { if (window.confirm(`Delete ${entry.data.title}?`)) void perform("Deleting trip", async () => { await requestJson(`/api/trips/${entry.data.id}`, undefined, "DELETE"); setSavedTrips((current) => current!.filter((item) => item.data.id !== entry.data.id)); if (journey.id === entry.data.id) { setRevision(0); setSavedFor(""); } }); }}><Trash2 size={17} /></button></div>) : <p className="notice">No saved trips yet.</p>}</div><div className="dialog-actions"><button className="button primary" disabled={Boolean(busy)} onClick={() => { setSavedTrips(null); setSetup("new"); }}><Plus size={16} />New trip</button></div></Dialog>}
     {setup && <NewTripDialog adding={setup === "add"} available={setup === "add" ? 10 - journey.cities.length : 10} startDate={setup === "add" ? tripDate(journey.cities.at(-1)!, journey.cities.at(-1)!.days) : newTrip().startDate} onClose={() => setSetup(null)} onCreate={(next) => {
       if (setup === "new") { if (confirmDiscard()) openJourney(next); }
@@ -312,6 +437,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const file = event.target.files?.[0]; if (!file) return;
       void perform("Opening backup", async () => { if (file.size > 10_000_000) throw new Error("The backup is too large."); const restored = restoreJourney(JSON.parse(await file.text())); if (confirmDiscard()) openJourney(restored); });
     }} />
+    {recoveryOpen && dayStopIds && <DayRecoveryDialog key={`${trip.id}:${date}`} trip={trip} day={day} stopIds={dayStopIds} progress={progress} plannedDay={currentDay} selectedRoute={checkedRoute} onClearRoute={() => setLiveRoute(undefined)} onProgress={recordProgress} onClose={() => setRecoveryOpen(false)} onRoute={(route) => { setLiveRoute({ ...route, cityId: trip.id, day, version: progress.version, planKey: recoveryPlanKey(trip, day, dayStopIds) }); }} onApply={(request, option, checkedAt) => {
+      if (progress.version !== request.progress.version || request.progress.planKey !== recoveryPlanKey(trip, day, dayStopIds) || validateDayRecovery(request, option).length) throw new Error("The day changed. Refresh the recovery preview.");
+      const next = applyDayRecovery(progress, option, { trip, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin, places }); recordProgress(next);
+      setLiveDay({ cityId: trip.id, version: next.version, planKey: next.planKey, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin });
+      setNotice("Today's plan updated. Other days are unchanged.");
+    }} />}
   </div>;
 }
 
@@ -320,8 +451,8 @@ function LegDetails({ edge, places, onMode }: { edge: TravelEdge; places: Record
   const destination = places[edge.to];
   const url = new URL("https://www.google.com/maps/dir/");
   url.searchParams.set("api", "1"); url.searchParams.set("origin", origin?.name ?? edge.from); url.searchParams.set("destination", destination?.name ?? edge.to);
-  if (origin) url.searchParams.set("origin_place_id", origin.id);
+  if (origin?.id) url.searchParams.set("origin_place_id", origin.id);
   if (destination) url.searchParams.set("destination_place_id", destination.id);
   url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
-  return <details className="travel-leg"><summary>{edge.mode === "WALK" ? <Footprints size={15} /> : <TrainFront size={15} />}<span>{edge.mode === "WALK" ? "Walk" : "Public transit"} · {edge.minutes} min {edge.mode === "WALK" && `· ${(edge.meters / 1000).toFixed(1)} km`}</span><ChevronDown size={13} /></summary><div className="leg-details"><div className="transport-options">{[edge, ...(edge.alternatives ?? [])].map((option) => <button key={option.mode} disabled={!onMode || option.mode === edge.mode} aria-pressed={option.mode === edge.mode} title={`Prefer ${option.mode === "WALK" ? "walking" : "public transit"} and replan`} onClick={() => onMode?.(option.mode)}>{option.mode === "WALK" ? <Footprints size={14} /> : <TrainFront size={14} />}<span>{option.mode === "WALK" ? "Walk" : "Transit"}<strong>{option.minutes} min</strong></span></button>)}</div>{edge.steps?.map((step, index) => <p key={index}>{step.line && <strong>{step.line} </strong>}{step.from && step.to ? `${step.from} to ${step.to}` : step.instruction}</p>)}{edge.fare && <p>Estimated fare: {edge.fare}</p>}<a href={url.toString()} target="_blank" rel="noreferrer">Open in Google Maps <ArrowUpRight size={13} /></a></div></details>;
+  return <details className="travel-leg"><summary>{edge.mode === "WALK" ? <Footprints size={15} /> : <TrainFront size={15} />}<span>{edge.mode === "WALK" ? "Walk" : "Public transit"} · {edge.minutes} min{edge.assumed ? " (assumed, not checked with Google)" : ""}{edge.timetableDate ? ` (timetable of ${edge.timetableDate})` : ""} {edge.mode === "WALK" && `· ${(edge.meters / 1000).toFixed(1)} km`}</span><ChevronDown size={13} /></summary><div className="leg-details"><div className="transport-options">{[edge, ...(edge.alternatives ?? [])].map((option) => <button key={option.mode} disabled={!onMode || option.mode === edge.mode} aria-pressed={option.mode === edge.mode} title={`Prefer ${option.mode === "WALK" ? "walking" : "public transit"} and replan`} onClick={() => onMode?.(option.mode)}>{option.mode === "WALK" ? <Footprints size={14} /> : <TrainFront size={14} />}<span>{option.mode === "WALK" ? "Walk" : "Transit"}<strong>{option.minutes} min</strong></span></button>)}</div>{edge.steps?.map((step, index) => <p key={index}>{step.line && <strong>{step.line} </strong>}{step.from && step.to ? `${step.from} to ${step.to}` : step.instruction}</p>)}{edge.fare && <p>Estimated fare: {edge.fare}</p>}<a href={url.toString()} target="_blank" rel="noreferrer">Open in Google Maps <ArrowUpRight size={13} /></a></div></details>;
 }
