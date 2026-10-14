@@ -1,8 +1,8 @@
-import { auth, authConfigured } from "@/auth";
+import { redirect } from "next/navigation";
+import { auth, authConfigured, canEdit } from "@/auth";
 import { TripPlanner } from "@/components/TripPlanner";
 import { newTrip } from "@/lib/trip";
 import { desc, eq } from "drizzle-orm";
-import { allowedEmail } from "@/auth";
 import { database } from "@/db";
 import { trips } from "@/db/schema";
 import { extractionServices } from "@/lib/import-providers";
@@ -13,10 +13,12 @@ export default async function Home() {
   const configured = authConfigured();
   const session = configured ? await auth() : null;
   const email = session?.user?.email;
-  let saved: { data: unknown; revision: number; plan: unknown; updatedAt: Date }[] = [];
-  if (email && allowedEmail(email) && process.env.DATABASE_URL) {
+  // Accounts that can only view go straight to the trips shared with everyone.
+  if (email && !canEdit(email)) redirect("/shared");
+  let saved: { data: unknown; revision: number; plan: unknown; shared: boolean; updatedAt: Date }[] = [];
+  if (email && process.env.DATABASE_URL) {
     try {
-      saved = await database().select({ data: trips.data, revision: trips.revision, plan: trips.plan, updatedAt: trips.updatedAt }).from(trips).where(eq(trips.owner, email.toLowerCase())).orderBy(desc(trips.updatedAt)).limit(100);
+      saved = await database().select({ data: trips.data, revision: trips.revision, plan: trips.plan, shared: trips.shared, updatedAt: trips.updatedAt }).from(trips).where(eq(trips.owner, email.toLowerCase())).orderBy(desc(trips.updatedAt)).limit(100);
     } catch { saved = []; }
   }
   const plain = JSON.parse(JSON.stringify(saved));

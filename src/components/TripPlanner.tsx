@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, FileInput, FolderOpen, Footprints, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, TrainFront, Trash2, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, Eye, FileInput, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
@@ -23,11 +23,13 @@ import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, ty
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 import { alternativeGroups } from "@/lib/visit-slots";
-import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, maxStopsPerCity, newStop, newTrip, persistedPlan, planningFixSchema, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
+import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, maxStopsPerCity, newStop, newTrip, persistedPlan, planningFixSchema, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
 import { OmittedPlaces } from "./OmittedPlaces";
+import { LegDetails } from "./LegDetails";
+import { ShareTrip } from "./ShareTrip";
 
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; email: string | null };
-type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; updatedAt: string };
+type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; shared?: boolean; updatedAt: string };
 type PhotoSession = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
 async function requestJson(url: string, body?: unknown, method = "POST", signal?: AbortSignal) {
@@ -81,6 +83,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [liveRoute, setLiveRoute] = useState<CheckedNextRoute & { cityId: string; day: number; version: number; planKey: string }>();
   const [setup, setSetup] = useState<"new" | "add" | null>(null);
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
+  // Which saved trips are shared for viewing, by trip id.
+  const [shared, setShared] = useState<Record<string, boolean>>(() => Object.fromEntries([...(initialSaved ? [initialSaved] : []), ...(initialList ?? [])].map((entry) => [entry.data.id, Boolean(entry.shared)])));
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
   const [matches, setMatches] = useState<Place[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
@@ -391,15 +395,17 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       <Link className="brand" href="/" aria-label="Traveller home"><span className="brand-mark"><Compass size={23} /></span>traveller<span className="brand-dot">.</span></Link>
       <nav aria-label="Main navigation"><button className="nav-button active" aria-label="My trips" title="My trips" disabled={Boolean(busy)} onClick={() => void perform("Loading trips", async () => {
         if (!canUseServices) { setSettingsOpen(true); return; }
-        setSavedTrips((await requestJson("/api/trips", undefined, "GET")).trips);
-      })}><FolderOpen size={17} /><span>My trips</span></button><button className="nav-button new-trip-trigger" aria-label="New trip" title="New trip" disabled={Boolean(busy)} onClick={() => setSetup("new")}><Plus size={17} /><span>New trip</span></button></nav>
+        const list: SavedTrip[] = (await requestJson("/api/trips", undefined, "GET")).trips;
+        setShared((current) => ({ ...current, ...Object.fromEntries(list.map((entry) => [entry.data.id, Boolean(entry.shared)])) }));
+        setSavedTrips(list);
+      })}><FolderOpen size={17} /><span>My trips</span></button><button className="nav-button new-trip-trigger" aria-label="New trip" title="New trip" disabled={Boolean(busy)} onClick={() => setSetup("new")}><Plus size={17} /><span>New trip</span></button>{config.email && <Link className="nav-button" href="/shared" title="Trips shared for viewing"><Eye size={17} /><span>Shared</span></Link>}</nav>
       <div className="header-actions"><button className="icon-button" title="Connections and settings" aria-label="Connections and settings" onClick={() => setSettingsOpen(true)}><Settings2 size={18} /></button><span className="header-divider" />{config.email ? <button className="account-button" title={config.email} onClick={() => void signOut()}><span className="avatar">{config.email[0].toUpperCase()}</span><span>Sign out</span></button> : <button className="button secondary small" onClick={() => config.auth ? void signIn("google") : setSettingsOpen(true)}><UserRound size={15} />Sign in</button>}</div>
     </header>
 
     <main className="planner-main">
       <section className="trip-heading">
         <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : ""}`}>{snapshot === savedFor ? "Saved" : "Unsaved draft"}</span></div></div>
-        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} /><button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
+        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} />{canUseServices && <ShareTrip tripId={journey.id} shared={Boolean(shared[journey.id])} disabled={Boolean(busy) || revision === 0} onChange={(value) => setShared((current) => ({ ...current, [journey.id]: value }))} />}<button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
       </section>
 
       {(error || notice) && <div className={`banner ${error ? "error" : "success"}`} role={error ? "alert" : "status"}><span>{error || notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => { setError(""); setNotice(""); }}><X size={16} /></button></div>}
@@ -562,16 +568,4 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
   </div>;
-}
-
-function LegDetails({ edge, places, onMode, endpointToDeparture = false }: { edge: TravelEdge; places: Record<string, Place>; onMode?: (mode: "WALK" | "TRANSIT") => void; endpointToDeparture?: boolean }) {
-  const origin = places[edge.from];
-  // Last leg of a direct departure day: "hotel" stands for the airport or station.
-  const destination = endpointToDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
-  const url = new URL("https://www.google.com/maps/dir/");
-  url.searchParams.set("api", "1"); url.searchParams.set("origin", origin?.name ?? edge.from); url.searchParams.set("destination", destination?.name ?? edge.to);
-  if (origin?.id) url.searchParams.set("origin_place_id", origin.id);
-  if (destination) url.searchParams.set("destination_place_id", destination.id);
-  url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
-  return <details className="travel-leg"><summary>{edge.mode === "WALK" ? <Footprints size={15} /> : <TrainFront size={15} />}<span>{edge.mode === "WALK" ? "Walk" : "Public transit"} · {edge.minutes} min{edge.assumed ? " (assumed, not checked with Google)" : ""}{edge.timetableDate ? ` (timetable of ${edge.timetableDate})` : ""} {edge.mode === "WALK" && `· ${(edge.meters / 1000).toFixed(1)} km`}</span><ChevronDown size={13} /></summary><div className="leg-details"><div className="transport-options">{[edge, ...(edge.alternatives ?? [])].map((option) => <button key={option.mode} disabled={!onMode || option.mode === edge.mode} aria-pressed={option.mode === edge.mode} title={`Prefer ${option.mode === "WALK" ? "walking" : "public transit"} and replan`} onClick={() => onMode?.(option.mode)}>{option.mode === "WALK" ? <Footprints size={14} /> : <TrainFront size={14} />}<span>{option.mode === "WALK" ? "Walk" : "Transit"}<strong>{option.minutes} min</strong></span></button>)}</div>{edge.steps?.map((step, index) => <p key={index}>{step.line && <strong>{step.line} </strong>}{step.from && step.to ? `${step.from} to ${step.to}` : step.instruction}</p>)}{edge.fare && <p>Estimated fare: {edge.fare}</p>}<a href={url.toString()} target="_blank" rel="noreferrer">Open in Google Maps <ArrowUpRight size={13} /></a></div></details>;
 }

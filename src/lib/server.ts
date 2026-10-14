@@ -1,7 +1,7 @@
 import "server-only";
 import { z, ZodError } from "zod";
 import { sql } from "drizzle-orm";
-import { auth, allowedEmail, authConfigured } from "@/auth";
+import { auth, authConfigured, canEdit } from "@/auth";
 import { database } from "@/db";
 import { operations, usage } from "@/db/schema";
 
@@ -9,16 +9,24 @@ export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-export async function requireOwner(request?: Request) {
+// Any signed-in Google account: enough to view trips shared for viewing.
+export async function requireViewer() {
   if (!authConfigured()) throw new HttpError(503, "Google sign-in is not configured yet.");
   const session = await auth();
   const email = session?.user?.email;
-  if (!email || !allowedEmail(email)) throw new HttpError(401, "Sign in with an allowed account first.");
+  if (!email) throw new HttpError(401, "Sign in first.");
+  return email.toLowerCase();
+}
+
+// An editor: required to save trips and to use any paid service.
+export async function requireOwner(request?: Request) {
+  const email = await requireViewer();
+  if (!canEdit(email)) throw new HttpError(403, "This account can view shared trips only.");
   if (request && request.method !== "GET") {
     const origin = request.headers.get("origin");
     if (!origin || origin !== new URL(request.url).origin) throw new HttpError(403, "Request origin is not allowed.");
   }
-  return email.toLowerCase();
+  return email;
 }
 
 export async function readJson(request: Request, maxBytes = 3_500_000): Promise<unknown> {

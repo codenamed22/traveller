@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { PUT } from "./route";
+import { PATCH, PUT } from "./route";
 import { createJourney } from "@/lib/journey";
 import { newTrip } from "@/lib/trip";
 
@@ -48,5 +48,29 @@ describe("journey persistence", () => {
     expect(condition.params).toEqual([journey.id, "owner@example.com", 2]);
     expect((await save(crypto.randomUUID(), { journey, revision: 0 })).status).toBe(400);
     expect(mocks.insert).not.toHaveBeenCalled();
+  });
+});
+describe("sharing for viewing", () => {
+  const share = (id: string, body: unknown) => PATCH(new Request(`http://localhost/api/trips/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }), { params: Promise.resolve({ tripId: id }) });
+
+  it("changes only the owner's own trip and leaves its revision alone", async () => {
+    const id = crypto.randomUUID();
+    mocks.returning.mockResolvedValue([{ shared: true }]);
+    const response = await share(id, { shared: true });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ shared: true });
+    expect(mocks.set).toHaveBeenCalledWith({ shared: true });
+    expect(new PgDialect().sqlToQuery(mocks.where.mock.calls[0][0]).params).toEqual([id, "owner@example.com"]);
+  });
+
+  it("refuses unsaved trips, bad input and viewers", async () => {
+    mocks.returning.mockResolvedValue([]);
+    expect((await share(crypto.randomUUID(), { shared: true })).status).toBe(404);
+    expect((await share(crypto.randomUUID(), { shared: "yes" })).status).toBe(400);
+    expect((await share(crypto.randomUUID(), { shared: true, revision: 3 })).status).toBe(400);
+    expect((await share("not-a-trip", { shared: true })).status).toBe(400);
+    const { HttpError } = await import("@/lib/server");
+    mocks.owner.mockRejectedValue(new HttpError(403, "This account can view shared trips only."));
+    expect((await share(crypto.randomUUID(), { shared: true })).status).toBe(403);
   });
 });

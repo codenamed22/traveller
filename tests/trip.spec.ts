@@ -161,6 +161,17 @@ test("paid and persistence endpoints reject unauthenticated access", async ({ re
   }
   const response = await request.get("/api/trips");
   expect([401, 503]).toContain(response.status());
+  const shared = await request.patch(`/api/trips/${crypto.randomUUID()}`, { data: { shared: true } });
+  expect([401, 503]).toContain(shared.status());
+});
+
+test("shared trips ask for sign-in and never show a trip to a visitor", async ({ page }) => {
+  for (const path of ["/shared", `/shared/${crypto.randomUUID()}`]) {
+    await page.goto(path);
+    await expect(page.getByRole("heading", { name: "Sign in to view shared trips" })).toBeVisible();
+    await expect(page.getByText("Google sign-in is not configured yet.")).toBeVisible();
+  }
+  expect((await page.goto("/shared/not-a-trip"))!.status()).toBe(404);
 });
 
 test("place photos stay unavailable without connections and never enter trip backups", async ({ page }, testInfo) => {

@@ -42,7 +42,7 @@ Set local values in an ignored `.env.local` at the project root. `.env.example` 
 | `DATABASE_URL` | Neon pooled Postgres connection string; use TLS |
 | `AUTH_SECRET` | Random authentication secret, at least 32 bytes of entropy |
 | `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` | Google OAuth web-client credentials |
-| `ALLOWED_EMAILS` | Comma-separated personal email allowlist; verified Google email required |
+| `ALLOWED_EMAILS` | Comma-separated editor emails: they create, edit, save and plan trips and use paid services. Any other verified Google account can sign in as a viewer of shared trips only |
 | `AUTH_URL` | Canonical app origin; localhost for local use, deployed HTTPS origin on Vercel |
 | `GOOGLE_MAPS_API_KEY` | Server-only Places API (New) and Routes API key |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Browser key restricted to Maps JavaScript API and allowed website referrers |
@@ -51,6 +51,8 @@ Set local values in an ignored `.env.local` at the project root. `.env.example` 
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Optional extraction provider/model for text, links, and images; takes precedence over Gemini for these sources, never for YouTube |
 | `GEMINI_TIMING_MODEL` | Optional Search-grounded timing model; defaults to `gemini-2.5-flash-lite`, independently of the import model |
 | `DAILY_USAGE_LIMIT` | Per-account daily service-unit cap; default 200 |
+
+Because viewers can sign in with any Google account, the OAuth consent screen must be **In production** (or each viewer added as a test user while it is in Testing); otherwise Google itself refuses their sign-in.
 
 Register `http://localhost:3000/api/auth/callback/google` and the corresponding deployed URL as OAuth redirect URIs. Use one hostname consistently: a localhost OAuth callback is different from 127.0.0.1.
 
@@ -74,7 +76,9 @@ npm run db:generate
 
 The schema stores owner-scoped trips, accepted day/stop order, optimistic revisions, daily usage counters, and operation IDs. A stale revision cannot overwrite a newer edit. Retain operation IDs for idempotency; old usage and operation records can be pruned under an explicit maintenance policy. There is no automatic database migration during a build.
 
-A whole multi-city journey and its per-city itinerary snapshots occupy one JSONB row and are saved atomically with one revision. Existing single-city rows are wrapped on load. This needs no additional SQL migration beyond the initial checked-in migration.
+A whole multi-city journey and its per-city itinerary snapshots occupy one JSONB row and are saved atomically with one revision. Existing single-city rows are wrapped on load.
+
+Migration `0001` adds the `shared` flag to trips for read-only sharing. Run `npm run db:migrate` before deploying this version: until it is applied, saved trips fail to load.
 
 ## Planning Behavior
 
@@ -137,6 +141,12 @@ The next city may start on the previous city's last day, so a morning in one cit
 - **PDF**: opens a printable itinerary in a new tab and the browser's print dialog; choose **Save as PDF**. One section per city with hotel, departure time, each visit's times, booking/optional tags, address, notes, travel (mode, minutes, transit lines, fare) and return to the hotel. Place names link to Google Maps and each leg links to directions. If pop-ups are blocked the page is downloaded as HTML instead.
 - **Excel (.xlsx)**: an *Itinerary* sheet with one row per visit and hotel return (city, date, times, place, booked, minutes, travel, address, notes, map and directions links), plus *Not scheduled* and *Stays* sheets. The workbook is written directly (Office Open XML in a stored ZIP), with no spreadsheet library.
 - **Calendar (.ics)**: one event per visit in UTC with address, travel, notes and links, for Google Calendar, Apple Calendar or Outlook.
+
+**Share for viewing** (the eye icon, after the trip has been saved) lets anyone who signs in with Google open the trip at `/shared/<trip id>`; the dialog has the link to copy. Every shared trip is also listed at **Shared trips** (`/shared`).
+- Viewers see each city's last saved, accepted itinerary: days, times, travel legs with directions links, the arrival and departure, optional places that could be squeezed in, the map and the PDF/Excel/calendar exports. A city without an accepted plan shows "Not planned yet"; one edited since its plan says so.
+- Viewers cannot edit, save, plan, refresh routes or load photos, and every server route that writes or calls a paid service still requires an editor (`ALLOWED_EMAILS`); a viewer gets 403. The viewer page is a separate read-only component that receives only the cities and accepted plans, never day progress or the owner's email.
+- A signed-in viewer opening `/` goes to **Shared trips**. Turning sharing off hides the trip from viewers immediately. Sharing never changes the trip's revision, so it cannot conflict with an autosave. The owner can always preview their own trip's shared page.
+- To let someone edit their own trips, add their email to `ALLOWED_EMAILS` and redeploy. Each editor's trips stay private to them unless shared.
 
 Alternatives from one itinerary line ("Albert Cuyp Market or Roopram Roti") that both fit are tagged **Alternative to …** in the app and exports, and the second repeats "Same note as …" instead of the shared note.
 

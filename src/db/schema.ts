@@ -1,4 +1,4 @@
-import { integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import type { SavedPlan } from "@/lib/trip";
 import type { StoredTrip } from "@/lib/journey";
 
@@ -8,6 +8,8 @@ export const trips = pgTable("trips", {
   data: jsonb("data").$type<StoredTrip>().notNull(),
   plan: jsonb("plan").$type<SavedPlan>(),
   revision: integer("revision").notNull().default(1),
+  // Shared for viewing: any signed-in account can open the trip read-only.
+  shared: boolean("shared").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

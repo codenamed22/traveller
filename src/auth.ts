@@ -9,12 +9,15 @@ export function allowedEmail(email: string | null | undefined) {
   return Boolean(email && process.env.ALLOWED_EMAILS?.split(",").map((entry) => entry.trim().toLowerCase()).includes(email.toLowerCase()));
 }
 
+// Editors create, edit and plan trips; anyone else who signs in can only view trips shared for viewing.
+export const canEdit = allowedEmail;
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
   callbacks: {
     signIn({ user, profile }) {
-      return profile?.email_verified === true && allowedEmail(user.email);
+      return profile?.email_verified === true && Boolean(user.email);
     },
   },
 });

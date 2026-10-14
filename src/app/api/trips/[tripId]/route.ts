@@ -39,3 +39,15 @@ export async function DELETE(request: Request, context: Context) {
     return new Response(null, { status: 204 });
   } catch (error) { return apiError(error); }
 }
+
+// Shares the trip for viewing, or stops sharing it. Leaves the revision alone so it never conflicts with an autosave.
+export async function PATCH(request: Request, context: Context) {
+  try {
+    const owner = await requireOwner(request);
+    const tripId = z.uuid().parse((await context.params).tripId);
+    const { shared } = z.object({ shared: z.boolean() }).strict().parse(await readJson(request, 1_000));
+    const rows = await database().update(trips).set({ shared }).where(and(eq(trips.id, tripId), eq(trips.owner, owner))).returning({ shared: trips.shared });
+    if (!rows.length) throw new HttpError(404, "Save the trip before sharing it.");
+    return Response.json(rows[0]);
+  } catch (error) { return apiError(error); }
+}

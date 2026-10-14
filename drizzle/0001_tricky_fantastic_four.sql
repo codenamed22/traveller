@@ -1,0 +1,1 @@
+ALTER TABLE "trips" ADD COLUMN "shared" boolean DEFAULT false NOT NULL;
