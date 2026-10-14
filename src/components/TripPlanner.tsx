@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, Eye, FileInput, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Download, Eye, FileInput, Navigation, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
@@ -27,6 +27,8 @@ import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowa
 import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
+import { TripMode } from "./TripMode";
+import { tripModeDays } from "@/lib/trip-mode";
 
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; shared?: boolean; updatedAt: string };
@@ -84,6 +86,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [setup, setSetup] = useState<"new" | "add" | null>(null);
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
   // Which saved trips are shared for viewing, by trip id.
+  const [tripMode, setTripMode] = useState(false);
   const [shared, setShared] = useState<Record<string, boolean>>(() => Object.fromEntries([...(initialSaved ? [initialSaved] : []), ...(initialList ?? [])].map((entry) => [entry.data.id, Boolean(entry.shared)])));
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
   const [matches, setMatches] = useState<Place[]>([]);
@@ -100,6 +103,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const canPlan = canUseServices && config.routes;
   const saving = useRef(false);
   useEffect(() => { const timer = setInterval(() => setNow(Temporal.Now.instant()), 60_000); return () => clearInterval(timer); }, []);
+  // A reload on #trip reopens trip mode. The hash is only known in the browser, after hydration.
+  useEffect(() => { if (window.location.hash.startsWith("#trip") && journey.cities.some((city) => journey.plans[city.id]?.snapshot)) setTripMode(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!canUseServices || snapshot === savedFor || busy) return;
@@ -133,10 +138,18 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const itineraryTrip = checkedDay ? trip : savedRecovery?.trip ?? savedPlan?.snapshot?.trip ?? trip;
   let isToday = false;
   try { isToday = date === now.toZonedDateTimeISO(trip.timeZone).toPlainDate().toString(); } catch { isToday = false; }
-  function recordProgress(next: DayProgress) {
+  function recordProgress(next: DayProgress) { recordCityProgress(trip.id, date, next); }
+  // Progress for any city and date; trip mode records it for the day it shows, and Undo can remove it again.
+  function recordCityProgress(cityId: string, progressDate: string, next: DayProgress | undefined) {
     editVersion.current++; setLiveDay(undefined); setLiveRoute(undefined);
-    setJourney((current) => ({ ...current, execution: { ...current.execution, [trip.id]: { ...current.execution?.[trip.id], [date]: next } } }));
+    setJourney((current) => {
+      const city = { ...current.execution?.[cityId] };
+      if (next) city[progressDate] = next; else delete city[progressDate];
+      return { ...current, execution: { ...current.execution, [cityId]: city } };
+    });
   }
+  const tripModeReady = journey.cities.some((city) => journey.plans[city.id]?.snapshot);
+  const todayInTrip = useMemo(() => tripModeReady && tripModeDays(journey.cities, journey.plans, journey.execution, now).some((entry) => entry.isToday), [tripModeReady, journey, now]);
   const mapSchedule = tab === "places" ? null : checkedDay ? { generatedAt: checkedDay.checkedAt, warnings: [], omitted: [], days: [checkedDay.day] } : savedRecovery ? { generatedAt: savedRecovery.checkedAt, warnings: [], omitted: [], days: [savedRecovery.day] } : execution ? null : result?.schedule ?? null;
   const markerOrder = tab === "places"
     ? savedPlan?.days.slice().sort((left, right) => left.day - right.day).flatMap((entry) => entry.stopIds)
@@ -417,7 +430,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
         delete cityViews.current[trip.id];
       }}><Trash2 size={15} /></button>}</div></div>
 
-      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day">{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => setDay(index)}><span>Day {index + 1}</span><small>{trip.startDate ? new Date(`${tripDate(trip, index)}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" }) : ""}</small></button>)}</div><div className="toolbar-right"><span className="quiet desktop-only">{trip.stops.length} places · {trip.stops.filter((stop) => stop.fixedTime).length} bookings</span><div className="segmented mobile-tabs"><button aria-pressed={view === "list"} onClick={() => setView("list")}><List size={16} />List</button><button aria-pressed={view === "map"} onClick={() => setView("map")}><Map size={16} />Map</button></div></div></div>
+      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day">{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => setDay(index)}><span>Day {index + 1}</span><small>{trip.startDate ? new Date(`${tripDate(trip, index)}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" }) : ""}</small></button>)}</div><div className="toolbar-right">{tripModeReady && <button className="button secondary small trip-mode-button" onClick={() => setTripMode(true)}><Navigation size={15} />Trip mode</button>}<span className="quiet desktop-only">{trip.stops.length} places · {trip.stops.filter((stop) => stop.fixedTime).length} bookings</span><div className="segmented mobile-tabs"><button aria-pressed={view === "list"} onClick={() => setView("list")}><List size={16} />List</button><button aria-pressed={view === "map"} onClick={() => setView("map")}><Map size={16} />Map</button></div></div></div>
 
       <div className={`workspace mobile-view-${view}`}>
         <section className="planning-panel" aria-label="Trip editor">
@@ -566,6 +579,11 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const next = applyDayRecovery(progress, option, { trip, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin, places }); recordProgress(next);
       setLiveDay({ cityId: trip.id, version: next.version, planKey: next.planKey, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin });
       setNotice("Today's plan updated. Other days are unchanged.");
+    }} />}
+    {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack onProgress={recordCityProgress} onClose={() => setTripMode(false)} onAdjustToday={(cityId, targetDay) => {
+      if (cityId !== trip.id) switchCity(cityId);
+      setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
     }} />}
   </div>;
 }

@@ -152,6 +152,15 @@ Alternatives from one itinerary line ("Albert Cuyp Market or Roopram Roti") that
 
 Notes copied from an original itinerary drop their own clock-time lines (for example "17:50 – 18:35 | Toki") so they never contradict the planned times.
 
+### Trip Mode On Your Phone
+
+**Start trip** (the green button at the bottom of the screen on phones; **Trip mode** in the day toolbar on larger screens) opens the accepted itinerary full screen, one day at a time, with the map in front. It shows on any trip with at least one accepted city plan, and reads **Today's plan** when today is one of the trip's days in that city's time zone. It opens on today, otherwise on the day you were looking at.
+- The bottom card answers "what's next": the next stop, its times and booking, when to leave and how long the walk or transit takes, and **Directions**, which opens Google Maps. On today's plan the directions start from wherever the phone is. Drag the card up, or tap it, to see the whole day: legs, stops, return, arrival and departure, and optional places that could be squeezed in. Tapping a stop on the map or in the list focuses it.
+- **Done** and **Skip** record today's progress with one tap (Done means the visit ended now; skipping a booked visit records a missed booking), with an Undo snackbar. Progress is the same record the Today dialog uses and is saved with the trip. **Running late? Adjust today** in the menu opens the Today dialog for live route checks and replanning.
+- The menu (☰) lists every city and day with its stop count, progress and a Today badge; the arrows beside the date, or a sideways swipe on the card, move between days and cities. **Locate me** shows the phone's position on the map (asked once by the browser; the position stays on the phone and is never sent to Traveller or Google). **Fit day** zooms back out to the whole day.
+- The phone's back button or gesture closes the menu first, then trip mode; ✕ and **Exit trip mode** do the same. Adding `#trip` to a link opens it straight into trip mode, including shared trips (`/shared/<trip id>#trip`); viewers of a shared trip get everything except Done and Skip.
+- Trip mode makes no paid calls; route lines and times are the accepted plan's. A city edited since its plan is marked out of date, and a day replanned through Today shows the updated day.
+
 ### Today And Day Recovery
 
 On the actual trip date in the city's timezone, open **Itinerary > Today** from an accepted day, including a saved order restored from a backup or Neon. Record **Done** with actual start/finish times, correct those times explicitly, add **+10/+20 min**, or enter a custom **Ready to leave** time. **Skip visit** records a day-local fact without deleting the place. A fixed reservation requires **Record missed booking**; this does not cancel or refund its ticket. These local actions do not call paid providers.

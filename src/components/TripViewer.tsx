@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { ArrowUpRight, CalendarDays, Compass, Eye, FolderOpen, Hotel, List, LockKeyhole, Map, MapPin, Route } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Compass, Eye, FolderOpen, Hotel, List, LockKeyhole, Map, MapPin, Navigation, Route } from "lucide-react";
 import type { SharedView } from "@/lib/shared-trips";
 import { dayStart, endpointKey, formatMinute, tripDate } from "@/lib/trip";
 import { ExportMenu } from "./ExportMenu";
@@ -11,6 +11,7 @@ import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { TransferLine } from "./TransferFields";
 import { TripMap } from "./TripMap";
+import { TripMode } from "./TripMode";
 
 const noPhotos = {};
 
@@ -21,6 +22,10 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
   const [day, setDay] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<"list" | "map">("list");
+  const [tripMode, setTripMode] = useState(false);
+  const planned = view.cities.some((entry) => view.plans[entry.id]?.snapshot);
+  // /shared/<id>#trip opens straight into trip mode. The hash is only known in the browser, after hydration.
+  useEffect(() => { if (window.location.hash.startsWith("#trip") && planned) setTripMode(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   const city = view.cities.find((entry) => entry.id === cityId) ?? view.cities[0];
   const snapshot = view.plans[city.id]?.snapshot;
   const trip = snapshot?.trip ?? city;
@@ -44,7 +49,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
 
       {view.cities.length > 1 && <div className="journey-cities"><div className="city-tabs" aria-label="Trip cities">{view.cities.map((entry) => <button key={entry.id} aria-pressed={entry.id === city.id} onClick={() => { setCityId(entry.id); setDay(0); setSelected(null); }}><MapPin size={15} /><span><strong>{entry.city}</strong><small>{entry.startDate} to {tripDate(entry, entry.days - 1)}</small></span></button>)}</div></div>}
 
-      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day">{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => { setDay(index); setSelected(null); }}><span>Day {index + 1}</span><small>{trip.startDate ? new Date(`${tripDate(trip, index)}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" }) : ""}</small></button>)}</div><div className="toolbar-right"><div className="segmented mobile-tabs"><button aria-pressed={mobileView === "list"} onClick={() => setMobileView("list")}><List size={16} />List</button><button aria-pressed={mobileView === "map"} onClick={() => setMobileView("map")}><Map size={16} />Map</button></div></div></div>
+      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day">{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => { setDay(index); setSelected(null); }}><span>Day {index + 1}</span><small>{trip.startDate ? new Date(`${tripDate(trip, index)}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" }) : ""}</small></button>)}</div><div className="toolbar-right">{planned && <button className="button secondary small trip-mode-button" onClick={() => setTripMode(true)}><Navigation size={15} />Trip mode</button>}<div className="segmented mobile-tabs"><button aria-pressed={mobileView === "list"} onClick={() => setMobileView("list")}><List size={16} />List</button><button aria-pressed={mobileView === "map"} onClick={() => setMobileView("map")}><Map size={16} />Map</button></div></div></div>
 
       <div className={`workspace mobile-view-${mobileView}`}>
         <section className="planning-panel" aria-label="Itinerary"><div className="itinerary-content">
@@ -68,5 +73,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
         <section className="map-panel" aria-label="City map"><TripMap trip={trip} places={snapshot?.places ?? {}} schedule={snapshot?.schedule ?? null} day={day} selected={selected} onSelect={setSelected} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} photoDisabledMessage="Photos aren't shown on shared trips." onPhotoRequest={() => {}} onPhotoRetry={() => {}} /><div className="map-heading"><span className="map-heading-dot" /><span>{city.city}</span><span className="map-heading-divider" />Day {day + 1}</div>{snapshot && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
       </div>
     </main>
+    {planned && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />Start trip</button>}
+    {tripMode && <TripMode title={view.title} cities={view.cities} plans={view.plans} start={{ cityId: city.id, day }} canTrack={false} onClose={() => setTripMode(false)} />}
   </div>;
 }

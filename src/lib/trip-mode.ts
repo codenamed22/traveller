@@ -1,0 +1,117 @@
+import { Temporal } from "@js-temporal/polyfill";
+import { dayProgressSchema, newDayProgress, recoveryMinute, type DayProgress } from "./day-recovery";
+import type { Journey } from "./journey";
+import { tripDate, type DayPlan, type Place, type SavedPlan, type Stop, type TravelEdge, type Trip, type Visit } from "./trip";
+
+// One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
+// snapshot, or today's replan); `cityTrip` is the city as it is now, which keys and validates day progress like the planner.
+export type TripModeDay = {
+  key: string; cityId: string; city: string; cityTrip: Trip; day: number; date: string; label: string; isToday: boolean;
+  trip: Trip; places: Record<string, Place>; plan: DayPlan; stopIds: string[]; stale: boolean; replanned: boolean; progress?: DayProgress;
+};
+
+export const dayLabel = (date: string) => Temporal.PlainDate.from(date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+
+function cityToday(trip: Trip, now: Temporal.Instant) {
+  try { return now.toZonedDateTimeISO(trip.timeZone).toPlainDate().toString(); } catch { return ""; }
+}
+
+export function tripModeDays(cities: Trip[], plans: Record<string, SavedPlan>, execution: Journey["execution"], now: Temporal.Instant): TripModeDay[] {
+  return cities.flatMap((city) => {
+    const snapshot = plans[city.id]?.snapshot;
+    if (!snapshot) return [];
+    const today = cityToday(city, now);
+    const stale = JSON.stringify(snapshot.trip) !== JSON.stringify(city);
+    return snapshot.schedule.days.map((planned) => {
+      let date: string;
+      try { date = tripDate(city, planned.day); } catch { date = planned.date; }
+      const progress = execution?.[city.id]?.[date];
+      const replan = progress?.remaining?.snapshot;
+      const stopIds = plans[city.id].days.find((entry) => entry.day === planned.day)?.stopIds ?? planned.visits.map((visit) => visit.stopId);
+      return {
+        key: `${city.id}:${planned.day}`, cityId: city.id, city: city.city, cityTrip: city, day: planned.day, date, label: `Day ${planned.day + 1} · ${dayLabel(date)}`,
+        isToday: date === today, trip: replan?.trip ?? snapshot.trip, places: replan?.places ?? snapshot.places, plan: replan?.day ?? planned,
+        stopIds, stale, replanned: Boolean(replan), ...(progress ? { progress } : {}),
+      };
+    });
+  });
+}
+
+export function startingDay(days: TripModeDay[], preferred?: { cityId: string; day: number }) {
+  return days.find((entry) => entry.isToday) ?? days.find((entry) => entry.cityId === preferred?.cityId && entry.day === preferred.day) ?? days[0];
+}
+
+export type VisitStatus = "done" | "skipped" | "pending";
+export function visitStatus(progress: DayProgress | undefined, stopId: string): VisitStatus {
+  if (!progress) return "pending";
+  if (progress.completed.some((visit) => visit.stopId === stopId)) return "done";
+  return progress.skipped.includes(stopId) || progress.remaining?.skipped.includes(stopId) ? "skipped" : "pending";
+}
+
+export function nextVisit(entry: TripModeDay): Visit | undefined {
+  return entry.plan.visits.find((visit) => visitStatus(entry.progress, visit.stopId) === "pending");
+}
+
+export const leaveBy = (visit: Visit) => visit.start - visit.leg.minutes;
+
+export function daySummary(plan: DayPlan) {
+  const travel = plan.visits.reduce((sum, visit) => sum + visit.leg.minutes, 0) + (plan.returnLeg?.minutes ?? 0);
+  const first = plan.visits[0];
+  const last = plan.visits.at(-1);
+  return { stops: plan.visits.length, leave: first ? leaveBy(first) : undefined, back: last && plan.returnLeg ? last.end + plan.returnLeg.minutes : last?.end, travel: Math.round(travel) };
+}
+
+export function durationLabel(minutes: number) {
+  const rounded = Math.max(0, Math.round(minutes));
+  if (rounded < 60) return `${rounded} min`;
+  return rounded % 60 ? `${Math.floor(rounded / 60)} h ${rounded % 60} min` : `${rounded / 60} h`;
+}
+
+function baseProgress(entry: TripModeDay) {
+  return entry.progress ?? newDayProgress(entry.cityTrip, entry.day, entry.stopIds);
+}
+
+export function minuteNow(entry: TripModeDay, now: Temporal.Instant) {
+  return recoveryMinute(entry.cityTrip, entry.day, now.toString());
+}
+
+// Done from trip mode: the visit ends now and is assumed to have lasted its planned time, never overlapping the last one.
+export function markDone(entry: TripModeDay, stopId: string, nowMinute: number): DayProgress {
+  const progress = baseProgress(entry);
+  const visit = entry.plan.visits.find((candidate) => candidate.stopId === stopId);
+  const end = Math.min(1500, Math.max(0, Math.floor(nowMinute)));
+  const previousEnd = progress.completed.filter((done) => done.stopId !== stopId).reduce((latest, done) => Math.max(latest, done.end), 0);
+  const start = Math.min(end, Math.max(previousEnd, end - (visit ? visit.end - visit.start : 0)));
+  return dayProgressSchema.parse({
+    ...progress, version: progress.version + 1, originId: stopId, readyAt: Math.max(end, progress.readyAt ?? 0),
+    skipped: progress.skipped.filter((id) => id !== stopId),
+    completed: [...progress.completed.filter((done) => done.stopId !== stopId), { stopId, start, end }].sort((left, right) => left.start - right.start),
+  });
+}
+
+// Skipping a booked visit records a missed booking, as the Today dialog does.
+export function markSkipped(entry: TripModeDay, stop: Stop): DayProgress {
+  const progress = baseProgress(entry);
+  return dayProgressSchema.parse({
+    ...progress, version: progress.version + 1,
+    skipped: [...progress.skipped.filter((id) => id !== stop.id), stop.id],
+    missedBookings: stop.fixedTime ? [...progress.missedBookings.filter((id) => id !== stop.id), stop.id] : progress.missedBookings,
+  });
+}
+
+// Google Maps directions for one leg. From here leaves out the origin, so Google Maps starts from the phone's location.
+export function directionsUrl(edge: TravelEdge, places: Record<string, Place>, options: { fromHere?: boolean; toDeparture?: boolean } = {}) {
+  const origin = places[edge.from];
+  // Last leg of a direct departure day: "hotel" stands for the airport or station.
+  const destination = options.toDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
+  const url = new URL("https://www.google.com/maps/dir/");
+  url.searchParams.set("api", "1");
+  if (!options.fromHere) {
+    url.searchParams.set("origin", origin?.name ?? edge.from);
+    if (origin?.id) url.searchParams.set("origin_place_id", origin.id);
+  }
+  url.searchParams.set("destination", destination?.name ?? edge.to);
+  if (destination) url.searchParams.set("destination_place_id", destination.id);
+  url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
+  return url.toString();
+}

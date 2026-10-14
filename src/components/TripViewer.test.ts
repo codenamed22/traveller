@@ -23,6 +23,7 @@ beforeEach(() => {
   vi.stubGlobal("Node", window.Node);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", fetchSpy);
+  Object.defineProperty(window, "location", { value: { pathname: "/shared/x", search: "", hash: "" }, configurable: true });
   root = createRoot(container);
 });
 

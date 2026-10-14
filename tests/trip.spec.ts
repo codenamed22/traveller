@@ -1530,3 +1530,63 @@ test("planning timing guidance uses original references as opt-in soft windows",
   expect(backup.trip.stops[1].preferredTimeWindow).toEqual({ start: "18:00", end: "21:00", sources: ["https://example.com/garden", "https://example.com/original-itinerary"] });
   expect(JSON.stringify(backup)).toContain("https://example.com/garden");
 });
+test("trip mode opens today's day full screen, records progress and closes with back", async ({ page }, testInfo) => {
+  // 10:00 in Paris on the first day of the trip.
+  await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
+  const coffee = { ...newStop("Coffee"), placeId: "coffee-id", duration: 45 };
+  const museum = { ...newStop("Museum"), placeId: "museum-id", day: 0, fixedTime: "11:30", duration: 90 };
+  const dinner = { ...newStop("Dinner"), placeId: "dinner-id", duration: 60 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 2, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "21:00", stops: [coffee, museum, dinner] };
+  const walk = (from: string, to: string, minutes: number) => ({ day: 0, from, to, mode: "WALK" as const, minutes, meters: 800 });
+  const at = (day: number, hour: number, minute = 0) => day * 1440 + hour * 60 + minute;
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [
+    { day: 0, date: "2026-10-13", visits: [{ stopId: coffee.id, start: at(0, 9, 30), end: at(0, 10, 15), leg: walk("hotel", coffee.id, 10) }, { stopId: museum.id, start: at(0, 11, 30), end: at(0, 13), leg: walk(coffee.id, museum.id, 20) }], returnLeg: walk(museum.id, "hotel", 15) },
+    { day: 1, date: "2026-10-14", visits: [{ stopId: dinner.id, start: at(1, 19), end: at(1, 20), leg: walk("hotel", dinner.id, 10) }], returnLeg: walk(dinner.id, "hotel", 10) },
+  ] };
+  const place = (id: string, name: string) => ({ id, name, address: `${name}, Paris`, location: { lat: 48.86, lng: 2.35 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel"), [coffee.id]: place("coffee-id", "Coffee"), [museum.id]: place("museum-id", "Museum"), [dinner.id]: place("dinner-id", "Dinner") });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "trip-mode.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  const mobile = testInfo.project.name === "mobile";
+  if (mobile) await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
+  await expect(tripMode).toBeVisible();
+  expect(page.url()).toContain("#trip");
+  const box = (await tripMode.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect([box.x, box.y, box.width, box.height]).toEqual([0, 0, viewport.width, viewport.height]);
+  const card = tripMode.locator(".trip-card");
+  await expect(card).toContainText("Next · 1 of 2Coffee09:30–10:15Leave by 09:20 · 10 min walk · now");
+  expect(await card.getByRole("link", { name: "Directions" }).getAttribute("href")).toMatch(/^https:\/\/www\.google\.com\/maps\/dir\/\?api=1&destination=Coffee&destination_place_id=coffee-id&travelmode=walking$/);
+  await card.getByRole("button", { name: "Done" }).click();
+  await expect(tripMode.getByRole("status")).toContainText("Coffee marked done");
+  await expect(card).toContainText("Next · 2 of 2Museum11:30–13:00Booked");
+  await expect(card).toContainText("Leave by 11:10 · 20 min walk · in 1 h 10 min");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("trip-mode.png") });
+
+  await tripMode.getByRole("button", { name: "Show the whole day" }).click();
+  await expect(tripMode.locator(".trip-timeline")).toContainText("Museum11:30 - 13:00 · 90 min");
+  await tripMode.getByRole("button", { name: "Trip menu" }).click();
+  const menu = tripMode.getByRole("navigation", { name: "Trip days" });
+  await expect(menu).toContainText("Day 1 · Tue 13 Oct2 stops · 1/2 doneToday");
+  await menu.getByRole("button", { name: /^Day 2/ }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Trip mode, Day 2 · Wed 14 Oct" })).toBeVisible();
+  await page.getByRole("button", { name: "Trip menu" }).click();
+  await page.goBack();
+  await expect(page.getByRole("navigation", { name: "Trip days" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: /^Trip mode/ })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("dialog", { name: /^Trip mode/ })).toHaveCount(0);
+  expect(page.url()).not.toContain("#trip");
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("trip-mode-backup.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.journey.execution[trip.id]["2026-10-13"].completed).toEqual([{ stopId: coffee.id, start: 555, end: 600 }]);
+});
