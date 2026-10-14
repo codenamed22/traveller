@@ -509,3 +509,49 @@ body.trip-mode-open { overflow: hidden; }
 .share-link { display: flex; gap: 8px; align-items: center; }
 .share-link input { flex: 1; min-width: 0; }
 .icon-button.active { color: var(--green); border-color: var(--green); }
+
+/* Trip assistant: a tab on the right edge that slides a chat panel in, above trip mode */
+.assistant-tab { position: fixed; z-index: 55; right: 0; top: 42%; display: flex; flex-direction: column; align-items: center; gap: 2px; width: 30px; padding: 10px 0 10px 2px; border: 1px solid #cfe0d5; border-right: 0; border-radius: 14px 0 0 14px; background: var(--paper); color: var(--green); box-shadow: -3px 3px 14px #17664f26; touch-action: none; transition: width 160ms ease, transform 160ms ease; }
+.assistant-tab:hover, .assistant-tab:focus-visible { width: 36px; }
+.assistant-tab svg:first-child { opacity: .6; }
+.assistant-panel { position: fixed; z-index: 60; top: 0; right: 0; bottom: 0; width: min(400px, 100%); display: flex; flex-direction: column; background: var(--ground); border-left: 1px solid var(--line); box-shadow: -10px 0 40px #1a2b2626; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); transform: translateX(105%); visibility: hidden; transition: transform 240ms ease, visibility 0s linear 240ms; }
+.assistant-panel.open { transform: none; visibility: visible; transition: transform 240ms ease; }
+.assistant-header { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.assistant-header strong { flex: 1; min-width: 0; font-size: 15px; }
+.assistant-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--green-soft); color: var(--green); flex-shrink: 0; }
+.assistant-consent { overflow: auto; padding: 22px 20px; display: grid; gap: 4px; align-content: start; }
+.assistant-consent > svg { color: var(--green); }
+.assistant-consent h3 { margin: 6px 0 4px; font-size: 17px; font-weight: 500; }
+.assistant-consent p { margin: 0 0 8px; color: #46524d; overflow-wrap: anywhere; }
+.assistant-consent .button { justify-self: start; margin-top: 6px; }
+.assistant-log { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.assistant-empty p { color: #46524d; margin-bottom: 12px; }
+.assistant-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistant-chips button { border: 1px solid #cfe0d5; background: var(--paper); color: var(--green-dark); border-radius: 16px; padding: 7px 12px; font-size: 13px; text-align: left; }
+.assistant-chips button:hover { background: var(--green-soft); }
+.assistant-message { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.assistant-message.user { align-items: flex-end; }
+.assistant-text { margin: 0; max-width: 92%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-message.user .assistant-text { padding: 8px 12px; border-radius: 14px 14px 4px 14px; background: var(--green); color: #fff; }
+.assistant-message.assistant .assistant-text { padding: 8px 12px; border-radius: 14px 14px 14px 4px; background: var(--paper); border: 1px solid var(--line); }
+.assistant-note, .assistant-thinking { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); font-size: 12.5px; }
+.assistant-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 8px; background: #fbeeed; color: var(--red); font-size: 13px; }
+.proposal-card { width: 100%; padding: 12px 14px; border: 1px solid #cfe0d5; border-left: 3px solid var(--green); border-radius: 10px; background: var(--paper); box-shadow: 0 2px 10px #17664f12; }
+.proposal-card h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.proposal-card ul { margin: 0 0 8px; padding-left: 18px; }
+.proposal-card li { overflow-wrap: anywhere; }
+.proposal-warnings { color: var(--amber); font-size: 12.5px; }
+.proposal-error { margin: 0 0 8px; color: var(--red); font-size: 13px; }
+.proposal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.proposal-status { display: inline-flex; align-items: center; gap: 4px; color: var(--green); font-weight: 600; font-size: 13px; margin-right: 4px; }
+.proposal-card.applied { border-left-color: #8fb9a7; }
+.proposal-card.undone, .proposal-card.failed { border-left-color: var(--line); }
+.assistant-input { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); background: var(--paper); }
+.assistant-input textarea { flex: 1; min-width: 0; resize: none; field-sizing: content; max-height: 140px; min-height: 40px; padding: 9px 12px; border: 1px solid #d8dfd8; border-radius: 20px; font-size: 16px; line-height: 1.35; background: var(--ground); }
+.round-send { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 0; border-radius: 50%; background: var(--green); color: #fff; }
+@media (max-width: 760px) {
+	/* Edge to edge: 100vw would include the page scrollbar and push the panel off the left edge. */
+	.assistant-panel { left: 0; width: auto; border-left: 0; }
+	body.assistant-open { overflow: hidden; }
+	.assistant-tab { top: 38%; }
+}

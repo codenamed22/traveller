@@ -49,6 +49,7 @@ Set local values in an ignored `.env.local` at the project root. `.env.example` 
 | `NEXT_PUBLIC_GOOGLE_MAP_ID` | Google map ID for advanced markers; Google's demo map ID is used if omitted |
 | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL` | Paid Gemini key and an available multimodal model supporting structured output |
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Optional extraction provider/model for text, links, and images; takes precedence over Gemini for these sources, never for YouTube |
+| `OPENROUTER_ASSISTANT_MODEL` | Optional model for the trip assistant; it must support tool calling. Defaults to `OPENROUTER_MODEL` |
 | `GEMINI_TIMING_MODEL` | Optional Search-grounded timing model; defaults to `gemini-2.5-flash-lite`, independently of the import model |
 | `DAILY_USAGE_LIMIT` | Per-account daily service-unit cap; default 200 |
 
@@ -161,6 +162,15 @@ Notes copied from an original itinerary drop their own clock-time lines (for exa
 - The phone's back button or gesture closes the menu first, then trip mode; ✕ and **Exit trip mode** do the same. Adding `#trip` to a link opens it straight into trip mode, including shared trips (`/shared/<trip id>#trip`); viewers of a shared trip get everything except Done and Skip.
 - Trip mode makes no paid calls; route lines and times are the accepted plan's. A city edited since its plan is marked out of date, and a day replanned through Today shows the updated day.
 
+### Trip Assistant
+
+Editors with OpenRouter configured get a small tab on the right edge of the planner and of trip mode. Tap it, or drag it left, to open a chat that answers questions about the trip ("What's next?", "What could I still fit in?") and suggests small changes ("Fit Rum Baba in on day 3", "Move dinner to 20:00", "I've finished the museum").
+- It never edits on its own. A suggestion arrives as a card listing each change and its effects (a booking that no longer fits, an itinerary that will need replanning). **Apply** makes the change; **Undo** reverts it while nothing else has changed since. If a city's accepted plan goes out of date, **Replan <city>** opens the usual Plan my days preview. The assistant can't plan routes or spend planning units itself.
+- It can add, move, retime, shorten, mark optional or required, and remove places; change a city's daily hours, length or dates (with the editor's own checks); change arrival and departure times and references; and mark today's visits done or skipped. It can't change hotels, add or remove cities, or merge places.
+- To add a new place it looks it up on Google first, so the place goes on the map confirmed.
+- The first time you open it, it asks for consent; the screen just says an AI service is used and that AI and map usage are charged. Behind it, your messages and the trip's details (cities, dates, hotels, places, bookings, notes and today's progress) go to the configured AI gateway (OpenRouter today) and the model's provider. The conversation stays in the browser for the open trip; Traveller doesn't store it. **New chat** clears it.
+- Each message costs 2 service units, and each Google lookup costs 1 (at most 3 per message). The phone's back button or gesture, Esc, or › closes the panel.
+
 ### Today And Day Recovery
 
 On the actual trip date in the city's timezone, open **Itinerary > Today** from an accepted day, including a saved order restored from a backup or Neon. Record **Done** with actual start/finish times, correct those times explicitly, add **+10/+20 min**, or enter a custom **Ready to leave** time. **Skip visit** records a day-local fact without deleting the place. A fixed reservation requires **Record missed booking**; this does not cancel or refund its ticket. These local actions do not call paid providers.
@@ -219,7 +229,7 @@ The public-page fetcher accepts HTTPS only, validates all resolved IPs, pins the
 
 ## Cost And Security
 
-Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; a photo frame costs two; an extraction batch costs three; timing research costs five; a planning preview costs 30, including each re-optimization. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
+Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; a trip assistant message costs two (plus one per place it looks up); a photo frame costs two; an extraction batch costs three; timing research costs five; a planning preview costs 30, including each re-optimization. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
 
 Each planning run permits at most 1,000 billable matrix elements and `max(100, 6 * (grouped stop count + days))` route requests, at most 402 for 60 stops over 7 days. The route budget covers two modes over three validation passes. Matrix sampling reserves hotel and successor connections before extra alternatives, but cannot guarantee a feasible graph for every trip. Place details are additionally fetched for the hotel and stops. A standard account budget permits at most six planning attempts per UTC day, less when other services are used. Also set quotas at Google/OpenRouter: application limits cannot protect a leaked key or direct browser-map usage. Deployment abuse controls are required before removing the personal allowlist.
 

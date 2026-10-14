@@ -8,3 +8,8 @@ export function extractionServices(): ExtractionServices {
     ? { provider: "openrouter" as const, model: process.env.OPENROUTER_MODEL } : youtube;
   return { standard, youtube };
 }
+// The trip assistant needs a model that supports tool calling; it defaults to the import model.
+export function assistantService() {
+  const model = process.env.OPENROUTER_ASSISTANT_MODEL || process.env.OPENROUTER_MODEL;
+  return process.env.OPENROUTER_API_KEY && model ? { provider: "openrouter" as const, model } : null;
+}

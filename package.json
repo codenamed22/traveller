@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/google": "4.0.82",
+    "@ai-sdk/react": "4.0.121",
     "@fontsource/ibm-plex-sans": "5.3.0",
     "@googlemaps/polyline-codec": "1.0.28",
     "@js-temporal/polyfill": "0.5.1",

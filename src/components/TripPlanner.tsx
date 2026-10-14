@@ -29,8 +29,10 @@ import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
 import { TripMode } from "./TripMode";
 import { tripModeDays } from "@/lib/trip-mode";
+import { applyOperations, type Operation } from "@/lib/assistant-ops";
+import { Assistant, type ApplyOutcome } from "./Assistant";
 
-export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; email: string | null };
+export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; assistant?: { model: string } | null; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; shared?: boolean; updatedAt: string };
 type PhotoSession = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
@@ -87,6 +89,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
   // Which saved trips are shared for viewing, by trip id.
   const [tripMode, setTripMode] = useState(false);
+  const [tripExit, setTripExit] = useState(0);
+  const replanAfterTrip = useRef<string | null>(null);
+  // Assistant changes that can still be undone: the trip before, and the trip they produced.
+  const assistantUndo = useRef(new globalThis.Map<string, { before: Journey; after: string }>());
   const [shared, setShared] = useState<Record<string, boolean>>(() => Object.fromEntries([...(initialSaved ? [initialSaved] : []), ...(initialList ?? [])].map((entry) => [entry.data.id, Boolean(entry.shared)])));
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
   const [matches, setMatches] = useState<Place[]>([]);
@@ -392,6 +398,36 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     }
   }
 
+  function applyAssistant(operations: Operation[]): ApplyOutcome {
+    if (busy) return { ok: false, error: `Wait for “${busy}” to finish, then apply.` };
+    const outcome = applyOperations(journey, operations, Temporal.Now.instant());
+    if (outcome.errors.length) return { ok: false, error: `${outcome.errors[0]} Ask again for a fresh suggestion.` };
+    editVersion.current += 1; setLiveDay(undefined); setLiveRoute(undefined); setNotice("");
+    setJourney(outcome.journey);
+    const token = crypto.randomUUID();
+    assistantUndo.current.set(token, { before: journey, after: JSON.stringify(outcome.journey) });
+    return { ok: true, token, stale: outcome.staleCities.map((id) => ({ id, city: outcome.journey.cities.find((city) => city.id === id)?.city ?? "this city" })) };
+  }
+
+  function undoAssistant(token: string) {
+    const entry = assistantUndo.current.get(token);
+    if (!entry || entry.after !== snapshot) return "The trip has changed since, so this can't be undone here. Change it back in the editor.";
+    if (!entry.before.cities.some((city) => city.id === activeCity)) switchCity(entry.before.cities[0].id);
+    editVersion.current += 1; setLiveDay(undefined); setLiveRoute(undefined);
+    setJourney(entry.before); assistantUndo.current.delete(token);
+    return null;
+  }
+
+  // Replanning from the assistant opens the usual Plan my days preview, after leaving trip mode if it is open.
+  function openReplan(cityId: string) {
+    if (busy || !journey.cities.some((city) => city.id === cityId)) return;
+    if (cityId !== trip.id) switchCity(cityId);
+    setPlanningOpen(true);
+  }
+  function replanFromAssistant(cityId: string) {
+    if (tripMode) { replanAfterTrip.current = cityId; setTripExit((count) => count + 1); } else openReplan(cityId);
+  }
+
   function loadSaved(entry: SavedTrip) {
     if (!confirmDiscard()) return;
     openJourney(journeySchema.parse(asJourney(entry.data, entry.plan)), entry.revision, true);
@@ -581,9 +617,15 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack onProgress={recordCityProgress} onClose={() => setTripMode(false)} onAdjustToday={(cityId, targetDay) => {
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => {
+      setTripMode(false);
+      const pending = replanAfterTrip.current;
+      replanAfterTrip.current = null;
+      if (pending) openReplan(pending);
+    }} onAdjustToday={(cityId, targetDay) => {
       if (cityId !== trip.id) switchCity(cityId);
       setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
     }} />}
+    {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} />}
   </div>;
 }

@@ -155,7 +155,7 @@ test("review pasted places and keep AI off without consent", async ({ page }) =>
 });
 
 test("paid and persistence endpoints reject unauthenticated access", async ({ request }) => {
-  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/place-photos", "/api/timing", "/api/day-recovery"]) {
+  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/place-photos", "/api/timing", "/api/day-recovery", "/api/assistant"]) {
     const response = await request.post(path, { data: {} });
     expect([401, 503]).toContain(response.status());
   }
@@ -1548,6 +1548,8 @@ test("trip mode opens today's day full screen, records progress and closes with 
   await page.goto("/");
   await page.getByRole("button", { name: "Connections and settings" }).click();
   await page.getByLabel("Open trip backup").setInputFiles({ name: "trip-mode.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  // The assistant is for signed-in editors with a configured model only.
+  await expect(page.getByRole("button", { name: "Open trip assistant" })).toHaveCount(0);
   const mobile = testInfo.project.name === "mobile";
   if (mobile) await page.getByRole("button", { name: "Today's plan" }).click();
   else await page.getByRole("button", { name: "Trip mode" }).click();

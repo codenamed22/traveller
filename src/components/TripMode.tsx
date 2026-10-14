@@ -19,6 +19,8 @@ type Props = {
   // Owners can record Done and Skip on today's visits; viewers of a shared trip cannot.
   canTrack: boolean; onProgress?: (cityId: string, date: string, progress: DayProgress | undefined) => void;
   onAdjustToday?: (cityId: string, day: number) => void; onClose: () => void;
+  // Changing this asks trip mode to close, as its own close button does.
+  exitSignal?: number;
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
@@ -26,7 +28,7 @@ const noPhotos = {};
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal }: Props) {
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
   const [key, setKey] = useState(() => startingDay(days, start)?.key);
@@ -55,7 +57,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     const pop = () => {
       if (window.location.hash === "#trip-menu") setMenuOpen(true);
       else if (window.location.hash === "#trip") setMenuOpen(false);
-      else close.current();
+      // The assistant can open over trip mode with its own entry.
+      else if (window.location.hash !== "#assistant") close.current();
     };
     window.addEventListener("popstate", pop);
     document.body.classList.add("trip-mode-open");
@@ -76,11 +79,13 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   useEffect(() => {
     // Resume the location dot without asking again if this site already has permission.
     navigator.permissions?.query({ name: "geolocation" as PermissionName }).then((status) => { if (status.state === "granted") locate(false); }, () => {});
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { if (window.location.hash === "#trip-menu") window.history.back(); else exit(); } };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && window.location.hash !== "#assistant") { if (window.location.hash === "#trip-menu") window.history.back(); else exit(); } };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => { if (exitSignal) exit(); }, [exitSignal]);
 
   function exit() {
     if (pushed.current) { window.history.go(-pushed.current); pushed.current = 0; return; }
