@@ -651,10 +651,11 @@ test("hotel search uses the active city and explains missing connections", async
   expect(requests).toEqual([]);
 });
 
-async function openPlanningTrip(page: Page, hotel = "Private hotel", stops?: Trip["stops"]) {
+async function openPlanningTrip(page: Page, hotel = "Private hotel", stops?: Trip["stops"], patch: Partial<Trip> = {}) {
   const trip: Trip = {
     ...newTrip(), city: "Paris", hotel, hotelPlaceId: hotel ? "hotel-id" : null, startDate: "2026-10-12", timeZone: "Europe/Paris", days: 2,
     stops: stops ?? [{ ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:30" }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id" }],
+    ...patch,
   };
   await page.goto("/");
   await page.getByRole("button", { name: "Connections and settings" }).click();
@@ -841,6 +842,87 @@ test("exports the accepted itinerary as a printable page, Excel workbook and cal
   await exportButton.click();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu", { name: "Export itinerary" })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("arrival and departure narrow the first and last day and appear in the itinerary", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const submitted: Trip[] = [];
+  await page.route("**/api/plan", async (route) => {
+    const candidate = route.request().postDataJSON().trip as Trip;
+    submitted.push(candidate);
+    const generated = previewFixture(candidate);
+    // Day 1 starts at 15:05 (minute 905) after a 13:20 landing.
+    let cursor = 905;
+    generated.schedule.days[0].visits = generated.schedule.days[0].visits.map((visit) => { const start = cursor + 10; cursor = start + (visit.end - visit.start); return { ...visit, start, end: cursor }; });
+    await route.fulfill({ json: generated });
+  });
+  await openPlanningTrip(page, "Private hotel", [{ ...newStop("Louvre Museum"), placeId: "museum-id", duration: 90 }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id", duration: 60 }]);
+  await page.getByRole("dialog", { name: "Plan my days", exact: true }).getByRole("button", { name: "Close dialog" }).click();
+  // City details starts expanded.
+  const arriving = page.locator("fieldset", { has: page.getByText("Arriving", { exact: true }) });
+  await arriving.getByLabel("Arriving by").selectOption("FLIGHT");
+  await arriving.getByLabel("Lands").fill("13:20");
+  await arriving.getByLabel("Flight", { exact: true }).fill("AF 1234");
+  await arriving.getByLabel("Airport", { exact: true }).fill("Paris Charles de Gaulle");
+  await expect(arriving.getByLabel("Immigration & bags (min)")).toHaveAttribute("placeholder", "45");
+  await expect(arriving.getByRole("status")).toHaveText("Sightseeing starts about 15:05 on Mon 12 Oct (lands 13:20, 45 min at the airport, 45 min to the hotel, 15 min to drop bags).");
+  // The airport can be confirmed from a map search, as the departure station can (search needs Google connections).
+  await arriving.getByRole("button", { name: "Find airport on map" }).click();
+  const airportSearch = page.getByRole("dialog", { name: "Find your airport or station" });
+  await expect(airportSearch.getByLabel("Place or address")).toHaveValue(/Paris Charles de Gaulle/);
+  await airportSearch.getByRole("button", { name: "Close dialog" }).click();
+  const leaving = page.locator("fieldset", { has: page.getByText("Leaving on day 2", { exact: true }) });
+  await leaving.getByLabel("Leaving by").selectOption("TRAIN");
+  await leaving.getByLabel("Departs").fill("17:00");
+  await leaving.getByLabel("Station or stop").fill("Gare du Nord");
+  await leaving.getByLabel("Hotel to station (min)").fill("25");
+  await expect(leaving.getByRole("status")).toHaveText("Visits end about 16:00 on Tue 13 Oct (back at the hotel for bags, leave 16:15, 25 min to the station, 20 min there before 17:00).");
+  await leaving.getByLabel("Check out in the morning and go straight there from the last visit").check();
+  await expect(leaving.getByRole("status")).toHaveText("Confirm Gare du Nord on the map to plan the last leg straight there.");
+  await leaving.getByRole("button", { name: "Find station on map" }).click();
+  const search = page.getByRole("dialog", { name: "Find your airport or station" });
+  await expect(search.getByLabel("Place or address")).toHaveValue(/Gare du Nord/);
+  await search.getByRole("button", { name: "Close dialog" }).click();
+  await leaving.getByLabel("Check out in the morning and go straight there from the last visit").uncheck();
+  await page.screenshot({ path: testInfo.outputPath("arrival-departure.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(submitted.at(-1)).toMatchObject({ arrival: { mode: "FLIGHT", time: "13:20", place: "Paris Charles de Gaulle", reference: "AF 1234" }, departure: { mode: "TRAIN", time: "17:00", transferMinutes: 25 } });
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.getByLabel("Arrival")).toContainText("Land at Paris Charles de Gaulle 13:20 · AF 1234");
+  await expect(page.getByLabel("Arrival")).toContainText("At Private hotel about 14:50");
+  await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 15:05");
+  await page.screenshot({ path: testInfo.outputPath("arrival-itinerary.png"), fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test("a direct departure ends the last day at the confirmed station", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/plan", async (route) => {
+    const candidate = route.request().postDataJSON().trip as Trip;
+    const generated = previewFixture(candidate);
+    generated.schedule.days = generated.schedule.days.slice(0, 1);
+    generated.places = { hotel: { id: "hotel-id", name: "Private hotel", address: "", location: { lat: 48.85, lng: 2.35 } }, departure: { id: "gare-id", name: "Gare du Nord", address: "18 Rue de Dunkerque, Paris", location: { lat: 48.88, lng: 2.355 } } };
+    await route.fulfill({ json: generated });
+  });
+  await openPlanningTrip(page, "Private hotel", [{ ...newStop("Coffee"), placeId: "coffee-id", duration: 45 }], { days: 1, returnToHotel: true, departure: { mode: "TRAIN", time: "17:00", place: "Gare du Nord", placeId: "gare-id", direct: true } });
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  const leaving = page.locator("fieldset", { has: page.getByText("Leaving", { exact: true }) });
+  await expect(leaving.getByRole("status")).toHaveText("Check out in the morning; the last visit on Mon 12 Oct is planned so you reach Gare du Nord by 16:40, 20 min before 17:00.");
+  await expect(leaving.getByLabel("Hotel to station (min)")).toHaveCount(0);
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.getByText("At Gare du Nord", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Departure")).toContainText("Checked out; at Gare du Nord by 16:40");
   expect(errors).toEqual([]);
 });
 

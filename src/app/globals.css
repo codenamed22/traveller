@@ -88,6 +88,9 @@ summary::-webkit-details-marker { display: none; }
 .field input, .field textarea, .field select { font-size: 13px; font-weight: 400; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.transfer-fields { margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); display: grid; gap: 11px; min-width: 0; }
+.transfer-fields legend { padding: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--ink); }
+.transfer-fields .quiet { margin: 0; }
 .checkbox { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #67716b; font-weight: 400; }
 .input-with-action { display: flex; align-items: center; border: 1px solid #dce2dc; border-radius: 5px; padding-left: 10px; gap: 7px; background: var(--paper); }
 .input-with-action input { border: 0; padding-left: 0; }
@@ -176,8 +179,10 @@ summary::-webkit-details-marker { display: none; }
 .itinerary-start > div { display: grid; gap: 3px; min-width: 0; }
 .itinerary-start strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .itinerary-start span:not(.hotel-marker) { font-size: 11px; color: var(--muted); }
+.transfer-line .hotel-marker { background: var(--green-soft); color: var(--green); }
 .itinerary-stop { width: 100%; display: flex; gap: 10px; text-align: left; align-items: center; background: #f7f9f4; border: 1px solid #e2e8db; border-radius: 6px; padding: 13px 11px; }
 .itinerary-stop.selected { border-color: var(--green); }
+.stop-heading > .alternative-note { display: block; font-size: 10px; color: var(--green); margin-top: 2px; }
 .travel-leg { margin: 0 0 0 14px; padding: 12px 0 12px 20px; border-left: 1px dashed #c9d6c3; }
 .travel-leg > summary { display: flex; align-items: center; gap: 7px; font-size: 10px; cursor: pointer; color: #7c8777; list-style: none; }
 .leg-details { font-size: 11px; padding: 8px 8px 0 0; color: var(--muted); }

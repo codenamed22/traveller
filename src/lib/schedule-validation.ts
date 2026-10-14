@@ -1,4 +1,4 @@
-import { allowsTravelEdge, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Schedule, type Trip } from "./trip";
+import { allowsTravelEdge, dayEnd, dayStart, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Schedule, type Trip } from "./trip";
 import { alternativeGroups, isRequiredStop } from "./visit-slots";
 
 export type ScheduleBoundary = { startId: string; startMinute: number };
@@ -16,9 +16,9 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
     seenDays.add(day.day);
     if (day.visits.length > planningPreferences(trip).maxStopsPerDay) errors.push(`Day ${day.day + 1}: too many places.`);
     if (day.date !== tripDate(trip, day.day)) errors.push("A sightseeing date changed.");
-    let previousEnd = boundary?.startMinute ?? minuteAt(trip, day.day, trip.dailyStart);
+    let previousEnd = boundary?.startMinute ?? dayStart(trip, day.day);
     let previousId = boundary?.startId ?? "hotel";
-    const dayEnd = minuteAt(trip, day.day, trip.dailyEnd);
+    const lastEnd = dayEnd(trip, day.day);
     for (const visit of day.visits) {
       const stop = stops.get(visit.stopId);
       if (!stop || seen.has(visit.stopId)) { errors.push("Unknown or repeated stop."); continue; }
@@ -35,7 +35,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
       if (visit.start + 0.01 < previousEnd + duration + buffer) errors.push(`${stop.name}: not enough time to arrive.`);
       if (stop.fixedTime && Math.abs(visit.start - minuteAt(trip, day.day, stop.fixedTime)) > 0.01) errors.push(`${stop.name}: booking time changed.`);
       if (!(stop.fixedTime ? [stop.duration] : stop.durationOptions ?? [stop.duration]).some((allowed) => Math.abs(visit.end - visit.start - allowed) <= 0.01)) errors.push(`${stop.name}: visit duration changed beyond the approved choices.`);
-      if (visit.end > dayEnd + 0.01) errors.push(`${stop.name}: outside sightseeing hours.`);
+      if (visit.end > lastEnd + 0.01) errors.push(`${stop.name}: outside sightseeing hours.`);
       previousEnd = visit.end;
       previousId = stop.id;
     }
@@ -53,6 +53,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
     for (const day of days) {
       if (!groupAllowedDays(trip, group).includes(day.day)) errors.push(`${group.name}: group is outside its allowed days.`);
       if (group.exclusive && day.visits.some((visit) => !group.stopIds.includes(visit.stopId))) errors.push(`${group.name}: this day is reserved for the group.`);
+      if (splitVisits(day.visits, group.stopIds)) errors.push(`${group.name}: visit the group's places in one go, not split by other visits.`);
     }
   }
   if (seenDays.size !== trip.days) errors.push("Missing sightseeing day.");
@@ -69,4 +70,10 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
   }
   for (const stopId of omitted) if (!stops.has(stopId)) errors.push("Unknown omitted stop.");
   return errors;
+}
+
+// Whether a day's visits to `ids` are interrupted by other visits (a day trip should be one outing).
+export function splitVisits(visits: { stopId: string }[], ids: string[]) {
+  const positions = visits.flatMap((visit, index) => ids.includes(visit.stopId) ? [index] : []);
+  return positions.length > 1 && positions.at(-1)! - positions[0] + 1 !== positions.length;
 }

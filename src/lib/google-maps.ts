@@ -2,9 +2,9 @@ import "server-only";
 import { writeFile } from "node:fs/promises";
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, allowsVisitPair, assumedGroupEdge, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
+import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, assumedGroupEdge, dayEnd, dayStart, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
 import { HttpError } from "./server";
-import { solveTrip, solveTripByDays, PlanningError, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
+import { blockedDayFixes, kmBetween, solveTrip, solveTripByDays, PlanningError, squeezeIns, travelEstimator, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
 import { validateSchedule } from "./schedule-validation";
 import { assignDays } from "./days";
 import { solveTripWithOrTools } from "./ortools";
@@ -39,10 +39,12 @@ export class RequestBudget {
   readonly matrixQueries = new Map<string, { outcome: "available" | "noRoute" | "providerError" | "excluded"; statusCode?: number }>();
   readonly transitProxy = new Map<number, string>();
   readonly deadline: number;
+  // Where a destination really is on a day: on a direct departure day "hotel" is the station.
+  endpoint?: (day: number, to: string) => string;
   constructor(private readonly routeLimit = 100, private readonly signal?: AbortSignal, private readonly limits = { matrix: 1000, milliseconds: 110_000 }) { this.deadline = Date.now() + limits.milliseconds; }
   requestSignal() { return AbortSignal.any([AbortSignal.timeout(Math.max(1, this.deadline - Date.now())), ...(this.signal ? [this.signal] : [])]); }
   matrixKey(day: number, from: string, to: string, mode: TravelMode, departure: number) {
-    return JSON.stringify([mode === "WALK" ? 0 : day, from, to, mode, mode === "WALK" ? 0 : departure]);
+    return JSON.stringify([mode === "WALK" ? 0 : day, from, this.endpoint?.(day, to) ?? to, mode, mode === "WALK" ? 0 : departure]);
   }
   matrixDiagnostics() {
     const summary = { elements: this.matrix, available: 0, noRoute: 0, providerError: 0, excluded: 0, statusCodes: {} as Record<string, number> };
@@ -192,7 +194,7 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
   }
   const request = async (date?: string) => {
     const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", includeDetails ? "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare" : "routes.duration,routes.distanceMeters", {
-      origin: { placeId: places[from].id }, destination: { placeId: places[to].id }, travelMode: mode,
+      origin: { placeId: places[from].id }, destination: { placeId: places[endpointKey(trip, day, to, "to")].id }, travelMode: mode,
       ...(mode === "TRANSIT" ? { departureTime: departureInstant(trip, day, departure, date).toString() } : {}),
       ...(mode === "TRANSIT" && planningPreferences(trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(trip).transitPreference } } : {}),
     }, budget.requestSignal());
@@ -222,10 +224,10 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
   };
 }
 
-function recoveryWaypoint(request: RecoveryRequest, id: string) {
+function recoveryWaypoint(request: RecoveryRequest, id: string, role: "from" | "to" = "from") {
   if (id === "current" && request.origin.location) return { location: { latLng: { latitude: request.origin.location.lat, longitude: request.origin.location.lng } } };
   const actual = id === "current" ? request.origin.id : id;
-  const placeId = actual === "hotel" ? request.trip.hotelPlaceId : request.trip.stops.find((stop) => stop.id === actual)?.placeId;
+  const placeId = endpointKey(request.trip, request.day, actual, role) === "departure" ? request.trip.departure!.placeId : actual === "hotel" ? request.trip.hotelPlaceId : request.trip.stops.find((stop) => stop.id === actual)?.placeId;
   if (!placeId) throw new HttpError(400, "Confirm your origin, hotel, and remaining destinations on the map first.");
   return { placeId };
 }
@@ -236,7 +238,7 @@ export async function freshRouteOptions(request: RecoveryRequest, from: string, 
   const rows = await Promise.all(modes.map(async (mode) => {
     budget.consume("routes", 1);
     const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare", {
-      origin: recoveryWaypoint(request, from), destination: recoveryWaypoint(request, to), travelMode: mode, computeAlternativeRoutes: true,
+      origin: recoveryWaypoint(request, from), destination: recoveryWaypoint(request, to, "to"), travelMode: mode, computeAlternativeRoutes: true,
       ...(mode === "TRANSIT" ? { departureTime: instantForMinute(request.trip, request.day, departure).toString(), ...(planningPreferences(request.trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(request.trip).transitPreference } } : {}) } : {}),
     }, budget.requestSignal());
     return routeResponse.parse(body).routes.map((route): TravelEdge => ({
@@ -302,7 +304,7 @@ export async function recoverDayWithGoogle(request: RecoveryRequest, signal?: Ab
     if (pending.length) await mapConcurrent(bounded, async (job) => {
       budget.consume("matrix", job.targets.length);
       const result = z.array(z.object({ destinationIndex: z.number().int(), condition: z.string().optional(), status: z.object({ code: z.number().optional() }).optional(), duration: z.string().optional(), distanceMeters: z.number().optional() })).parse(await googleRequest("https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix", "originIndex,destinationIndex,status,condition,duration,distanceMeters", {
-        origins: [{ waypoint: recoveryWaypoint(request, job.from) }], destinations: job.targets.map((id) => ({ waypoint: recoveryWaypoint(request, id) })), travelMode: job.mode,
+        origins: [{ waypoint: recoveryWaypoint(request, job.from) }], destinations: job.targets.map((id) => ({ waypoint: recoveryWaypoint(request, id, "to") })), travelMode: job.mode,
         ...(job.mode === "TRANSIT" ? { departureTime: request.departureAt } : {}),
       }, budget.requestSignal()));
       for (const entry of result) if (entry.condition === "ROUTE_EXISTS" && !entry.status?.code && entry.duration && job.targets[entry.destinationIndex]) {
@@ -320,7 +322,7 @@ export async function recoverDayWithGoogle(request: RecoveryRequest, signal?: Ab
       if (remainingCapacity === 0 && pending.length && (label !== "Skip approved visits" || pending.some((id) => !request.permissions.skipIds.includes(id)))) continue;
       const forcedSkips = remainingCapacity === 0 ? pending : [];
       const stops = (remainingCapacity === 0 ? [] : pending).map((id) => request.trip.stops.find((stop) => stop.id === id)!).map((stop) => ({ ...stop, day: 0, durationOptions: undefined, duration: shorten ? request.permissions.minimumDurations[stop.id] ?? request.progress.remaining?.durations[stop.id] ?? stop.duration : request.progress.remaining?.durations[stop.id] ?? stop.duration, optional: label === "Skip approved visits" && request.permissions.skipIds.includes(stop.id), alternativeGroup: null }));
-      const single: Trip = { ...request.trip, startDate: tripDate(request.trip, request.day), days: 1, dayGroups: undefined, planning: { ...planningPreferences(request.trip), maxStopsPerDay: Math.max(1, remainingCapacity) }, stops };
+      const single = tripForDay(request.trip, request.day, { dayGroups: undefined, planning: { ...planningPreferences(request.trip), maxStopsPerDay: Math.max(1, remainingCapacity) }, stops });
       for (let attempt = 0; attempt < 2 && verificationPasses < 3 && solverMilliseconds < 5000 && Date.now() < budget.deadline; attempt++) {
       let verifying = false;
       try {
@@ -369,7 +371,11 @@ export async function recoverDayWithGoogle(request: RecoveryRequest, signal?: Ab
   }
 }
 
-async function matrixRow(trip: Trip, day: number, from: string, requested: string[], mode: TravelMode, places: Record<string, Place>, budget: RequestBudget, departure = minuteAt(trip, day, trip.dailyStart)): Promise<TravelEdge[]> {
+// Walking times do not depend on the day, so one walk serves every day, except a walk back to the hotel: on a direct
+// departure day that destination is the station.
+const sharesWalk = (trip: Trip, edge: TravelEdge, day: number) => endpointKey(trip, day, edge.to, "to") === endpointKey(trip, edge.day, edge.to, "to");
+
+async function matrixRow(trip: Trip, day: number, from: string, requested: string[], mode: TravelMode, places: Record<string, Place>, budget: RequestBudget, departure = dayStart(trip, day)): Promise<TravelEdge[]> {
   // Timetable retries spend budget the batch planners did not reserve, so trim instead of failing the whole preview.
   const targets = requested.slice(0, Math.max(0, 1000 - budget.matrix));
   if (!targets.length) return [];
@@ -379,7 +385,7 @@ async function matrixRow(trip: Trip, day: number, from: string, requested: strin
     budget.consume("matrix", subset.length);
     const result = entrySchema.parse(await googleRequest("https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix", "originIndex,destinationIndex,status,condition,duration,distanceMeters", {
       origins: [{ waypoint: { placeId: places[from].id } }],
-      destinations: subset.map((index) => ({ waypoint: { placeId: places[targets[index]].id } })),
+      destinations: subset.map((index) => ({ waypoint: { placeId: places[endpointKey(trip, day, targets[index], "to")].id } })),
       travelMode: mode, ...(mode === "TRANSIT" ? { departureTime: departureInstant(trip, day, departure, date).toString() } : {}),
     }));
     return result.map((entry) => ({ ...entry, destinationIndex: subset[entry.destinationIndex], ...(date ? { date } : {}) }));
@@ -467,8 +473,8 @@ async function sampleGroupAccess(trip: Trip, places: Record<string, Place>, budg
     const distance = (id: string) => Math.hypot(places[id].location.lat - places.hotel.location.lat, (places[id].location.lng - places.hotel.location.lng) * Math.cos(places.hotel.location.lat * Math.PI / 180));
     const endpoints = [...members].sort((left, right) => distance(left.id) - distance(right.id) || places[left.id].id.localeCompare(places[right.id].id)).slice(0, 3);
     for (const day of groupAllowedDays(trip, group)) {
-      const start = minuteAt(trip, day, trip.dailyStart);
-      const end = minuteAt(trip, day, trip.dailyEnd);
+      const start = dayStart(trip, day);
+      const end = dayEnd(trip, day);
       const service = members.filter((stop) => !stop.optional).reduce((total, stop) => total + stop.duration, 0);
       for (const [rank, stop] of endpoints.entries()) {
         if (!stopAllowedOnDay(trip, stop, day)) continue;
@@ -494,31 +500,24 @@ async function sampleGroupAccess(trip: Trip, places: Record<string, Place>, budg
 }
 
 // Search-only travel estimates for nearby pairs Google was not asked about; actual-departure verification replaces every chosen leg.
-function withEstimates(trip: Trip, places: Record<string, Place>, samples: Pick<RouteSamples, "has">, edges: TravelEdge[], limits: { neighbours: number; walkOnlyKm?: number } = { neighbours: 8 }) {
-  const km = (from: string, to: string) => {
-    const [a, b] = [places[from].location, places[to].location];
-    return Math.hypot((a.lat - b.lat) * 111.2, (a.lng - b.lng) * 111.2 * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180));
-  };
-  const formula = (mode: TravelMode, distance: number) => mode === "WALK" ? Math.max(5, Math.ceil(distance * 1.3 / 4.5 * 60) + 3) : Math.max(15, Math.ceil(12 + 4 * distance));
-  // Scale the formula by how slow Google's sampled routes were for this trip (median ratio, never below the formula),
-  // so estimates are not more optimistic than the city's real travel.
-  const scale = new Map((["WALK", "TRANSIT"] as const).map((mode) => {
-    const ratios = edges.filter((edge) => edge.mode === mode && !edge.estimated && !edge.assumed && Number.isFinite(edge.minutes) && places[edge.from] && places[edge.to]).map((edge) => edge.minutes / formula(mode, km(edge.from, edge.to))).sort((left, right) => left - right);
-    return [mode, ratios.length ? Math.min(4, Math.max(1, ratios[Math.floor(ratios.length / 2)])) : 1];
-  }));
+function withEstimates(trip: Trip, places: Record<string, Place>, samples: Pick<RouteSamples, "has">, edges: TravelEdge[], limits: { neighbours: number; walkOnlyKm?: number; cautious?: boolean } = { neighbours: 8 }) {
+  const km = (from: string, to: string, day = 0) => kmBetween(places[from].location, (places[endpointKey(trip, day, to, "to")] ?? places[to]).location);
+  // Calibrated to how slow Google's sampled routes were for this trip, so estimates are not more optimistic than the
+  // city's real travel.
+  const estimate = travelEstimator(edges, (edge) => places[edge.from] && places[edge.to] ? km(edge.from, edge.to, edge.day) : undefined, limits.cautious);
   const estimates: TravelEdge[] = [];
   for (let day = 0; day < trip.days; day++) {
     const delta = instantAt(trip, day, trip.dailyStart).epochMilliseconds - Date.now();
     const transitAvailable = delta >= -7 * 86_400_000 && delta <= 100 * 86_400_000;
     const nodes = ["hotel", ...trip.stops.filter((stop) => stopAllowedOnDay(trip, stop, day)).map((stop) => stop.id)];
     for (const from of nodes) {
-      const near = nodes.filter((to) => to !== from && allowsVisitPair(trip, from, to) && (limits.walkOnlyKm === undefined || km(from, to) <= limits.walkOnlyKm)).sort((left, right) => km(from, left) - km(from, right)).slice(0, limits.neighbours);
+      const near = nodes.filter((to) => to !== from && allowsVisitPair(trip, from, to) && (limits.walkOnlyKm === undefined || km(from, to, day) <= limits.walkOnlyKm)).sort((left, right) => km(from, left, day) - km(from, right, day)).slice(0, limits.neighbours);
       if (from !== "hotel" && trip.returnToHotel && !near.includes("hotel") && limits.walkOnlyKm === undefined) near.push("hotel");
       for (const to of near) {
-        const distance = km(from, to);
+        const distance = km(from, to, day);
         for (const mode of travelModes(trip, trip.stops.find((stop) => stop.id === to))) {
           if (samples.has(day, from, to, mode) || (mode === "TRANSIT" && (!transitAvailable || limits.walkOnlyKm !== undefined))) continue;
-          const edge: TravelEdge = { day, from, to, mode, estimated: true, meters: Math.round(distance * 1300), minutes: Math.ceil(formula(mode, distance) * scale.get(mode)!) };
+          const edge: TravelEdge = { day, from, to, mode, estimated: true, meters: Math.round(distance * 1300), minutes: estimate(mode, distance) };
           if (allowsTravelEdge(trip, edge)) estimates.push(edge);
         }
       }
@@ -559,7 +558,7 @@ async function sampleJointRoutes(trip: Trip, places: Record<string, Place>, budg
   };
   const transitJobs = dayNodes.flatMap((nodes, day) => nodes.map((from) => {
     const origin = stops.get(from);
-    const departure = origin?.fixedTime ? minuteAt(trip, day, origin.fixedTime) + origin.duration : minuteAt(trip, day, trip.dailyStart);
+    const departure = origin?.fixedTime ? minuteAt(trip, day, origin.fixedTime) + origin.duration : dayStart(trip, day);
     return { day, from, targets: candidates(nodes, from, "TRANSIT").filter((to) => !budget.matrixQueries.has(budget.matrixKey(day, from, to, "TRANSIT", departure))) };
   })).filter((job) => job.targets.length);
   const availableTransitJobs = transitJobs.filter((job) => {
@@ -584,10 +583,13 @@ async function sampleJointRoutes(trip: Trip, places: Record<string, Place>, budg
     return selected.filter((job) => job.targets.length);
   };
   const walking = [...seed.filter((edge) => edge.mode === "WALK"), ...(await mapConcurrent(allocate(walkJobs, walkingLimit), (job) => matrixRow(trip, job.day, job.from, job.targets, "WALK", places, budget))).flat()];
-  const edges = [...seed.filter((edge) => edge.mode === "TRANSIT"), ...dayNodes.flatMap((_, day) => walking.filter((edge) => eligible(edge.from, day) && eligible(edge.to, day)).map((edge) => ({ ...edge, day })))];
+  // On a direct departure day the walks "home" go to the station, asked separately.
+  const last = trip.days - 1;
+  if (directDeparture(trip)) walking.push(...(await mapConcurrent(ids.filter((from) => from !== "hotel" && eligible(from, last) && !budget.matrixQueries.has(budget.matrixKey(last, from, "hotel", "WALK", 0))), (from) => matrixRow(trip, last, from, ["hotel"], "WALK", places, budget))).flat());
+  const edges = [...seed.filter((edge) => edge.mode === "TRANSIT"), ...dayNodes.flatMap((_, day) => walking.filter((edge) => eligible(edge.from, day) && eligible(edge.to, day) && sharesWalk(trip, edge, day)).map((edge) => ({ ...edge, day })))];
   edges.push(...(await mapConcurrent(allocate(availableTransitJobs, 900 - budget.matrix), (job) => {
     const origin = stops.get(job.from);
-    const departure = origin?.fixedTime ? minuteAt(trip, job.day, origin.fixedTime) + origin.duration : minuteAt(trip, job.day, trip.dailyStart);
+    const departure = origin?.fixedTime ? minuteAt(trip, job.day, origin.fixedTime) + origin.duration : dayStart(trip, job.day);
     return matrixRow(trip, job.day, job.from, job.targets, "TRANSIT", places, budget, departure);
   })).flat());
   return { walking, edges, order };
@@ -616,10 +618,10 @@ async function repairRouteCoverage(trip: Trip, places: Record<string, Place>, bu
             const to = direction === "outbound" ? stop.id : peer;
             if (!allowsVisitPair(trip, from, to)) continue;
             const origin = trip.stops.find((candidate) => candidate.id === from);
-            const start = minuteAt(trip, day.day, trip.dailyStart);
+            const start = dayStart(trip, day.day);
             const departure = origin?.fixedTime ? minuteAt(trip, day.day, origin.fixedTime) + origin.duration : start;
             for (const mode of travelModes(trip, trip.stops.find((candidate) => candidate.id === to))) {
-              const departures = mode === "TRANSIT" && !origin?.fixedTime ? [departure, Math.round((start + minuteAt(trip, day.day, trip.dailyEnd)) / 2)] : [departure];
+              const departures = mode === "TRANSIT" && !origin?.fixedTime ? [departure, Math.round((start + dayEnd(trip, day.day)) / 2)] : [departure];
               for (const [timeRank, at] of [...new Set(departures)].entries()) {
                 const delta = instantForMinute(trip, day.day, at).epochMilliseconds - Date.now();
                 if (mode === "TRANSIT" && (delta < -7 * 86_400_000 || delta > 100 * 86_400_000)) continue;
@@ -639,7 +641,7 @@ async function repairRouteCoverage(trip: Trip, places: Record<string, Place>, bu
     for (const { job, edges: found } of results) {
       for (const edge of found) {
         if (job.mode === "WALK") {
-          for (const day of coverage) if ([edge.from, edge.to].every((id) => id === "hotel" || day.stops.some((stop) => stop.id === id))) samples.add({ ...edge, day: day.day });
+          for (const day of coverage) if ([edge.from, edge.to].every((id) => id === "hotel" || day.stops.some((stop) => stop.id === id)) && sharesWalk(trip, edge, day.day)) samples.add({ ...edge, day: day.day });
         } else {
           samples.add(edge);
           if (allowsTravelEdge(trip, edge)) samples.setDeparture(job.day, job.from, job.departure);
@@ -649,6 +651,31 @@ async function repairRouteCoverage(trip: Trip, places: Record<string, Place>, bu
     edges = samples.select();
   }
   return edges;
+}
+
+// Visits pinned to the same day always share it, so any pair of them (or with the hotel) the sparse sample missed is
+// asked of Google directly. Otherwise the search fills the pair with a straight-line estimate, and an estimate that
+// runs a few minutes short fails actual-departure verification on a tight day, round after round.
+export async function samplePinnedPairs(trip: Trip, places: Record<string, Place>, budget: RequestBudget, samples: RouteSamples, elements: number) {
+  const jobs: { day: number; from: string; mode: TravelMode; departure: number; targets: string[] }[] = [];
+  for (let day = 0; day < trip.days; day++) {
+    const ids = ["hotel", ...trip.stops.filter((stop) => stop.day === day).map((stop) => stop.id)];
+    for (const from of ids) {
+      const origin = trip.stops.find((stop) => stop.id === from);
+      const departure = origin?.fixedTime ? minuteAt(trip, day, origin.fixedTime) + origin.duration : dayStart(trip, day);
+      const delta = instantForMinute(trip, day, departure).epochMilliseconds - Date.now();
+      for (const mode of ["WALK", "TRANSIT"] as const) {
+        if (mode === "TRANSIT" && (delta < -7 * 86_400_000 || delta > 100 * 86_400_000)) continue;
+        const targets = ids.filter((to) => to !== from && (to !== "hotel" || trip.returnToHotel) && allowsVisitPair(trip, from, to) && travelModes(trip, trip.stops.find((stop) => stop.id === to)).includes(mode) && !samples.has(day, from, to, mode));
+        if (targets.length) jobs.push({ day, from, mode, departure, targets });
+      }
+    }
+  }
+  let left = Math.min(elements, 1000 - budget.matrix);
+  const limited = jobs.map((job) => { const targets = job.targets.slice(0, Math.max(0, left)); left -= targets.length; return { ...job, targets }; }).filter((job) => job.targets.length);
+  const found = await mapConcurrent(limited, (job) => matrixRow(trip, job.day, job.from, job.targets, job.mode, places, budget, job.departure));
+  for (const edge of found.flat()) samples.add(edge);
+  return samples.select();
 }
 
 export function savedPlanRefreshErrors(trip: Trip, plan: SavedPlan): string[] {
@@ -692,11 +719,12 @@ export async function refreshSavedPlanWithGoogle(trip: Trip, plan: SavedPlan, si
     const location = id === "hotel" ? trip.hotelLocation : stop?.location;
     places[id] = saved?.id === placeId ? saved : location ? { id: placeId, name: id === "hotel" ? trip.hotel : stop!.name, address: "", location } : await placeDetails(placeId, budget.requestSignal());
   }
+  if (directDeparture(trip)) places.departure = plan.snapshot?.places.departure?.id === trip.departure!.placeId ? plan.snapshot!.places.departure : await placeDetails(trip.departure!.placeId!, budget.requestSignal());
   if (places.hotel.timeZone && places.hotel.timeZone !== trip.timeZone) throw new PlanningFailure("hard-input-conflict", `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before refreshing.`);
   const schedule: Schedule = { days: [], omitted: [...plan.omitted], generatedAt: Temporal.Now.instant().toString(), warnings: ["Travel times updated. Days and visit order are unchanged.", "Opening hours have not been verified. Check venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."] };
   for (const savedDay of [...plan.days].sort((left, right) => left.day - right.day)) {
     let from = "hotel";
-    let departure = minuteAt(trip, savedDay.day, trip.dailyStart);
+    let departure = dayStart(trip, savedDay.day);
     const day: Schedule["days"][number] = { day: savedDay.day, date: tripDate(trip, savedDay.day), visits: [] };
     const routeTo = async (to: string) => {
       const options = (await Promise.all(travelModes(trip, trip.stops.find((stop) => stop.id === to)).map((mode) => computeLeg(trip, day.day, from, to, mode, departure, places, budget))))
@@ -712,7 +740,7 @@ export async function refreshSavedPlanWithGoogle(trip: Trip, plan: SavedPlan, si
       const arrival = departure + leg.minutes + (stop.fixedTime ? stop.buffer : 0);
       const original = plan.snapshot?.schedule.days.find((entry) => entry.day === day.day)?.visits.find((visit) => visit.stopId === id);
       const start = stop.fixedTime ? minuteAt(trip, day.day, stop.fixedTime) : Math.max(arrival, original?.start ?? arrival);
-      if (start + 0.01 < arrival || start + stop.duration > minuteAt(trip, day.day, trip.dailyEnd)) throw new PlanningFailure("verification-failed", `Day ${day.day + 1}: refreshed travel cannot reach ${stop.name}${stop.fixedTime ? ` at its ${stop.fixedTime} booking with the arrival buffer` : " within sightseeing hours"}. Your saved order, durations and bookings were kept. Replan explicitly to consider a different order.`);
+      if (start + 0.01 < arrival || start + stop.duration > dayEnd(trip, day.day)) throw new PlanningFailure("verification-failed", `Day ${day.day + 1}: refreshed travel cannot reach ${stop.name}${stop.fixedTime ? ` at its ${stop.fixedTime} booking with the arrival buffer` : " within sightseeing hours"}. Your saved order, durations and bookings were kept. Replan explicitly to consider a different order.`);
       day.visits.push({ stopId: id, start, end: start + stop.duration, leg });
       from = id; departure = start + stop.duration;
     }
@@ -729,12 +757,12 @@ export async function checkBookingTravel(trip: Trip): Promise<BookingTravelCheck
   const booked = trip.stops.filter((stop) => stop.fixedTime);
   if (!booked.length) return { connections: [], warnings: [] };
   if (!trip.hotelPlaceId || booked.some((stop) => !stop.placeId)) throw new HttpError(400, "Confirm the hotel and fixed bookings on the map before checking travel gaps.");
-  const places: Record<string, Pick<Place, "id">> = { hotel: { id: trip.hotelPlaceId } };
+  const places: Record<string, Pick<Place, "id">> = { hotel: { id: trip.hotelPlaceId }, ...(directDeparture(trip) ? { departure: { id: trip.departure!.placeId! } } : {}) };
   booked.forEach((stop) => { places[stop.id] = { id: stop.placeId! }; });
   const jobs: { day: number; from: string; to: string; departure: number; deadline: number }[] = [];
   for (let day = 0; day < trip.days; day++) {
     let from = "hotel";
-    let departure = minuteAt(trip, day, trip.dailyStart);
+    let departure = dayStart(trip, day);
     for (const stop of booked.filter((stop) => stop.day === day).sort((left, right) => left.fixedTime!.localeCompare(right.fixedTime!))) {
       const at = minuteAt(trip, day, stop.fixedTime!);
       jobs.push({ day, from, to: stop.id, departure, deadline: at - stop.buffer });
@@ -778,6 +806,8 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   let debugProblem: { trip: Trip; edges: TravelEdge[] } | undefined;
   // Cleared once verification shows a chosen estimate was wrong; later rounds search only routes Google returned.
   let trustEstimates = true;
+  // Why each verification round failed, kept for the development capture.
+  const verificationIssues: string[] = [];
   let samples: RouteSamples | undefined = undefined;
   let searchOrder: string[] = [];
   let matrixDiagnostics: (() => ReturnType<RequestBudget["matrixDiagnostics"]>) | undefined = undefined;
@@ -809,12 +839,16 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     try { return await run(searchEdges); }
     catch (error) {
       if (!samples || !(error instanceof PlanningError) || error.code === "hard-input-conflict" || budget.deadline - Date.now() < 20_000) throw error;
-      try { debugProblem = { trip: prepared, edges: searchEdges }; return await solveTripByDays(prepared, searchEdges, seconds, { onStage: (result) => solver.push(result), places }); }
+      // Day by day solves several small problems, each with its own polish, so it gets more time than one joint solve.
+      const byDaysSeconds = Math.max(seconds, Math.min(15, (budget.deadline - Date.now()) / 1000 - 25));
+      // After a verification failure the day-by-day solves keep their estimates for unsampled pairs, but cautious ones.
+      const cautiousEstimates = !trustEstimates;
+      try { debugProblem = { trip: prepared, edges: searchEdges }; return await solveTripByDays(prepared, searchEdges, byDaysSeconds, { onStage: (result) => solver.push(result), places, cautiousEstimates }); }
       catch (dayError) {
         if (!(dayError instanceof PlanningError) || dayError.code === "hard-input-conflict") throw error;
-        const estimated = withEstimates(prepared, places, samples, edges);
+        const estimated = withEstimates(prepared, places, samples, edges, { neighbours: 8, cautious: cautiousEstimates });
         debugProblem = { trip: prepared, edges: estimated };
-        return solveTripByDays(prepared, estimated, seconds, { onStage: (result) => solver.push(result), places });
+        return solveTripByDays(prepared, estimated, Math.max(seconds, Math.min(15, (budget.deadline - Date.now()) / 1000 - 25)), { onStage: (result) => solver.push(result), places, cautiousEstimates });
       }
     }
   });
@@ -824,6 +858,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   const places: Record<string, Place> = {};
   const details = await mapConcurrent([input.hotelPlaceId, ...input.stops.map((stop) => stop.placeId!)], (id) => placeDetails(id, options.signal));
   ids.forEach((id, index) => { places[id] = details[index]; });
+  if (directDeparture(input)) places.departure = await placeDetails(input.departure!.placeId!, options.signal);
   if (places.hotel.timeZone && places.hotel.timeZone !== input.timeZone) throw new HttpError(400, `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before planning.`);
   useOrTools = !coupled && Boolean(process.env.TRAVELLER_ROUTING_PYTHON) && !usesVisitTiming(input, { places });
   joint = useOrTools || coupled;
@@ -832,6 +867,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   try { trip = grouped ? await measure("grouping", input, [], () => assignDays(input, Object.fromEntries(Object.entries(places).map(([id, place]) => [id, place.location])), places)) : input; }
   catch (error) { if (error instanceof PlanningError) throw new HttpError(422, error.message); throw error; }
   const budget = new RequestBudget(Math.max(100, 6 * (trip.stops.length + trip.days)), options.signal);
+  budget.endpoint = (day, to) => endpointKey(trip, day, to, "to");
   matrixDiagnostics = () => budget.matrixDiagnostics();
   if (trip.dayGroups?.length) groupDiagnostics = () => groupRouteEvidence(trip, budget);
   const failure = (code: PlanningFailureCode, message: string) => new PlanningFailure(code, message, coupled && code !== "hard-input-conflict" ? provisionalOutline(trip, budget, code, message) : undefined);
@@ -893,7 +929,8 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     edges = [...walking];
   } else {
     walking = (await mapConcurrent(activeIds, (from) => matrixRow(trip, 0, from, connectedTargets(activeIds, from, activeIds.filter((to) => to !== from)).slice(0, walkingTargets), "WALK", places, budget))).flat();
-    edges = Array.from({ length: trip.days }, (_, day) => walking.map((edge) => ({ ...edge, day }))).flat();
+    if (directDeparture(trip)) walking.push(...(await mapConcurrent(dayIds[trip.days - 1].filter((from) => from !== "hotel"), (from) => matrixRow(trip, trip.days - 1, from, ["hotel"], "WALK", places, budget))).flat());
+    edges = Array.from({ length: trip.days }, (_, day) => walking.filter((edge) => sharesWalk(trip, edge, day)).map((edge) => ({ ...edge, day }))).flat();
   }
   const hotelTargets = dayIds.reduce((total, nodes) => total + nodes.length - 1, 0);
   const transitTargets = Math.max(0, Math.floor((1000 - budget.matrix - hotelTargets) / Math.max(1, hotelTargets)));
@@ -919,7 +956,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     edges.push(...rows.flat());
   }
   samples = joint ? new RouteSamples(trip, edges) : undefined;
-  if (samples) edges = samples.select();
+  if (samples) edges = await samplePinnedPairs(trip, places, budget, samples, 120);
   const connectivityLimit = Math.min(1000, budget.matrix + 100);
   let sampledLaterTransit = false;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -944,7 +981,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
         sampledLaterTransit = true;
         const jobs = dayIds.flatMap((nodes, day) => nodes.filter((from) => from !== "hotel").flatMap((from) => {
           const origin = trip.stops.find((stop) => stop.id === from)!;
-          const departure = origin.fixedTime ? minuteAt(trip, day, origin.fixedTime) + origin.duration : Math.round((minuteAt(trip, day, trip.dailyStart) + minuteAt(trip, day, trip.dailyEnd)) / 2);
+          const departure = origin.fixedTime ? minuteAt(trip, day, origin.fixedTime) + origin.duration : Math.round((dayStart(trip, day) + dayEnd(trip, day)) / 2);
           const delta = instantForMinute(trip, day, departure).epochMilliseconds - Date.now();
           if (delta < -7 * 86_400_000 || delta > 100 * 86_400_000) return [];
           const targets = nodes.filter((to) => to !== from && allowsVisitPair(trip, from, to) && (to === "hotel" ? trip.returnToHotel && travelModes(trip).includes("TRANSIT") : travelModes(trip, trip.stops.find((stop) => stop.id === to)).includes("TRANSIT")))
@@ -971,7 +1008,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
         }
       }
       if (!schedule && grouped && trip !== input && failure instanceof PlanningError && !failure.detailed) {
-        const repairEdges = [...edges, ...Array.from({ length: input.days }, (_, day) => walking.filter((edge) => !edges.some((known) => known.day === day && known.from === edge.from && known.to === edge.to && known.mode === "WALK")).map((edge) => ({ ...edge, day }))).flat()];
+        const repairEdges = [...edges, ...Array.from({ length: input.days }, (_, day) => walking.filter((edge) => sharesWalk(trip, edge, day) && !edges.some((known) => known.day === day && known.from === edge.from && known.to === edge.to && known.mode === "WALK")).map((edge) => ({ ...edge, day }))).flat()];
         try {
           schedule = await solve("regroup-solve", input, repairEdges, 2);
           trip = input; edges = repairEdges;
@@ -979,6 +1016,14 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
         } catch (repairError) { failure = repairError; }
       }
       if (!schedule) {
+        // Check each day's assigned visits exactly (after any fixes already offered) and add per-visit fixes for the
+        // days that still cannot fit, so one round of suggestions is enough. An incomplete search can hide such a day.
+        if (failure instanceof PlanningError && !failure.detailed && budget.deadline - Date.now() > 5000) {
+          const base = failure.fixes.length ? applyPlanningFixes(input, failure.fixes) : input;
+          const sampled = new Set(edges.map((edge) => `${edge.day}|${edge.from}|${edge.to}|${edge.mode}`));
+          const extra = await blockedDayFixes(base, withEstimates(base, places, samples ?? { has: (day, from, to, mode) => sampled.has(`${day}|${from}|${to}|${mode}`) }, edges), places, budget.deadline - 3000);
+          if (extra.fixes.length) throw new PlanningFailure(failure.code, `${failure.fixes.length ? failure.message : "No schedule fits the visits assigned to these days."} ${extra.blocked.join(" ")} Route candidates are budget-limited; this is not proof that no alternative exists.`, undefined, [...failure.fixes, ...extra.fixes]);
+        }
         if (failure instanceof PlanningError && failure.reason === "conflict" && !failure.detailed && !failure.fixes.length && !input.dayGroups?.length && input.days > 1 && input.stops.every((stop) => stop.day !== null)) {
           const blockedDays: string[] = [];
           for (let day = 0; day < input.days; day++) {
@@ -987,7 +1032,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
             const required = stops.filter((stop) => !stop.optional);
             if (!required.length) continue;
             try {
-              await solve("day-diagnostic", { ...input, days: 1, startDate: tripDate(input, day), stops: stops.map((stop) => ({ ...stop, day: 0 })) }, edges.filter((edge) => edge.day === day).map((edge) => ({ ...edge, day: 0 })), 0.5);
+              await solve("day-diagnostic", tripForDay(input, day, { stops: stops.map((stop) => ({ ...stop, day: 0 })) }), edges.filter((edge) => edge.day === day).map((edge) => ({ ...edge, day: 0 })), 0.5);
             } catch (dayError) {
               if (dayError instanceof PlanningError && dayError.reason === "conflict") blockedDays.push(`Day ${day + 1} (${tripDate(input, day)}): ${required.length} required visits, ${required.reduce((total, stop) => total + stop.duration, 0)} min of visits within ${input.dailyStart}-${input.dailyEnd}, cannot fit with the sampled routes and retained bookings.`);
             }
@@ -1006,7 +1051,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     const usedEstimates = schedule.days.some((day) => day.returnLeg?.estimated || day.visits.some((visit) => visit.leg.estimated));
     try { await measure("verification", trip, edges, async () => {
     await Promise.all(schedule.days.map(async (day) => {
-      let departure = minuteAt(trip, day.day, trip.dailyStart);
+      let departure = dayStart(trip, day.day);
       let from = "hotel";
       for (const visit of day.visits) {
         const stop = trip.stops.find((candidate) => candidate.id === visit.stopId)!;
@@ -1048,7 +1093,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     const issues = validateSchedule(trip, schedule);
     if (schedule.days.some((day) => day.returnLeg?.estimated || day.visits.some((visit) => visit.leg.estimated))) issues.push("An estimated leg was not replaced by a Google route.");
     if (visitsOutsideHours(trip, schedule, places).length) issues.push("Actual travel moved a visit outside its opening hours.");
-    if (issues.length) throw new PlanningError("Actual-departure verification failed.", "conflict", false, "verification-failed");
+    if (issues.length) { verificationIssues.push(issues.join(" ")); throw new PlanningError("Actual-departure verification failed.", "conflict", false, "verification-failed"); }
     }); } catch (error) {
       if (!(error instanceof PlanningError)) throw error;
       if (usedEstimates) trustEstimates = false;
@@ -1059,6 +1104,8 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
       schedule.omitted.push(...input.stops.filter((stop) => !trip.stops.some((retained) => retained.id === stop.id)).map((stop) => stop.id));
       const errors = validateSchedule(input, schedule);
       if (errors.length) throw new HttpError(422, errors.join(" "));
+      const fits = squeezeIns(input, schedule, samples ? samples.select() : edges, places);
+      if (fits.length) schedule.squeezeIns = fits;
       const changes = schedule.days.flatMap((day) => day.visits).map((visit) => input.stops.find((stop) => stop.id === visit.stopId)!.duration - (visit.end - visit.start)).filter((minutes) => minutes > 0);
       if (changes.length) warnings.push(`${changes.length} visit${changes.length === 1 ? "" : "s"} shortened by ${changes.reduce((total, minutes) => total + minutes, 0)} minutes in total, within your approved duration choices.`);
       const assumedLegs = schedule.days.flatMap((day) => [...day.visits.map((visit) => visit.leg), ...(day.returnLeg ? [day.returnLeg] : [])]).filter((leg) => leg.assumed).length;
@@ -1074,7 +1121,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   throw failure("verification-failed", joint ? "No itinerary passed actual-departure verification within the repair budget. This does not prove the trip is impossible; no itinerary was changed." : "Transit timing changed enough to break the schedule. Add more time between bookings or assign fewer sights to each day.");
   } catch (error) {
     if (error instanceof PlanningFailure && process.env.NODE_ENV === "development" && debugProblem) {
-      await writeFile("/tmp/traveller-plan-debug.json", JSON.stringify({ ...debugProblem, places, stages, failure: error.message })).catch(() => undefined);
+      await writeFile("/tmp/traveller-plan-debug.json", JSON.stringify({ ...debugProblem, places, stages, failure: error.message, verificationIssues })).catch(() => undefined);
     }
     // A failure with one-click fixes stays an error so the fixes reach the user instead of a provisional outline.
     if (error instanceof PlanningFailure) throw error.provisional || !coupled || error.fixes.length ? error : failure(error.code, error.message);

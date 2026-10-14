@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, dayPlanSchema, instantForMinute, minuteAt, placeSchema, returnDeadline, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
+import { allowsTravelEdge, dayEnd, dayPlanSchema, dayStart, instantForMinute, minuteAt, placeSchema, returnDeadline, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
 
 const idsSchema = z.array(z.uuid()).max(60).refine((ids) => new Set(ids).size === ids.length, "Visits must be unique.");
 const recoveryOriginSchema = z.object({ id: z.union([z.literal("hotel"), z.uuid()]), location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional() }).strict();
@@ -78,7 +78,7 @@ export function recoveryInputErrors(request: RecoveryRequest, now = Temporal.Now
   if (origin.id !== "hotel" && !trip.stops.some((stop) => stop.id === origin.id)) errors.push("Confirm your current location.");
   const pending = remainingIds(stopIds, progress);
   const minute = recoveryMinute(trip, day, request.departureAt);
-  if (minute < minuteAt(trip, day, trip.dailyStart) || minute > minuteAt(trip, day, trip.dailyEnd) || minute + 0.01 < Math.max(progress.readyAt ?? 0, ...progress.completed.map((visit) => visit.end))) errors.push("Departure must follow actual progress and stay within today's hours.");
+  if (minute < dayStart(trip, day) || minute > dayEnd(trip, day) || minute + 0.01 < Math.max(progress.readyAt ?? 0, ...progress.completed.map((visit) => visit.end))) errors.push("Departure must follow actual progress and stay within today's hours.");
   const departure = Temporal.Instant.from(request.departureAt);
   if (Math.abs(departure.epochMilliseconds - now.epochMilliseconds) > 120_000 && departure.epochMilliseconds < now.epochMilliseconds) errors.push("Departure time is stale. Refresh from the current time.");
   if (request.mode === "route" && (!request.targetId || (request.targetId !== "hotel" && !pending.includes(request.targetId)))) errors.push("Choose a remaining destination.");
@@ -122,7 +122,7 @@ export function validateDayRecovery(request: RecoveryRequest, option: RecoveryOp
     const duration = visit.end - visit.start;
     const original = progress.remaining?.durations[stop.id] ?? stop.duration;
     if (!Number.isFinite(visit.start) || !Number.isFinite(visit.end) || Math.abs(duration - Math.round(duration)) > 0.01 || duration + 0.01 < (request.permissions.minimumDurations[stop.id] ?? original) || duration > original + 0.01 || Math.abs((option.durations[stop.id] ?? Infinity) - duration) > 0.01 || (stop.fixedTime && (Math.abs(duration - stop.duration) > 0.01 || Math.abs(visit.start - minuteAt(trip, day, stop.fixedTime!)) > 0.01))) errors.push(`${stop.name}: unapproved duration or changed booking.`);
-    if (visit.start + 0.01 < end + visit.leg.minutes + (stop.fixedTime ? stop.buffer : 0) || visit.end > minuteAt(trip, day, trip.dailyEnd)) errors.push(`${stop.name}: insufficient time.`);
+    if (visit.start + 0.01 < end + visit.leg.minutes + (stop.fixedTime ? stop.buffer : 0) || visit.end > dayEnd(trip, day)) errors.push(`${stop.name}: insufficient time.`);
     visited.add(stop.id); previous = stop.id; end = visit.end;
   }
   if (new Set(option.skipped).size !== option.skipped.length || option.skipped.some((id) => !pending.includes(id) || !request.permissions.skipIds.includes(id) || trip.stops.find((stop) => stop.id === id)?.fixedTime || visited.has(id))) errors.push("An omission was not approved.");

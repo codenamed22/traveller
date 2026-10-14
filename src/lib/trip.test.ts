@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyScheduleDurations, changeStartDate, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { applyScheduleDurations, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -95,5 +95,58 @@ describe("trip constraints", () => {
     expect(formatMinute(trip, 0, 180)).toBe("04:00");
     expect(() => minuteAt(trip, 0, "02:30")).toThrow();
     expect(() => minuteAt({ ...trip, startDate: "2026-10-25" }, 0, "02:30")).toThrow();
+  });
+
+  it("starts the first day after arrival and ends the last day in time for departure", () => {
+    const trip = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 4, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00",
+      arrival: { mode: "FLIGHT" as const, time: "13:20", place: "Amsterdam Schiphol", reference: "QR 273" },
+      departure: { mode: "TRAIN" as const, time: "17:00", place: "Amsterdam Centraal", transferMinutes: 25 } };
+    expect(tripSchema.safeParse(trip).success).toBe(true);
+    // 13:20 + 45 min at the airport + 45 min to the hotel + 15 min to drop bags.
+    expect(arrivalTimes(trip)).toMatchObject({ buffer: 45, transfer: 45, ready: minuteAt(trip, 0, "15:05") });
+    expect(formatMinute(trip, 0, dayStart(trip, 0))).toBe("15:05");
+    expect(dayStart(trip, 1)).toBe(minuteAt(trip, 1, "08:00"));
+    expect(dayEnd(trip, 0)).toBe(minuteAt(trip, 0, "21:00"));
+    // 17:00 train − 20 min at the station − 25 min transfer − 15 min to collect bags.
+    expect(departureTimes(trip)).toMatchObject({ day: 3, leaveHotel: minuteAt(trip, 3, "16:15") });
+    expect(formatMinute(trip, 3, dayEnd(trip, 3))).toBe("16:00");
+    expect(returnDeadline(trip, 3)).toBe(dayEnd(trip, 3));
+    expect(returnDeadline(trip, 2)).toBeGreaterThan(minuteAt(trip, 2, "21:00"));
+    const late = { ...trip, arrival: { ...trip.arrival, time: "22:30" } };
+    expect(dayEnd(late, 0)).toBe(dayStart(late, 0));
+    expect(tripForDay(trip, 0)).toMatchObject({ days: 1, startDate: "2026-12-24", arrival: trip.arrival });
+    expect(tripForDay(trip, 0).departure).toBeUndefined();
+    expect(tripForDay(trip, 3)).toMatchObject({ startDate: "2026-12-27", departure: trip.departure });
+    expect(tripForDay(trip, 3).arrival).toBeUndefined();
+    const booked = { ...trip, stops: [{ ...newStop("Cruise"), day: 0, fixedTime: "11:00", duration: 60 }, { ...newStop("Dinner"), day: 3, fixedTime: "16:30", duration: 60 }] };
+    expect(bookingConflictDetails(booked).map((conflict) => conflict.message)).toEqual([
+      expect.stringContaining("before you can start after arriving at 13:20 (about 15:05"),
+      expect.stringContaining("17:00 departure"),
+    ]);
+  });
+  it("rejects a one-day stay that departs before it arrives", () => {
+    const trip = { ...newTrip(), city: "Utrecht", startDate: "2026-12-27", days: 1, arrival: { mode: "TRAIN" as const, time: "15:00", place: "Utrecht Centraal" }, departure: { mode: "TRAIN" as const, time: "14:00", place: "Utrecht Centraal" } };
+    expect(tripSchema.safeParse(trip).success).toBe(false);
+  });
+  it("ends a direct departure day at the station instead of back at the hotel", () => {
+    const base = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 5, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true };
+    const trip = { ...base, departure: { mode: "TRAIN" as const, time: "11:10", place: "Amsterdam Centraal", placeId: "centraal", direct: true } };
+    expect(tripSchema.safeParse(trip).success).toBe(true);
+    expect(directDeparture(trip)).toBe(true);
+    // At the station 20 minutes before the 11:10 train; the last leg goes there from the final visit.
+    expect(formatMinute(trip, 4, dayEnd(trip, 4))).toBe("10:50");
+    expect(returnDeadline(trip, 4)).toBe(minuteAt(trip, 4, "10:50"));
+    expect(endpointKey(trip, 4, "hotel", "to")).toBe("departure");
+    expect(endpointKey(trip, 4, "hotel", "from")).toBe("hotel");
+    expect(endpointKey(trip, 3, "hotel", "to")).toBe("hotel");
+    expect(endpointKey(tripForDay(trip, 4), 0, "hotel", "to")).toBe("departure");
+    // Without a confirmed station, or without daily returns, it falls back to collecting bags at the hotel.
+    for (const fallback of [{ ...trip, departure: { ...trip.departure, placeId: undefined } }, { ...trip, returnToHotel: false }]) {
+      expect(directDeparture(fallback)).toBe(false);
+      expect(formatMinute(fallback, 4, dayEnd(fallback, 4))).toBe("10:15");
+    }
+    // A late flight: back at the hotel by 19:59 (23:59 − 3 h − 45 min − 15 min for bags), never the usual 23:00.
+    const late = { ...base, departure: { mode: "FLIGHT" as const, time: "23:59", place: "Schiphol" } };
+    expect(returnDeadline(late, 4)).toBe(minuteAt(late, 4, "19:59"));
   });
 });

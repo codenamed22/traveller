@@ -1,4 +1,4 @@
-import { minuteAt, type TravelEdge, type TravelMode, type Trip } from "./trip";
+import { dayStart, minuteAt, type TravelEdge, type TravelMode, type Trip } from "./trip";
 
 type Connection = Pick<TravelEdge, "day" | "from" | "to" | "mode">;
 
@@ -19,7 +19,7 @@ export class RouteSamples {
   }
 
   add(edge: TravelEdge) {
-    this.record(edge.day, edge.from, edge.to, edge.mode, edge.sampledDeparture ?? minuteAt(this.trip, edge.day, this.trip.dailyStart), edge);
+    this.record(edge.day, edge.from, edge.to, edge.mode, edge.sampledDeparture ?? dayStart(this.trip, edge.day), edge);
   }
 
   record(day: number, from: string, to: string, mode: TravelMode, departure: number, edge: TravelEdge | null) {
@@ -51,7 +51,7 @@ export class RouteSamples {
     for (const { connection } of this.connections.values()) {
       const { day, from, to, mode } = connection;
       const origin = this.trip.stops.find((stop) => stop.id === from);
-      const departure = this.departures.get(JSON.stringify([day, from])) ?? (origin?.fixedTime && origin.day === day ? minuteAt(this.trip, day, origin.fixedTime) + origin.duration : minuteAt(this.trip, day, this.trip.dailyStart));
+      const departure = this.departures.get(JSON.stringify([day, from])) ?? (origin?.fixedTime && origin.day === day ? minuteAt(this.trip, day, origin.fixedTime) + origin.duration : dayStart(this.trip, day));
       const edge = this.at(day, from, to, mode, departure);
       if (edge) edges.push(edge);
     }

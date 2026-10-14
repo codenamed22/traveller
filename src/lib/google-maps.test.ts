@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Temporal } from "@js-temporal/polyfill";
-import { instantAt, newStop, newTrip, planningPreferences, type Trip } from "./trip";
+import { instantAt, minuteAt, newStop, newTrip, planningPreferences, type Trip } from "./trip";
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, getPlacePhoto, planWithGoogle, recoverDayWithGoogle, refreshSavedPlanWithGoogle, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, planWithGoogle, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -786,5 +786,64 @@ describe("Google-backed configurable planning", () => {
     trip.startDate = "2099-01-01";
     trip.planning = { ...planningPreferences(trip), mode: "TRANSIT" };
     await expect(planWithGoogle(trip)).rejects.toThrow("routing horizon");
+  });
+});
+
+describe("direct departures", () => {
+  it("requests the final leg to the confirmed station, never back to the hotel", async () => {
+    const requests = mockGoogle();
+    const trip: Trip = { ...fixture(), dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true, stops: [{ ...newStop("Coffee"), placeId: "coffee-place", duration: 45 }], departure: { mode: "TRAIN", time: "11:10", place: "Centraal", placeId: "station-place", direct: true } };
+    const result = await planWithGoogle(trip);
+    expect(validateSchedule(trip, result.schedule)).toEqual([]);
+    expect(result.places.departure).toMatchObject({ id: "station-place" });
+    const destinations = requests.flatMap((body) => [(body.destination as { placeId?: string } | undefined)?.placeId, ...((body.destinations as { waypoint: { placeId: string } }[] | undefined) ?? []).map((entry) => entry.waypoint.placeId)]).filter(Boolean);
+    expect(destinations).toContain("station-place");
+    expect(destinations).not.toContain("hotel-place");
+    const day = result.schedule.days[0];
+    expect(day.returnLeg).toMatchObject({ to: "hotel" });
+    expect(day.visits[0].end + day.returnLeg!.minutes).toBeLessThanOrEqual(minuteAt(trip, 0, "10:50"));
+  });
+});
+
+describe("direct departure walks", () => {
+  it("never reuses a walk back to the hotel as the walk to the station", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    // The hotel is an hour's walk from everything; the station is a minute from everything.
+    const seconds = (placeId: string) => placeId === "hotel-place" ? 3600 : placeId === "station-place" ? 60 : 600;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("places.googleapis.com")) return Response.json({ id: url.split("/").at(-1), displayName: { text: "Place" }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" } });
+      const body = JSON.parse(init!.body as string);
+      if (url.includes("computeRouteMatrix")) return Response.json(body.destinations.map((target: { waypoint: { placeId: string } }, destinationIndex: number) => ({ destinationIndex, condition: "ROUTE_EXISTS", duration: `${seconds(target.waypoint.placeId)}s`, distanceMeters: 800 })));
+      return Response.json({ routes: [{ duration: `${seconds(body.destination.placeId)}s`, distanceMeters: 800 }] });
+    }));
+    const [museum, hall, coffee] = [{ ...newStop("Museum"), placeId: "museum-place", day: 0 }, { ...newStop("Station hall"), placeId: "hall-place", day: 1, duration: 15 }, { ...newStop("Coffee"), placeId: "coffee-place" }];
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true, stops: [museum, hall, coffee], departure: { mode: "TRAIN", time: "11:10", place: "Centraal", placeId: "station-place", direct: true } };
+    const solve = vi.spyOn(planner, "solveTrip");
+    const result = await planWithGoogle(trip);
+    expect(validateSchedule(trip, result.schedule)).toEqual([]);
+    expect(result.schedule.days[1].returnLeg).toMatchObject({ to: "hotel", minutes: 1 });
+    // What the search saw, not just what verification fixed afterwards: on the departure day every walk "home" is the
+    // one-minute walk to the station; on the first day it is the hour back to the hotel.
+    const searched = solve.mock.calls.flatMap(([, travel]) => travel).filter((edge) => edge.mode === "WALK" && edge.to === "hotel" && !edge.estimated);
+    expect(searched.filter((edge) => edge.day === 1).map((edge) => edge.minutes)).not.toContain(60);
+    expect(searched.filter((edge) => edge.day === 1).length).toBeGreaterThan(0);
+    expect(searched.filter((edge) => edge.day === 0).every((edge) => edge.minutes === 60)).toBe(true);
+  });
+});
+
+describe("pinned visit routes", () => {
+  it("asks Google for every unsampled pair of visits pinned to the same day, and nothing across days", async () => {
+    const requests = mockGoogle();
+    const [a, b, c] = ["A", "B", "C"].map((name) => ({ ...newStop(name), placeId: `${name}-place` }));
+    const trip: Trip = { ...fixture(), days: 2, returnToHotel: true, stops: [{ ...a, day: 0 }, { ...b, day: 0 }, { ...c, day: 1 }] };
+    const place = (id: string) => ({ id, name: id, address: "", location: { lat: 48.86, lng: 2.33 } });
+    const places = { hotel: place("hotel-place"), [a.id]: place("A-place"), [b.id]: place("B-place"), [c.id]: place("C-place") };
+    const walk = (day: number, from: string, to: string) => ({ day, from, to, mode: "WALK" as const, minutes: 10, meters: 800 });
+    const samples = new RouteSamples(trip, [walk(0, "hotel", a.id), walk(0, a.id, "hotel"), walk(0, "hotel", b.id), walk(0, b.id, "hotel"), walk(1, "hotel", c.id), walk(1, c.id, "hotel")]);
+    const edges = await samplePinnedPairs(trip, places, new RequestBudget(), samples, 120);
+    expect(edges.some((edge) => edge.day === 0 && edge.from === a.id && edge.to === b.id)).toBe(true);
+    expect(edges.some((edge) => edge.day === 0 && edge.from === b.id && edge.to === a.id)).toBe(true);
+    const asked = requests.flatMap((body) => ((body.destinations as { waypoint: { placeId: string } }[] | undefined) ?? []).map((entry) => `${(body.origins as { waypoint: { placeId: string } }[])[0].waypoint.placeId}>${entry.waypoint.placeId}`));
+    expect(asked.sort()).toEqual(["A-place>B-place", "B-place>A-place"]);
   });
 });

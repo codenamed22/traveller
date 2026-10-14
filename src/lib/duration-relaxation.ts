@@ -1,5 +1,5 @@
 import { PlanningError, sampledRouteGaps } from "./planner";
-import { minuteAt, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
+import { dayStart, minuteAt, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 type Solve = (trip: Trip, seconds: number, level: number) => Promise<Schedule>;
@@ -7,7 +7,7 @@ type Solve = (trip: Trip, seconds: number, level: number) => Promise<Schedule>;
 function restoreDurations(trip: Trip, schedule: Schedule): Schedule {
   const durations = new Map(schedule.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, visit.end - visit.start] as const)));
   const retime = () => ({ ...schedule, days: schedule.days.map((day) => {
-    let cursor = minuteAt(trip, day.day, trip.dailyStart);
+    let cursor = dayStart(trip, day.day);
     const visits = day.visits.map((visit) => {
       const stop = trip.stops.find((candidate) => candidate.id === visit.stopId)!;
       const start = stop.fixedTime ? minuteAt(trip, day.day, stop.fixedTime) : cursor + visit.leg.minutes;

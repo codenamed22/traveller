@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import loadHighs from "highs";
-import { allowsTravelEdge, allowsVisitPair, bookingConflicts, formatMinute, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, tripDate, tripSchema, type Place, type PlanningFailureCode, type PlanningFix, type Schedule, type TravelEdge, type Trip } from "./trip";
-import { validateSchedule, type ScheduleBoundary } from "./schedule-validation";
+import { allowsTravelEdge, allowsVisitPair, bookingConflicts, dayEnd, dayStart, directDeparture, endpointKey, formatMinute, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, tripDate, tripForDay, tripSchema, type Place, type PlanningFailureCode, type PlanningFix, type Schedule, type SqueezeIn, type TravelEdge, type Trip } from "./trip";
+import { splitVisits, validateSchedule, type ScheduleBoundary } from "./schedule-validation";
 import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, openingIntervals, relaxAlternatives, timeTarget, type AlternativeGroup, type CapCategory } from "./visit-slots";
 
 export { bookingConflicts } from "./trip";
@@ -35,7 +35,8 @@ export type SolverStage = {
   constructionMs?: number;
   seeded?: boolean;
 };
-export type SolverOptions = { strategy?: "optimized" | "feasibility-first"; onStage?: (stage: SolverStage) => void; initialSchedule?: Schedule; boundary?: ScheduleBoundary; places?: Record<string, Place> };
+// `together`: sets of stops visited in one go when on the same day (a day trip planned alone for one day).
+export type SolverOptions = { strategy?: "optimized" | "feasibility-first"; onStage?: (stage: SolverStage) => void; initialSchedule?: Schedule; boundary?: ScheduleBoundary; places?: Record<string, Place>; together?: string[][]; cautiousEstimates?: boolean };
 
 // Exceeding a daily meal or coffee cap costs more than keeping a priority-1 optional visit is worth.
 const capPenalty = 200_000;
@@ -160,10 +161,10 @@ function fitsAroundBookings(trip: Trip, travel: TravelEdge[], stop: Trip["stops"
   const minutes = shortestTravel(trip, travel, day, (id) => { const other = trip.stops.find((candidate) => candidate.id === id); return other && !other.fixedTime && other.id !== stop.id ? minimum(other) : null; });
   const duration = minimum(stop);
   const booked = trip.stops.filter((other) => other.id !== stop.id && other.day === day && other.fixedTime).map((other) => ({ id: other.id, start: minuteAt(trip, day, other.fixedTime!), buffer: other.buffer, end: minuteAt(trip, day, other.fixedTime!) + other.duration })).sort((left, right) => left.start - right.start);
-  const dayEnd = minuteAt(trip, day, trip.dailyEnd);
-  const gaps = [{ id: "hotel", end: minuteAt(trip, day, trip.dailyStart) }, ...booked].map((previous, index) => {
+  const lastEnd = dayEnd(trip, day);
+  const gaps = [{ id: "hotel", end: dayStart(trip, day) }, ...booked].map((previous, index) => {
     const next = booked[index];
-    return next ? { previous, next: next.id, deadline: next.start - next.buffer } : { previous, next: trip.returnToHotel ? "hotel" : null, deadline: trip.returnToHotel ? returnDeadline(trip, day) : dayEnd };
+    return next ? { previous, next: next.id, deadline: next.start - next.buffer } : { previous, next: trip.returnToHotel ? "hotel" : null, deadline: trip.returnToHotel ? returnDeadline(trip, day) : lastEnd };
   });
   let unknown = false;
   for (const gap of gaps) {
@@ -171,14 +172,18 @@ function fitsAroundBookings(trip: Trip, travel: TravelEdge[], stop: Trip["stops"
     const back = gap.next ? minutes(stop.id, gap.next) : 0;
     if (!Number.isFinite(there) || !Number.isFinite(back)) { unknown = true; continue; }
     for (const [open, close] of intervals) {
-      const start = Math.max(gap.previous.end + there, open, minuteAt(trip, day, trip.dailyStart));
-      if (start + duration <= Math.min(close, dayEnd) + 0.01 && start + duration + back <= gap.deadline + 0.01) return true;
+      const start = Math.max(gap.previous.end + there, open, dayStart(trip, day));
+      if (start + duration <= Math.min(close, lastEnd) + 0.01 && start + duration + back <= gap.deadline + 0.01) return true;
     }
   }
   return unknown ? null : false;
 }
 
-const hourConflictError = (issues: HourConflict[]) => new PlanningError(`No schedule fits these bookings and opening hours. ${issues.slice(0, 5).map((issue) => issue.message).join(" ")}${issues.length > 5 ? ` (${issues.length - 5} more)` : ""}`, "conflict", false, "sampled-model-conflict", issues.map((issue) => issue.fix));
+const hourConflictError = (issues: HourConflict[], capacity: HourConflict[] = []) => {
+  const messages = [...issues, ...capacity].map((issue) => issue.message).filter(Boolean);
+  const headline = issues.length ? "No schedule fits these bookings and opening hours." : "Not enough time on these days for the visits assigned to them.";
+  return new PlanningError(`${headline} ${messages.slice(0, 5).join(" ")}${messages.length > 5 ? ` (${messages.length - 5} more)` : ""}`, "conflict", false, "sampled-model-conflict", [...issues, ...capacity].map((issue) => issue.fix));
+};
 
 function bookingHourConflicts(trip: Trip, travel: TravelEdge[], groups: AlternativeGroup[], places?: Record<string, Place>): HourConflict[] {
   const tripDays = Array.from({ length: trip.days }, (_, day) => day);
@@ -199,11 +204,312 @@ function bookingHourConflicts(trip: Trip, travel: TravelEdge[], groups: Alternat
   });
 }
 
+// Waiting for a later anchor (a booking, an opening time, a preferred time such as dusk) moves to the start of the day:
+// earlier visits shift later, keeping `waitSlack` minutes before the anchor for a leg that runs long at its new
+// departure time. A visit never moves past its opening hours, the end of its preferred window, the day's end or a
+// booking, so the result stays valid; the order and legs are unchanged. The departure day is the exception (below).
+const waitSlack = 10;
+export function compactWaits(trip: Trip, schedule: Schedule, places?: Record<string, Place>): Schedule {
+  return { ...schedule, days: schedule.days.map((day) => {
+    const visits = day.visits.map((visit) => ({ ...visit }));
+    for (let index = visits.length - 2; index >= 0; index--) {
+      const [visit, next] = [visits[index], visits[index + 1]];
+      const stop = trip.stops.find((candidate) => candidate.id === visit.stopId);
+      const nextStop = trip.stops.find((candidate) => candidate.id === next.stopId);
+      if (!stop || !nextStop || stop.fixedTime) continue;
+      const room = next.start - next.leg.minutes - (nextStop.fixedTime ? nextStop.buffer : 0) - waitSlack - visit.end;
+      const caps = [room, dayEnd(trip, day.day) - visit.end];
+      const hours = openingIntervals(trip, day.day, places?.[stop.id]);
+      if (hours) caps.push((hours.find(([open, close]) => visit.start >= open - 0.01 && visit.end <= close + 0.01)?.[1] ?? visit.end) - visit.end);
+      const target = timeTarget(trip, stop, day.day, { places });
+      if (target) caps.push(target.end - visit.start);
+      const shift = Math.floor(Math.min(...caps));
+      if (shift >= 1) { visit.start += shift; visit.end += shift; }
+    }
+    // On the departure day, visits after the last booking start as early as travel, opening hours and preferred windows
+    // allow instead, so spare time sits before the train or flight rather than before the first visit.
+    if (trip.departure && day.day === trip.days - 1) {
+      let last = -1;
+      visits.forEach((visit, index) => { if (trip.stops.find((stop) => stop.id === visit.stopId)?.fixedTime) last = index; });
+      let ready = last >= 0 ? visits[last].end : dayStart(trip, day.day);
+      for (const visit of visits.slice(last + 1)) {
+        const stop = trip.stops.find((candidate) => candidate.id === visit.stopId);
+        let earliest = ready + visit.leg.minutes;
+        const open = openingIntervals(trip, day.day, places?.[visit.stopId])?.find(([start, close]) => visit.start >= start - 0.01 && visit.end <= close + 0.01)?.[0];
+        if (open !== undefined) earliest = Math.max(earliest, open);
+        const target = stop && timeTarget(trip, stop, day.day, { places });
+        if (target && visit.start >= target.start) earliest = Math.max(earliest, target.start);
+        const shift = Math.floor(visit.start - earliest);
+        if (shift >= 1) { visit.start -= shift; visit.end -= shift; }
+        ready = visit.end;
+      }
+    }
+    return { ...day, visits };
+  }) };
+}
+
+// What narrows a day's window, for messages: arrival on the first day, departure on the last, otherwise daily hours.
+function windowReason(trip: Trip, day: number) {
+  const [start, end] = [dayStart(trip, day), dayEnd(trip, day)];
+  const parts: string[] = [];
+  if (day === 0 && trip.arrival && start > minuteAt(trip, day, trip.dailyStart)) parts.push(`starts about ${formatMinute(trip, day, start)} after arriving at ${trip.arrival.time}`);
+  if (trip.departure && day === trip.days - 1 && end < minuteAt(trip, day, trip.dailyEnd)) parts.push(`ends about ${formatMinute(trip, day, end)} to make the ${trip.departure.time} departure`);
+  return parts.length ? `Day ${day + 1} ${parts.join(" and ")}` : `Day ${day + 1} runs ${formatMinute(trip, day, start)}–${formatMinute(trip, day, end)}`;
+}
+
+// Visits pinned to a day that cannot all fit its window, even with each visit's shortest sampled leg and shortest
+// approved duration (so this never rejects a feasible day). The suggestion releases the visits that suit the day
+// least, those whose preferred time falls outside the window, then the lowest priority, until typical legs fit.
+// Rough minutes left across the whole trip for visits: day windows less each visit's shortest duration plus 25 min of
+// travel (the estimate day assignment uses). An exclusive day trip takes one whole day and its members. Negative
+// means the trip is overpacked, so a released visit cannot simply move to another day.
+function tripSlack(trip: Trip) {
+  const exclusive = (trip.dayGroups ?? []).filter((group) => group.exclusive);
+  const reserved = new Set(exclusive.flatMap((group) => group.stopIds));
+  const lengths = Array.from({ length: trip.days }, (_, day) => dayEnd(trip, day) - dayStart(trip, day));
+  const capacity = lengths.reduce((total, length) => total + length - 25, 0) - exclusive.reduce((total, group) => total + Math.max(0, ...group.allowedDays.filter((day) => day < trip.days).map((day) => lengths[day] - 25)), 0);
+  return capacity - trip.stops.filter((stop) => !reserved.has(stop.id) && !stop.optional).reduce((total, stop) => total + (stop.fixedTime ? stop.duration + stop.buffer : Math.min(stop.duration, ...(stop.durationOptions ?? []))) + 25, 0);
+}
+
+// Released visits move to another day while the trip clearly has room (an hour a day is kept for waits around
+// bookings, which the estimate cannot see). Otherwise they may also move but become optional, kept only where they fit.
+function releaseActions(trip: Trip, released: Trip["stops"]) {
+  let room = tripSlack(trip) - 60 * trip.days;
+  return released.map((stop) => {
+    if (room >= 0) return "optimize-day" as const;
+    room += Math.min(stop.duration, ...(stop.durationOptions ?? [])) + 25;
+    return "flexible-optional" as const;
+  });
+}
+
+const listNames = (names: string[]) => names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+const releaseAdvice = (released: Trip["stops"], actions: ReturnType<typeof releaseActions>) => {
+  const moved = released.filter((_, index) => actions[index] === "optimize-day").map((stop) => stop.name);
+  const optional = released.filter((_, index) => actions[index] === "flexible-optional").map((stop) => stop.name);
+  return [moved.length ? `let the planner choose days for ${listNames(moved)}` : "", optional.length ? `the other days are nearly full, so let ${listNames(optional)} move to any day and keep ${optional.length > 1 ? "them" : "it"} only where there is room` : ""].filter(Boolean).join("; ");
+};
+
+// The visits that suit a day least come first: those whose preferred time falls outside the day's window, then the
+// lowest priority, then the longest.
+function releaseOrder(trip: Trip, day: number, stops: Trip["stops"], places?: Record<string, Place>) {
+  const [start, end] = [dayStart(trip, day), dayEnd(trip, day)];
+  const misfit = (stop: Trip["stops"][number]) => { const target = timeTarget(trip, stop, day, { places }); return target ? Math.max(0, start - target.end, target.start - end) : 0; };
+  return [...stops].sort((left, right) => misfit(right) - misfit(left) || left.priority - right.priority || right.duration - left.duration);
+}
+
+// A visit at the station or airport you leave from (the same Google place, or within 200 m of it), on a trip whose last
+// day goes straight there. A booked visit keeps its own time instead.
+export function atDeparturePlace(trip: Trip, stopId: string, places?: Record<string, Place>) {
+  const stop = trip.stops.find((candidate) => candidate.id === stopId);
+  if (!stop || stop.fixedTime || !directDeparture(trip)) return false;
+  const [here, there] = [places?.[stopId]?.location ?? stop.location, places?.departure?.location];
+  return stop.placeId === trip.departure!.placeId || Boolean(here && there && kmBetween(here, there) <= 0.2);
+}
+
+export const kmBetween = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => Math.hypot((a.lat - b.lat) * 111.2, (a.lng - b.lng) * 111.2 * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180));
+const estimateFormula = (mode: TravelEdge["mode"], km: number) => mode === "WALK" ? Math.max(5, Math.ceil(km * 1.3 / 4.5 * 60) + 3) : Math.max(15, Math.ceil(12 + 4 * km));
+const estimateBands = [1.2, 4];
+
+// Straight-line travel minutes calibrated to the trip's own Google routes. Per mode and distance band (under 1.2 km,
+// 1.2-4 km, farther) the formula is scaled by the median of real minutes over formula minutes (the 75th percentile when
+// cautious, after an estimate failed verification), never below 1. Mid-distance transit is where the bare formula is
+// most often optimistic (transfers and waits on short hops).
+export function travelEstimator(edges: TravelEdge[], km: (edge: TravelEdge) => number | undefined, cautious = false) {
+  const band = (distance: number) => estimateBands.filter((limit) => distance >= limit).length;
+  const ratios = new Map<string, number[]>();
+  for (const edge of edges) {
+    if (edge.estimated || edge.assumed || !Number.isFinite(edge.minutes)) continue;
+    const distance = km(edge);
+    if (distance === undefined) continue;
+    const key = `${edge.mode}|${band(distance)}`;
+    ratios.set(key, [...(ratios.get(key) ?? []), edge.minutes / estimateFormula(edge.mode, distance)]);
+  }
+  const scale = new Map([...ratios].map(([key, values]) => {
+    const sorted = values.sort((left, right) => left - right);
+    return [key, sorted.length >= 5 ? Math.min(4, Math.max(1, sorted[Math.floor(sorted.length * (cautious ? 0.75 : 0.5))])) : 1];
+  }));
+  return (mode: TravelEdge["mode"], distance: number) => Math.ceil(estimateFormula(mode, distance) * (scale.get(`${mode}|${band(distance)}`) ?? 1));
+}
+
+// Sparse sampling can leave pairs of a day's own visits unconnected (each was sampled towards other neighbours). For a
+// timing check, those pairs get straight-line walking and transit estimates from the place locations, calibrated to the
+// day's real routes; transit is never estimated slower than two real legs through a third place.
+function withDistanceEstimates(trip: Trip, day: number, stops: Trip["stops"], travel: TravelEdge[], places?: Record<string, Place>, cautious = false) {
+  const ids = ["hotel", ...stops.map((stop) => stop.id)];
+  const location = (id: string, role: "from" | "to") => places?.[endpointKey(trip, day, id, role)]?.location ?? (id === "hotel" ? trip.hotelLocation : trip.stops.find((stop) => stop.id === id)?.location);
+  const estimate = travelEstimator(travel, (edge) => { const [a, b] = [location(edge.from, "from"), location(edge.to, "to")]; return a && b ? kmBetween(a, b) : undefined; }, cautious);
+  // The fastest real route out of each place, for a two-leg bound: going via any place with real routes both ways is a
+  // trip you could actually make, and far tighter than the formula for a day trip by train.
+  const real = new Map<string, number>();
+  for (const edge of travel) if (!edge.estimated && !edge.assumed && Number.isFinite(edge.minutes) && allowsTravelEdge(trip, edge)) real.set(`${edge.from}>${edge.to}`, Math.min(edge.minutes, real.get(`${edge.from}>${edge.to}`) ?? Infinity));
+  const via = (from: string, to: string) => Math.min(Infinity, ...[...new Set(travel.map((edge) => edge.from))].map((hub) => (real.get(`${from}>${hub}`) ?? Infinity) + (real.get(`${hub}>${to}`) ?? Infinity)));
+  const extra: TravelEdge[] = [];
+  for (const from of ids) for (const to of ids) {
+    if (from === to || (from === "hotel" && to === "hotel") || travel.some((edge) => edge.from === from && edge.to === to && Number.isFinite(edge.minutes))) continue;
+    const [a, b] = [location(from, "from"), location(to, "to")];
+    if (!a || !b) continue;
+    const km = kmBetween(a, b);
+    const twoLegs = via(from, to);
+    for (const mode of ["WALK", "TRANSIT"] as const) {
+      const edge: TravelEdge = { day, from, to, mode, minutes: mode === "TRANSIT" ? Math.min(estimate(mode, km), twoLegs) : estimate(mode, km), meters: Math.round(km * 1300), estimated: true };
+      if (allowsVisitPair(trip, from, to) && allowsTravelEdge(trip, edge)) extra.push(edge);
+    }
+  }
+  return [...travel, ...extra];
+}
+
+// For each place left out of the plan, where it fits best: before the first visit, between two, or after the last, open
+// at that time. Later visits may start later, but only as far as their bookings, opening hours, the day's end and the
+// trip back allow; nothing moves earlier or changes order. Ranked by the travel it adds plus half the delay to later
+// visits (a day already at its meal or coffee cap counts as 20 min worse). Unsampled legs use calibrated estimates, so
+// the times guide squeezing it in on the day; they are not a checked plan.
+export function squeezeIns(trip: Trip, schedule: Schedule, travel: TravelEdge[], places?: Record<string, Place>): SqueezeIn[] {
+  const fits: SqueezeIn[] = [];
+  for (const id of schedule.omitted) {
+    const stop = trip.stops.find((candidate) => candidate.id === id);
+    if (!stop || stop.fixedTime) continue;
+    const category = capCategory(trip, stop, places?.[id]);
+    let best: { fit: SqueezeIn; rank: number } | undefined;
+    for (const plan of schedule.days) {
+      const day = plan.day;
+      if (!stopAllowedOnDay(trip, stop, day) || trip.dayGroups?.some((group) => group.exclusive && !group.stopIds.includes(id) && plan.visits.some((visit) => group.stopIds.includes(visit.stopId)))) continue;
+      const dayTravel = travel.filter((edge) => edge.day === day);
+      const location = (node: string, role: "from" | "to") => places?.[endpointKey(trip, day, node, role)]?.location ?? (node === "hotel" ? trip.hotelLocation : trip.stops.find((candidate) => candidate.id === node)?.location);
+      const estimate = travelEstimator(dayTravel, (edge) => { const [a, b] = [location(edge.from, "from"), location(edge.to, "to")]; return a && b ? kmBetween(a, b) : undefined; });
+      const leg = (from: string, to: string) => {
+        const real = Math.min(Infinity, ...dayTravel.filter((edge) => edge.from === from && edge.to === to && Number.isFinite(edge.minutes) && allowsTravelEdge(trip, edge)).map((edge) => edge.minutes));
+        if (Number.isFinite(real)) return real;
+        const [a, b] = [location(from, "from"), location(to, "to")];
+        if (!a || !b) return Infinity;
+        const km = kmBetween(a, b);
+        return Math.min(...(["WALK", "TRANSIT"] as const).map((mode) => { const edge: TravelEdge = { day, from, to, mode, minutes: estimate(mode, km), meters: Math.round(km * 1300) }; return allowsTravelEdge(trip, edge) ? edge.minutes : Infinity; }));
+      };
+      const hours = openingIntervals(trip, day, places?.[id]);
+      const same = category ? plan.visits.filter((visit) => { const other = trip.stops.find((candidate) => candidate.id === visit.stopId); return other && capCategory(trip, other, places?.[other.id]) === category; }).length : 0;
+      for (let position = 0; position <= plan.visits.length; position++) {
+        const [previous, next] = [plan.visits[position - 1], plan.visits[position]];
+        const from = previous?.stopId ?? "hotel";
+        const arrival = Math.max(dayStart(trip, day), (previous?.end ?? dayStart(trip, day)) + leg(from, id));
+        const open = hours?.find(([opens, closes]) => Math.max(arrival, opens) + stop.duration <= closes);
+        if (hours && !open) continue;
+        const start = Math.max(arrival, open?.[0] ?? arrival);
+        const end = start + stop.duration;
+        if (!Number.isFinite(start) || end > dayEnd(trip, day)) continue;
+        // The rest of the day after the insertion: each later visit starts when it can, no earlier than planned.
+        let [cursor, at, delay, ok] = [end, id, 0, true];
+        for (const visit of plan.visits.slice(position)) {
+          const later = trip.stops.find((candidate) => candidate.id === visit.stopId);
+          const arrive = cursor + (at === id ? leg(id, visit.stopId) : visit.leg.minutes) + (later?.fixedTime ? later.buffer : 0);
+          const begin = later?.fixedTime ? visit.start : Math.max(visit.start, arrive);
+          const length = visit.end - visit.start;
+          const intervals = later?.fixedTime ? null : openingIntervals(trip, day, places?.[visit.stopId]);
+          if (arrive > begin + 0.01 || begin + length > dayEnd(trip, day) || (intervals && !intervals.some(([opens, closes]) => begin >= opens - 0.01 && begin + length <= closes + 0.01))) { ok = false; break; }
+          delay = Math.max(delay, begin - visit.start); cursor = begin + length; at = visit.stopId;
+        }
+        const back = trip.returnToHotel ? (at === id ? leg(id, "hotel") : plan.returnLeg?.minutes ?? leg(at, "hotel")) : 0;
+        if (!ok || cursor + back > (trip.returnToHotel ? returnDeadline(trip, day) : dayEnd(trip, day)) + 0.01) continue;
+        const replaced = next ? next.leg.minutes : trip.returnToHotel ? plan.returnLeg?.minutes ?? 0 : 0;
+        const added = leg(from, id) + (next ? leg(id, next.stopId) : trip.returnToHotel ? leg(id, "hotel") : 0) - replaced;
+        if (!Number.isFinite(added)) continue;
+        const overCap = category && same >= dailyCaps[category] ? { category, count: same + 1 } : undefined;
+        const fit: SqueezeIn = { stopId: id, day, ...(previous ? { after: previous.stopId } : next ? { before: next.stopId } : {}), start, end, extraMinutes: Math.max(0, added), ...(delay >= 1 ? { delayMinutes: Math.round(delay) } : {}), ...(overCap ? { overCap } : {}) };
+        const rank = fit.extraMinutes + delay / 2 + (overCap ? 20 : 0);
+        if (!best || rank < best.rank - 0.01) best = { fit, rank };
+      }
+    }
+    if (best) fits.push(best.fit);
+  }
+  return fits;
+}
+
+// Exact check, after a failed solve, of each day's assigned visits alone on the sampled routes. A day that cannot fit
+// releases visits (least suited first, preferring a single release that makes the day fit) until a short single-day
+// solve succeeds. Days with day-trip members are skipped; the check stops at the deadline and is limited to the
+// sampled routes, so it suggests rather than proves.
+export async function blockedDayFixes(trip: Trip, travel: TravelEdge[], places: Record<string, Place> | undefined, deadline: number, seconds = 0.5): Promise<{ blocked: string[]; fixes: PlanningFix[] }> {
+  const blocked: string[] = [];
+  const fixes: PlanningFix[] = [];
+  for (let day = 0; day < trip.days; day++) {
+    // Optional visits can always be left out, so only the required ones decide whether the day fits.
+    const assigned = trip.stops.filter((stop) => stop.day === day && !stop.optional);
+    if (!assigned.length || trip.dayGroups?.some((group) => group.stopIds.some((id) => assigned.some((stop) => stop.id === id)))) continue;
+    const edges = withDistanceEstimates(trip, day, assigned, travel.filter((edge) => edge.day === day), places).map((edge) => ({ ...edge, day: 0 }));
+    // A busy day can take longer than the first time limit to prove either way, so an inconclusive check is retried
+    // with more time while the deadline allows.
+    const fits = async (stops: Trip["stops"]) => {
+      for (const limit of [seconds, seconds * 4, seconds * 10]) {
+        if (Date.now() > deadline - limit * 1000) return null;
+        try { await solveTrip(tripForDay(trip, day, { stops: stops.map((stop) => ({ ...stop, day: 0 })), dayGroups: undefined }), edges, limit, { places, strategy: "feasibility-first" }); return true; }
+        catch (error) {
+          if (!(error instanceof PlanningError) || error.reason !== "incomplete") return error instanceof PlanningError && error.reason === "conflict" ? false : null;
+        }
+      }
+      return null;
+    };
+    if (await fits(assigned) !== false) continue;
+    let kept = assigned;
+    const released: Trip["stops"] = [];
+    let settled = false;
+    while (!settled && released.length < 6) {
+      const candidates = releaseOrder(trip, day, kept.filter((stop) => !stop.fixedTime), places);
+      if (!candidates.length) break;
+      let chosen: Trip["stops"][number] | undefined;
+      for (const candidate of candidates.slice(0, 4)) {
+        const result = await fits(kept.filter((stop) => stop.id !== candidate.id));
+        if (result === null) break;
+        if (result) { chosen = candidate; settled = true; break; }
+      }
+      chosen ??= candidates[0];
+      released.push(chosen); kept = kept.filter((stop) => stop.id !== chosen.id);
+      if (Date.now() > deadline - seconds * 1000) break;
+    }
+    // Releases forced before the deciding one may be unnecessary once it is gone: keep any that still fit.
+    if (settled) for (const stop of [...released].reverse().slice(1)) {
+      if (await fits([...kept, stop]) !== true) continue;
+      kept = [...kept, stop]; released.splice(released.indexOf(stop), 1);
+    }
+    const reason = windowReason(trip, day);
+    const actions = releaseActions(trip, released);
+    blocked.push(`${reason} and cannot fit its ${assigned.length} assigned visits with the sampled routes${settled ? `. To fit, ${releaseAdvice(released, actions)}` : ""}.`);
+    if (settled) fixes.push(...released.map((stop, index) => ({ stopId: stop.id, stopName: stop.name, issue: `${reason}; the day's other visits and bookings leave no room for it.${actions[index] === "flexible-optional" ? " Other days are nearly full." : ""}`, action: actions[index] })));
+  }
+  return { blocked, fixes };
+}
+
+// Visits in `released` already have a fix (for example opening hours) and no longer count against the day.
+function dayCapacityConflicts(trip: Trip, travel: TravelEdge[], groups: AlternativeGroup[], places?: Record<string, Place>, released = new Set<string>()): HourConflict[] {
+  return Array.from({ length: trip.days }, (_, day) => day).flatMap((day) => {
+    const [start, end] = [dayStart(trip, day), dayEnd(trip, day)];
+    const capacity = end - start - trip.stops.filter((stop) => stop.day === day && stop.fixedTime).reduce((total, stop) => total + stop.duration + stop.buffer, 0);
+    const pinned = trip.stops.filter((stop) => stop.day === day && !stop.fixedTime && !released.has(stop.id) && isRequiredStop(stop, groups) && !trip.dayGroups?.some((group) => group.stopIds.includes(stop.id)));
+    if (!pinned.length) return [];
+    const legs = (id: string) => travel.filter((edge) => edge.day === day && edge.to === id && allowsTravelEdge(trip, edge) && Number.isFinite(edge.minutes)).map((edge) => edge.minutes).sort((left, right) => left - right);
+    const shortest = (id: string) => legs(id)[0] ?? 0;
+    const typical = (id: string) => { const sorted = legs(id); return sorted[Math.floor(sorted.length / 2)] ?? 0; };
+    const visit = (stop: Trip["stops"][number]) => Math.min(stop.duration, ...(stop.durationOptions ?? []));
+    const lower = pinned.reduce((total, stop) => total + visit(stop) + shortest(stop.id), 0);
+    if (lower <= capacity) return [];
+    let used = pinned.reduce((total, stop) => total + visit(stop) + typical(stop.id), 0);
+    const moved: typeof pinned = [];
+    for (const stop of releaseOrder(trip, day, pinned, places)) {
+      if (used <= Math.max(0, capacity)) break;
+      moved.push(stop); used -= visit(stop) + typical(stop.id);
+    }
+    const reason = windowReason(trip, day);
+    const actions = releaseActions(trip, moved);
+    const advice = releaseAdvice(moved, actions);
+    return moved.map((stop, index) => ({
+      message: index ? "" : `${reason}, leaving ${Math.max(0, Math.round(capacity))} min around bookings for ${pinned.length} visits assigned to it that need at least ${Math.round(lower)} min with the shortest sampled travel. To fit, ${advice}.`,
+      fix: { stopId: stop.id, stopName: stop.name, issue: `${reason}; not enough time for it that day.${actions[index] === "flexible-optional" ? " Other days are nearly full." : ""}`, action: actions[index] },
+    }));
+  });
+}
+
 function bookingRouteConflicts(trip: Trip, travel: TravelEdge[]) {
   const issues: string[] = [];
   for (let day = 0; day < trip.days; day++) {
     const minutes = shortestTravel(trip, travel, day);
-    let previous = { id: "hotel", name: `hotel start (${trip.dailyStart})`, end: minuteAt(trip, day, trip.dailyStart) };
+    let previous = { id: "hotel", name: `hotel start (${trip.dailyStart})`, end: dayStart(trip, day) };
     const booked = trip.stops.filter((stop) => stop.day === day && stop.fixedTime).sort((left, right) => left.fixedTime!.localeCompare(right.fixedTime!));
     const check = (id: string, name: string, deadline: number) => {
       const needed = minutes(previous.id, id);
@@ -225,7 +531,7 @@ export function sampledRouteReachability(trip: Trip, travel: TravelEdge[]) {
   return Array.from({ length: trip.days }, (_, day) => {
     const stops = trip.stops.filter((stop) => stopAllowedOnDay(trip, stop, day));
     const ids = new Set(["hotel", ...stops.map((stop) => stop.id)]);
-    const minutes = minuteAt(trip, day, trip.dailyEnd) - minuteAt(trip, day, trip.dailyStart);
+    const minutes = dayEnd(trip, day) - dayStart(trip, day);
     const edges = travel.filter((edge) => edge.day === day && ids.has(edge.from) && ids.has(edge.to) && allowsVisitPair(trip, edge.from, edge.to) && allowsTravelEdge(trip, edge) && Number.isFinite(edge.minutes) && edge.minutes >= 0 && edge.minutes <= minutes && Number.isFinite(edge.meters) && edge.meters >= 0);
     const reachable = (reverse: boolean) => {
       const visited = new Set(["hotel"]);
@@ -270,7 +576,7 @@ export function sampledRouteGaps(trip: Trip, travel: TravelEdge[]) {
 function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, boundary?: ScheduleBoundary, places?: Record<string, Place>, alternatives: AlternativeGroup[] = [], start?: Schedule): Schedule | undefined {
   const edges = new Map<string, TravelEdge>();
   const key = (day: number, from: string, to: string) => JSON.stringify([day, from, to]);
-  const bounds = Array.from({ length: trip.days }, (_, day) => ({ date: tripDate(trip, day), start: boundary?.startMinute ?? minuteAt(trip, day, trip.dailyStart), end: minuteAt(trip, day, trip.dailyEnd) }));
+  const bounds = Array.from({ length: trip.days }, (_, day) => ({ date: tripDate(trip, day), start: boundary?.startMinute ?? dayStart(trip, day), end: dayEnd(trip, day) }));
   const allowed = bounds.map((_, day) => trip.stops.map((stop) => stopAllowedOnDay(trip, stop, day)));
   const bookings = trip.stops.map((stop) => stop.fixedTime ? minuteAt(trip, stop.day!, stop.fixedTime) : null);
   const maxStops = planningPreferences(trip).maxStopsPerDay;
@@ -381,12 +687,14 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
             const current = retime(day, orders[day]);
             if (!current) continue;
             const category = categories[index];
-            if (!required && category && orders[day].filter((other) => categories[other] === category).length >= dailyCaps[category]) continue;
+            // A required visit may exceed a meal or coffee cap, but only where no day under the cap takes it.
+            const capped = Boolean(category && orders[day].filter((other) => categories[other] === category).length >= dailyCaps[category!]);
+            if (!required && capped) continue;
             for (let position = 0; position <= orders[day].length; position++) {
               const order = [...orders[day].slice(0, position), index, ...orders[day].slice(position)];
               const candidate = retime(day, order);
               if (!candidate) continue;
-              const score = (routeMinutes(candidate) - routeMinutes(current)) * 1000 + candidate.visits.at(-1)!.end - bounds[day].start;
+              const score = (routeMinutes(candidate) - routeMinutes(current)) * 1000 + candidate.visits.at(-1)!.end - bounds[day].start + (capped ? capPenalty * 1000 : 0);
               options++;
               if (!own || score < own.score) own = { index, day, order, score, options: 0 };
             }
@@ -560,13 +868,14 @@ export async function solveTripByDays(input: Trip, travel: TravelEdge[], seconds
   const trip = tripSchema.parse(input);
   const alternatives = alternativeGroups(trip);
   const hourGaps = bookingHourConflicts(trip, travel, alternatives, options.places);
-  if (hourGaps.length) throw hourConflictError(hourGaps);
+  const capacityGaps = dayCapacityConflicts(trip, travel, alternatives, options.places, new Set(hourGaps.map((issue) => issue.fix.stopId)));
+  if (hourGaps.length || capacityGaps.length) throw hourConflictError(hourGaps, capacityGaps);
   const started = performance.now();
   const remaining = () => seconds - (performance.now() - started) / 1000;
   const groups = trip.dayGroups ?? [];
   const day = new Map<string, number>(trip.stops.flatMap((stop) => stop.day === null ? [] : [[stop.id, stop.day] as [string, number]]));
   const reserved = new Map<number, string>();
-  const length = (index: number) => minuteAt(trip, index, trip.dailyEnd) - minuteAt(trip, index, trip.dailyStart);
+  const length = (index: number) => dayEnd(trip, index) - dayStart(trip, index);
   const load = (index: number) => trip.stops.filter((stop) => day.get(stop.id) === index).reduce((total, stop) => total + Math.min(stop.duration, ...(stop.durationOptions ?? [])) + 25, 25);
   for (const group of groups) {
     const fixed = trip.stops.find((stop) => group.stopIds.includes(stop.id) && stop.day !== null)?.day;
@@ -578,74 +887,134 @@ export async function solveTripByDays(input: Trip, travel: TravelEdge[], seconds
     if (group.exclusive) reserved.set(chosen, group.id);
   }
   const fastest = (from: string, to: string, index: number) => Math.min(Infinity, ...travel.filter((edge) => edge.day === index && edge.from === from && edge.to === to && allowsTravelEdge(trip, edge)).map((edge) => edge.minutes));
-  const eligible = (stop: Trip["stops"][number], index: number) => stopAllowedOnDay(trip, stop, index) && !reserved.has(index) && (Boolean(stop.fixedTime) || fitsAroundBookings(trip, travel, stop, index, options.places) !== false);
-  const free = trip.stops.filter((stop) => !day.has(stop.id)).sort((left, right) => right.duration - left.duration);
+  // Open for the whole visit at some point inside the day's window (unknown hours count as open).
+  const opensFor = (stop: Trip["stops"][number], index: number) => {
+    const intervals = openingIntervals(trip, index, options.places?.[stop.id]);
+    return !intervals || intervals.some(([open, close]) => Math.min(close, dayEnd(trip, index)) - Math.max(open, dayStart(trip, index)) >= Math.min(stop.duration, ...(stop.durationOptions ?? [])));
+  };
+  const eligible = (stop: Trip["stops"][number], index: number) => stopAllowedOnDay(trip, stop, index) && !reserved.has(index) && (Boolean(stop.fixedTime) || (opensFor(stop, index) && fitsAroundBookings(trip, travel, stop, index, options.places) !== false));
+  const category = (stop: Trip["stops"][number]) => capCategory(trip, stop, options.places?.[stop.id]);
+  const alternativeKey = (stop: Trip["stops"][number]) => alternatives.find((group) => group.stopIds.includes(stop.id))?.key ?? stop.id;
+  // Required visits are placed first; optional ones only go to days with estimated room and are otherwise left out.
+  const free = trip.stops.filter((stop) => !day.has(stop.id)).sort((left, right) => Number(left.optional) - Number(right.optional) || right.duration - left.duration);
+  const dropped: string[] = [];
   const place = (stop: Trip["stops"][number], excluded: number[] = []) => {
     const candidates = Array.from({ length: trip.days }, (_, index) => index).filter((index) => eligible(stop, index) && !excluded.includes(index));
     const score = (index: number) => {
       const peers = trip.stops.filter((other) => other.id !== stop.id && day.get(other.id) === index);
       const near = Math.min(fastest("hotel", stop.id, index), ...peers.map((peer) => Math.min(fastest(peer.id, stop.id, index), fastest(stop.id, peer.id, index))));
-      return length(index) - load(index) - stop.duration - 2 * (Number.isFinite(near) ? near : 60);
+      // Meals and coffees spread across days: a day already at its cap (alternatives count once) takes another only when
+      // no other day can, since each day is then solved alone and cannot move it; below the cap, fewer is better.
+      const kind = category(stop);
+      const same = kind ? new Set(peers.filter((peer) => category(peer) === kind).map(alternativeKey)).size : 0;
+      const capCost = kind ? (same >= dailyCaps[kind] ? 100_000 : 30 * same) : 0;
+      // A preferred time the day's window cannot meet at all, such as lunch on an afternoon arrival day.
+      const target = timeTarget(trip, stop, index, { places: options.places });
+      const targetCost = target && (target.end <= dayStart(trip, index) || target.start >= dayEnd(trip, index)) ? 120 : 0;
+      return length(index) - load(index) - stop.duration - 2 * (Number.isFinite(near) ? near : 60) - capCost - targetCost;
     };
-    const chosen = candidates.sort((left, right) => score(right) - score(left))[0];
+    const chosen = candidates.filter((index) => !stop.optional || score(index) >= 0).sort((left, right) => score(right) - score(left))[0];
     if (chosen === undefined) return false;
     day.set(stop.id, chosen);
     return true;
   };
-  for (const stop of free) if (!place(stop) && isRequiredStop(stop, alternatives)) throw new PlanningError(`${stop.name} has no eligible day.`, "conflict", true, "hard-input-conflict");
+  // The most constrained visit goes next (fewest days with room under its meal or coffee cap), so a visit that fits only
+  // a few days is not crowded out by one that could go almost anywhere.
+  const roomyDays = (stop: Trip["stops"][number]) => {
+    const kind = category(stop);
+    return Array.from({ length: trip.days }, (_, index) => index).filter((index) => eligible(stop, index) && (!kind || new Set(trip.stops.filter((other) => other.id !== stop.id && day.get(other.id) === index && category(other) === kind).map(alternativeKey)).size < dailyCaps[kind])).length;
+  };
+  for (const queue = [...free]; queue.length;) {
+    const rank = (stop: Trip["stops"][number]) => [Number(stop.optional), roomyDays(stop), -stop.duration];
+    const before = (left: number[], right: number[]) => left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+    const next = queue.reduce((best, stop) => before(rank(stop), rank(best)) < 0 ? stop : best);
+    queue.splice(queue.indexOf(next), 1);
+    if (place(next)) continue;
+    if (next.optional) dropped.push(next.id);
+    else if (isRequiredStop(next, alternatives)) throw new PlanningError(`${next.name} has no eligible day.`, "conflict", true, "hard-input-conflict");
+  }
   const movable = new Set(free.map((stop) => stop.id));
   const solveDay = async (index: number) => {
     const stops = trip.stops.filter((stop) => day.get(stop.id) === index).map((stop) => ({ ...stop, day: 0 }));
-    const single: Trip = { ...trip, days: 1, startDate: tripDate(trip, index), stops, dayGroups: undefined };
+    const single = tripForDay(trip, index, { stops, dayGroups: undefined });
     if (!stops.length) return { day: index, date: tripDate(trip, index), visits: [], omitted: [] as string[], loss: 0, optimal: true };
-    const result = await solveTrip(single, travel.filter((edge) => edge.day === index).map((edge) => ({ ...edge, day: 0 })), Math.max(0.5, Math.min(2, remaining() / trip.days)), options);
+    const together = groups.map((group) => group.stopIds.filter((id) => day.get(id) === index)).filter((ids) => ids.length > 1);
+    // Pairs of the day's own visits that sparse sampling left unconnected get distance estimates; verification replaces
+    // every chosen leg with a real route.
+    const dayTravel = withDistanceEstimates(trip, index, stops, travel.filter((edge) => edge.day === index), options.places, options.cautiousEstimates);
+    // The time left is shared among the days still to plan, so the last days are not starved.
+    const unplanned = Math.max(1, trip.days - results.size);
+    const result = await solveTrip(single, dayTravel.map((edge) => ({ ...edge, day: 0 })), Math.max(1, Math.min(3, remaining() / unplanned)), { ...options, together });
     const plan = result.days[0];
     const shift = (edge: TravelEdge): TravelEdge => ({ ...edge, day: index });
     return { day: index, date: tripDate(trip, index), visits: plan.visits.map((visit) => ({ ...visit, leg: shift(visit.leg) })), ...(plan.returnLeg ? { returnLeg: shift(plan.returnLeg) } : {}), omitted: result.omitted, loss: result.optimization?.weightedDurationLoss ?? 0, optimal: result.optimization?.durationOptimal ?? true };
   };
   const results = new Map<number, Awaited<ReturnType<typeof solveDay>>>();
   const failed: number[] = [];
+  const proven = new Set<number>();
   for (let index = 0; index < trip.days; index++) {
-    try { results.set(index, await solveDay(index)); } catch (error) { if (!(error instanceof PlanningError)) throw error; failed.push(index); }
+    try { results.set(index, await solveDay(index)); } catch (error) { if (!(error instanceof PlanningError)) throw error; failed.push(index); if (error.reason === "conflict") proven.add(index); }
   }
   for (const index of failed) {
     let solved = false;
+    // Leaving out the day's flexible optional visits comes before moving required ones.
+    const optional = trip.stops.filter((stop) => movable.has(stop.id) && stop.optional && day.get(stop.id) === index);
+    if (optional.length && remaining() > 0.5) {
+      optional.forEach((stop) => { day.delete(stop.id); dropped.push(stop.id); });
+      try { results.set(index, await solveDay(index)); continue; } catch (error) { if (!(error instanceof PlanningError)) throw error; }
+    }
     const candidates = trip.stops.filter((stop) => movable.has(stop.id) && day.get(stop.id) === index).sort((left, right) => left.duration - right.duration);
     for (const stop of candidates) {
       if (remaining() <= 0.5) break;
       const target = Array.from({ length: trip.days }, (_, other) => other).filter((other) => other !== index && !failed.includes(other) && eligible(stop, other)).sort((left, right) => load(left) - load(right))[0];
       if (target === undefined) continue;
       day.set(stop.id, target);
-      try {
-        const [moved, rest] = await Promise.all([solveDay(target), solveDay(index)]);
-        results.set(target, moved); results.set(index, rest); solved = true; break;
-      } catch (error) {
-        if (!(error instanceof PlanningError)) throw error;
-        day.set(stop.id, index);
-      }
+      // A move that the receiving day absorbs is kept even if this day still fails, so several visits can leave it.
+      const [moved, rest] = await Promise.allSettled([solveDay(target), solveDay(index)]);
+      for (const outcome of [moved, rest]) if (outcome.status === "rejected" && !(outcome.reason instanceof PlanningError)) throw outcome.reason;
+      if (moved.status === "fulfilled") results.set(target, moved.value); else day.set(stop.id, index);
+      if (moved.status === "fulfilled" && rest.status === "fulfilled") { results.set(index, rest.value); solved = true; break; }
     }
-    if (!solved) throw new PlanningError(`Day ${index + 1} could not be planned with its assigned visits within the time limit.`, "incomplete");
+    // With nothing movable, a day the solver proved infeasible is a conflict in its assigned visits, not a timeout.
+    if (!solved) throw proven.has(index) && !candidates.length
+      ? new PlanningError(`Day ${index + 1} cannot fit the visits assigned to it with the sampled routes.`, "conflict")
+      : new PlanningError(`Day ${index + 1} could not be planned with its assigned visits within the time limit.`, "incomplete");
   }
   const days = Array.from({ length: trip.days }, (_, index) => results.get(index)!);
-  const schedule: Schedule = {
+  let schedule: Schedule = {
     days: days.map(({ day: index, date, visits, returnLeg }) => ({ day: index, date, visits, ...(returnLeg ? { returnLeg } : {}) })),
-    omitted: days.flatMap((entry) => entry.omitted), warnings: ["Days were planned one at a time after assigning flexible visits to days; a better overall arrangement may exist."], generatedAt: new Date().toISOString(),
+    omitted: [...days.flatMap((entry) => entry.omitted), ...dropped], warnings: ["Days were planned one at a time after assigning flexible visits to days; a better overall arrangement may exist."], generatedAt: new Date().toISOString(),
     optimization: { weightedDurationLoss: days.reduce((total, entry) => total + entry.loss, 0), durationOptimal: false, optionalOptimal: false, travelOptimal: false },
   };
+  // Days were assigned greedily, so the joint plan's local search then works across them: moving or swapping flexible
+  // visits between days under the same caps, opening hours and preferred times, keeping a change only when the whole
+  // plan gets cheaper. The result is kept only if it is valid and each shared-day trip is still one outing.
+  const relaxed = relaxAlternatives(trip, alternatives);
+  const allTravel = Array.from({ length: trip.days }, (_, index) => withDistanceEstimates(trip, index, trip.stops.filter((stop) => stopAllowedOnDay(trip, stop, index)), travel.filter((edge) => edge.day === index), options.places, options.cautiousEstimates)).flat();
+  const outings = groups.filter((group) => !group.exclusive).map((group) => group.stopIds);
+  const polished = constructionHint(relaxed, allTravel, performance.now() + Math.max(300, Math.min(1500, remaining() * 1000)), undefined, options.places, alternatives, schedule);
+  if (polished && !validateSchedule(trip, polished).length && !visitsOutsideHours(trip, polished, options.places).length && !polished.days.some((plan) => outings.some((ids) => splitVisits(plan.visits, ids)))) {
+    const compact = compactWaits(trip, polished, options.places);
+    const kept = !validateSchedule(trip, compact).length && !visitsOutsideHours(trip, compact, options.places).length ? compact : polished;
+    schedule = { ...schedule, days: kept.days, omitted: [...new Set([...kept.omitted, ...dropped])] };
+  }
   const errors = validateSchedule(trip, schedule);
   if (errors.length) throw new PlanningError(errors.join(" "));
   return schedule;
 }
 
-export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, options: SolverOptions = {}): Promise<Schedule> {
+export async function solveTrip(input: Trip, sampled: TravelEdge[], seconds = 5, options: SolverOptions = {}): Promise<Schedule> {
   const original = tripSchema.parse(input);
   const alternatives = alternativeGroups(original);
   const trip = relaxAlternatives(original, alternatives);
   const places = options.places;
   const boundary = options.boundary;
-  if (boundary && (trip.days !== 1 || !Number.isFinite(boundary.startMinute) || boundary.startMinute < minuteAt(trip, 0, trip.dailyStart) || boundary.startMinute > minuteAt(trip, 0, trip.dailyEnd))) throw new PlanningError("Invalid remaining-day boundary.", "conflict");
+  // A direct departure day ends at the station, so a visit to the station itself is that day's last.
+  const travel = sampled.filter((edge) => edge.to === "hotel" || edge.day !== trip.days - 1 || !atDeparturePlace(trip, edge.from, places));
+  if (boundary && (trip.days !== 1 || !Number.isFinite(boundary.startMinute) || boundary.startMinute < dayStart(trip, 0) || boundary.startMinute > dayEnd(trip, 0))) throw new PlanningError("Invalid remaining-day boundary.", "conflict");
   const hourGaps = boundary ? [] : bookingHourConflicts(original, travel, alternatives, places);
-  if (hourGaps.length) throw hourConflictError(hourGaps);
+  const capacityGaps = boundary ? [] : dayCapacityConflicts(original, travel, alternatives, places, new Set(hourGaps.map((issue) => issue.fix.stopId)));
+  if (hourGaps.length || capacityGaps.length) throw hourConflictError(hourGaps, capacityGaps);
   const coupled = Boolean(trip.dayGroups?.length || trip.stops.some((stop) => (stop.durationOptions?.length ?? 0) > 1));
   if (coupled && !boundary) {
     const gaps = sampledRouteGaps(trip, travel);
@@ -657,6 +1026,8 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
   const assignments = new Map<string, number[]>();
   const groupAssignments = new Map<string, number[]>();
   const routes: { day: number; from: number; to: number; column: number; edge: TravelEdge }[] = [];
+  const together = [...(trip.dayGroups ?? []).filter((group) => !group.exclusive).map((group) => group.stopIds), ...(options.together ?? [])];
+  const split = (schedule: Schedule) => together.some((ids) => schedule.days.some((day) => splitVisits(day.visits, ids)));
   const times: number[][] = [];
   const services: [number, number][][][] = [];
   const durationLoss: [number, number][] = [];
@@ -689,8 +1060,8 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
     const preferences = planningPreferences(trip);
     const peakLoad = preferences.goal === "BALANCED" ? addVariable(0, infinity, 1) : null;
     for (let day = 0; day < trip.days; day++) {
-      const start = boundary?.startMinute ?? minuteAt(trip, day, trip.dailyStart);
-      const end = minuteAt(trip, day, trip.dailyEnd);
+      const start = boundary?.startMinute ?? dayStart(trip, day);
+      const end = dayEnd(trip, day);
       times[day] = [addVariable(start, start)];
       services[day] = [[]];
       const dayAssignments: number[] = [];
@@ -778,6 +1149,11 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
         }
       }
       const dayRoutes = routes.filter((route) => route.day === day);
+      // A day trip is one outing: at most one leg enters its places from elsewhere.
+      for (const ids of together) {
+        const members = new Set(ids.map((id) => trip.stops.findIndex((stop) => stop.id === id) + 1).filter((node) => node > 0));
+        if (members.size > 1) addRow(dayRoutes.filter((route) => !members.has(route.from) && members.has(route.to)).map((route): [number, number] => [route.column, 1]), -infinity, 1);
+      }
       addRow(dayAssignments.map((column) => [column, 1]), 0, preferences.maxStopsPerDay);
       if (peakLoad !== null) addRow([
         ...(coupled ? [...services[day].flat(), ...dayAssignments.map((column, index): [number, number] => [column, trip.stops[index].fixedTime ? trip.stops[index].buffer : 0])] : dayAssignments.map((column, index): [number, number] => [column, trip.stops[index].duration + (trip.stops[index].fixedTime ? trip.stops[index].buffer : 0)])),
@@ -826,14 +1202,14 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
       return feasible ? Array.from(model.getSolution().colValue) : null;
     };
     const hintStarted = performance.now();
-    const usable = (schedule: Schedule | undefined) => schedule && !validateSchedule(original, schedule, boundary).length && !visitsOutsideHours(trip, schedule, places).length ? schedule : undefined;
+    const usable = (schedule: Schedule | undefined) => schedule && !validateSchedule(original, schedule, boundary).length && !visitsOutsideHours(trip, schedule, places).length && !split(schedule) ? schedule : undefined;
     const hint = usable(options.initialSchedule) ?? usable(constructionHint(trip, travel, performance.now() + Math.min(1500, limit * 250), boundary, places, alternatives));
     constructionMs = Math.round(performance.now() - hintStarted);
     const seed = (schedule: Schedule): number[] | null => {
       const candidate = Array<number>(columnCount).fill(0);
       let peak = 0;
       for (const day of schedule.days) {
-        candidate[times[day.day][0]] = boundary?.startMinute ?? minuteAt(trip, day.day, trip.dailyStart);
+        candidate[times[day.day][0]] = boundary?.startMinute ?? dayStart(trip, day.day);
         let from = 0;
         let load = 0;
         for (const visit of day.visits) {
@@ -852,7 +1228,7 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
         const final = routes.find((route) => route.day === day.day && route.from === from && route.to === endNode && (!day.returnLeg || (route.edge.mode === day.returnLeg.mode && route.edge.minutes === day.returnLeg.minutes && route.edge.meters === day.returnLeg.meters)));
         if (!final) return null;
         candidate[final.column] = 1;
-        candidate[times[day.day][endNode]] = (day.visits.at(-1)?.end ?? boundary?.startMinute ?? minuteAt(trip, day.day, trip.dailyStart)) + final.edge.minutes;
+        candidate[times[day.day][endNode]] = (day.visits.at(-1)?.end ?? boundary?.startMinute ?? dayStart(trip, day.day)) + final.edge.minutes;
         peak = Math.max(peak, load + final.edge.minutes);
         for (const group of trip.dayGroups ?? []) if (day.visits.some((visit) => group.stopIds.includes(visit.stopId))) candidate[groupAssignments.get(group.id)![day.day]] = 1;
       }
@@ -970,9 +1346,13 @@ export async function solveTrip(input: Trip, travel: TravelEdge[], seconds = 5, 
     // The solver stops at its time limit; local search from its answer removes leftover back-and-forth.
     // Bounded by its own stall limit, so small trips finish long before this deadline.
     const polished = constructionHint(trip, travel, performance.now() + 1500, boundary, places, alternatives, schedule);
-    if (polished && !validateSchedule(original, polished, boundary).length && !visitsOutsideHours(trip, polished, places).length && JSON.stringify(polished.days.map((day) => day.visits.map((visit) => visit.stopId))) !== JSON.stringify(schedule.days.map((day) => day.visits.map((visit) => visit.stopId)))) {
+    if (polished && !validateSchedule(original, polished, boundary).length && !visitsOutsideHours(trip, polished, places).length && !split(polished) && JSON.stringify(polished.days.map((day) => day.visits.map((visit) => visit.stopId))) !== JSON.stringify(schedule.days.map((day) => day.visits.map((visit) => visit.stopId)))) {
       schedule.days = polished.days; schedule.omitted = polished.omitted;
       if (schedule.optimization) schedule.optimization.travelOptimal = false;
+    }
+    if (!boundary) {
+      const compact = compactWaits(trip, schedule, places);
+      if (!validateSchedule(original, compact).length && !visitsOutsideHours(trip, compact, places).length) schedule.days = compact.days;
     }
     schedule.warnings.push(...timingWarnings(original, schedule, alternatives, places));
     if (visitsOutsideHours(trip, schedule, places).length) throw new PlanningError("The optimizer returned a visit outside regular opening hours.");

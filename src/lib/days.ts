@@ -1,5 +1,5 @@
 import { bookingConflicts, PlanningError, planningEngine } from "./planner";
-import { minuteAt, planningPreferences, type Place, type Stop, type Trip } from "./trip";
+import { dayEnd, dayStart, minuteAt, planningPreferences, type Place, type Stop, type Trip } from "./trip";
 import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, openingIntervals, type CapCategory } from "./visit-slots";
 
 export async function assignDays(input: Trip, locations: Record<string, Place["location"]>, places: Record<string, Place> = {}): Promise<Trip> {
@@ -25,14 +25,14 @@ export async function assignDays(input: Trip, locations: Record<string, Place["l
     model.addVar(0, highs.infinity);
     model.changeColCost(columns++, 1);
     for (let day = 0; day < input.days; day++) {
-      let cursor = minuteAt(input, day, input.dailyStart);
+      let cursor = dayStart(input, day);
       for (const stop of booked.filter((stop) => stop.day === day).sort((left, right) => left.fixedTime!.localeCompare(right.fixedTime!))) {
         const at = minuteAt(input, day, stop.fixedTime!);
         windows.push({ day, minutes: Math.max(0, at - stop.buffer - cursor) });
         cursor = at + stop.duration;
         bookedLoad[day] += stop.duration + stop.buffer;
       }
-      windows.push({ day, minutes: Math.max(0, minuteAt(input, day, input.dailyEnd) - cursor) });
+      windows.push({ day, minutes: Math.max(0, dayEnd(input, day) - cursor) });
     }
     for (const stop of input.stops.filter((stop) => !stop.fixedTime)) {
       windows.forEach((window, index) => {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { bookingConflicts, commonHoliday, PlanningError, solveTrip, solveTripByDays, type SolverStage } from "./planner";
-import { applyPlanningFixes, bookingConflictDetails, bookingTimeSuggestion, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
-import { validateSchedule } from "./schedule-validation";
+import { blockedDayFixes, bookingConflicts, commonHoliday, compactWaits, PlanningError, squeezeIns, solveTrip, solveTripByDays, travelEstimator, type SolverStage } from "./planner";
+import { applyPlanningFixes, bookingConflictDetails, bookingTimeSuggestion, minuteAt, squeezeInNote, tripDate, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
+import { splitVisits, validateSchedule } from "./schedule-validation";
 import { solveWithDurationRelaxation } from "./duration-relaxation";
 
 function routes(trip: Trip, minutes = 10): TravelEdge[] {
@@ -527,5 +527,213 @@ describe("schedule optimizer", () => {
     const schedule = await solveTrip(trip, routes(trip));
     expect(schedule.omitted).toEqual([trip.stops[1].id]);
     expect(validateSchedule(trip, schedule)).toEqual([]);
+  });
+  it("plans nothing before the arrival time and releases visits that no longer fit the shortened day", async () => {
+    const stops = [
+      { ...newStop("Breakfast cafe"), day: 0, duration: 60, plannedTime: "09:30" },
+      { ...newStop("Museum"), day: 0, duration: 120 },
+      { ...newStop("Canal walk"), day: 0, duration: 90 },
+      { ...newStop("Dinner"), day: 0, duration: 60 },
+    ];
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "08:00", dailyEnd: "21:00", stops, arrival: { mode: "FLIGHT", time: "13:20", place: "Schiphol" } };
+    const failure = await solveTrip(trip, routes(trip, 20)).catch((error) => error);
+    expect(failure).toBeInstanceOf(PlanningError);
+    expect((failure as PlanningError).message).toMatch(/^Not enough time on these days .* Day 1 starts about 15:05 after arriving at 13:20/);
+    expect((failure as PlanningError).fixes).toEqual([expect.objectContaining({ stopId: stops[0].id, action: "optimize-day" })]);
+    const fixed = applyPlanningFixes(trip, (failure as PlanningError).fixes);
+    const schedule = await solveTrip(fixed, routes(fixed, 20));
+    expect(validateSchedule(fixed, schedule)).toEqual([]);
+    expect(schedule.days[0].visits.length).toBeGreaterThan(0);
+    expect(Math.min(...schedule.days[0].visits.map((visit) => visit.start - visit.leg.minutes))).toBeGreaterThanOrEqual(minuteAt(fixed, 0, "15:05"));
+    expect(schedule.days[1].visits.map((visit) => visit.stopId)).toContain(stops[0].id);
+  });
+  it("brings the last day back to the hotel before the departure transfer", async () => {
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "21:00", returnToHotel: true, stops: [{ ...newStop("Market"), duration: 60 }, { ...newStop("Gallery"), duration: 60 }], departure: { mode: "FLIGHT", time: "17:00", place: "CDG" } };
+    const schedule = await solveTrip(trip, routes(trip, 15));
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const last = schedule.days[0];
+    // 17:00 − 3 h at the airport − 45 min transfer − 15 min for bags.
+    expect(last.visits.at(-1)!.end + last.returnLeg!.minutes).toBeLessThanOrEqual(minuteAt(trip, 0, "13:00"));
+  });
+  it("finds which visits to release when a short day fails on ordering, not total minutes", async () => {
+    // 15:05–21:00 around an 18:15 cruise: the minutes add up, but the visits that close at 17:00 cannot all fit first.
+    const cruise = { ...newStop("Cruise"), day: 0, fixedTime: "18:15", duration: 75, buffer: 15 };
+    const early = Array.from({ length: 2 }, (_, index) => ({ ...newStop(`Closes early ${index}`), day: 0, duration: 45, priority: index ? 1 : 3 }));
+    const later = { ...newStop("Evening walk"), day: 0, duration: 30 };
+    const trip: Trip = { ...fixture(), days: 3, dailyStart: "08:00", dailyEnd: "21:00", stops: [cruise, ...early, later], arrival: { mode: "FLIGHT", time: "13:20", place: "Schiphol" } };
+    const places = Object.fromEntries(early.map((stop) => [stop.id, { id: stop.id, name: stop.name, address: "", location: { lat: 52.37, lng: 4.89 }, hours: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ open: { day: weekday, hour: 9, minute: 0 }, close: { day: weekday, hour: 17, minute: 0 } })) }]));
+    const travel = routes(trip, 15);
+    const failure = await solveTrip(trip, travel, 5, { places }).catch((error) => error);
+    expect(failure).toBeInstanceOf(PlanningError);
+    const { blocked, fixes } = await blockedDayFixes(trip, travel, places, Date.now() + 20_000);
+    expect(blocked).toEqual([expect.stringMatching(/^Day 1 starts about 15:05 after arriving at 13:20 and cannot fit its 4 assigned visits/)]);
+    // The lowest-priority early visit goes first, and the trip has room on the other days.
+    expect(fixes).toEqual([expect.objectContaining({ stopId: early[1].id, action: "optimize-day" })]);
+    const fixed = applyPlanningFixes(trip, fixes);
+    expect(validateSchedule(fixed, await solveTripByDays(fixed, routes(fixed, 15), 5, { places }))).toEqual([]);
+  });
+  it("suggests keeping released visits optional when the other days are full, and leaves them out by day", async () => {
+    const fill = (day: number) => Array.from({ length: 6 }, (_, index) => ({ ...newStop(`Day ${day + 1} visit ${index}`), day, duration: 90 }));
+    const breakfast = { ...newStop("Breakfast"), day: 0, duration: 60, plannedTime: "09:00" };
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "09:00", dailyEnd: "19:00", stops: [breakfast, ...fill(0).slice(0, 4), ...fill(1).slice(0, 5)], arrival: { mode: "TRAIN", time: "11:30", place: "Centraal" } };
+    const failure = await solveTrip(trip, routes(trip, 10)).catch((error) => error) as PlanningError;
+    expect(failure.message).toContain("let Breakfast move to any day and keep it only where there is room");
+    expect(failure.fixes).toEqual([expect.objectContaining({ stopId: breakfast.id, action: "flexible-optional" })]);
+    const fixed = applyPlanningFixes(trip, failure.fixes);
+    expect(fixed.stops[0]).toMatchObject({ day: null, optional: true });
+    const schedule = await solveTripByDays(fixed, routes(fixed, 10), 5);
+    expect(validateSchedule(fixed, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([breakfast.id]);
+  });
+  it("starts later instead of waiting mid-day, keeping preferred times and a little slack", async () => {
+    // The light trail is only worth it after dark; the other visits have no preferred time.
+    const trail = { ...newStop("Light trail"), duration: 15, preferredTimeWindow: { start: "16:30", end: "20:00", sources: ["https://example.com/trail"] } };
+    const lunch = { ...newStop("Castle lunch"), duration: 45, preferredTimeWindow: { start: "12:00", end: "13:30", sources: ["https://example.com/lunch"] } };
+    const walks = [{ ...newStop("Canal walk"), duration: 45 }, { ...newStop("Cafe"), duration: 35 }];
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "21:00", stops: [...walks, trail] };
+    const schedule = await solveTrip(trip, routes(trip, 15));
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const visits = schedule.days[0].visits;
+    expect(visits.at(-1)!.stopId).toBe(trail.id);
+    expect(visits.at(-1)!.start).toBeGreaterThanOrEqual(minuteAt(trip, 0, "16:30"));
+    // Each visit ends just in time for the next (15 min walk + 10 min slack); the morning is left free.
+    visits.slice(1).forEach((visit, index) => expect(visit.start - visits[index].end).toBeLessThanOrEqual(15 + 10 + 1));
+    expect(visits[0].start).toBeGreaterThan(minuteAt(trip, 0, "14:00"));
+    // A visit with its own preferred time keeps it rather than closing the gap.
+    const withLunch = { ...trip, stops: [lunch, trail] };
+    const lunchFirst = await solveTrip(withLunch, routes(withLunch, 15));
+    expect(lunchFirst.days[0].visits[0]).toMatchObject({ stopId: lunch.id });
+    expect(lunchFirst.days[0].visits[0].start).toBeLessThanOrEqual(minuteAt(trip, 0, "13:30"));
+  });
+  it("visits a shared-day trip in one outing", async () => {
+    const away = Array.from({ length: 3 }, (_, index) => ({ ...newStop(`Utrecht ${index}`), duration: 40 }));
+    const home = Array.from({ length: 3 }, (_, index) => ({ ...newStop(`Amsterdam ${index}`), duration: 40 }));
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "21:00", stops: [home[0], away[0], home[1], away[1], home[2], away[2]], dayGroups: [{ id: crypto.randomUUID(), name: "Utrecht", stopIds: away.map((stop) => stop.id), allowedDays: [0], exclusive: false }] };
+    // Within each city everything is 10 min apart; between them 30 min; misleadingly, Utrecht 1 → Amsterdam 1 is 5 min.
+    const city = (id: string) => away.some((stop) => stop.id === id) ? "U" : home.some((stop) => stop.id === id) ? "A" : "H";
+    const travel = routes(trip).map((edge) => ({ ...edge, minutes: edge.from === away[1].id && edge.to === home[1].id ? 5 : city(edge.from) === city(edge.to) || city(edge.from) === "H" && city(edge.to) === "A" || city(edge.to) === "H" && city(edge.from) === "A" ? 10 : 30 }));
+    const schedule = await solveTrip(trip, travel);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const ids = schedule.days[0].visits.map((visit) => city(visit.stopId)).join("");
+    expect(ids).toMatch(/^A*U{3}A*$/);
+    const visits = schedule.days[0].visits;
+    const interleaved = [visits.find((visit) => city(visit.stopId) === "U")!, visits.find((visit) => city(visit.stopId) === "A")!, ...visits.filter((visit) => city(visit.stopId) === "U").slice(1), ...visits.filter((visit) => city(visit.stopId) === "A").slice(1)];
+    expect(splitVisits(interleaved, away.map((stop) => stop.id))).toBe(true);
+    expect(splitVisits(visits, away.map((stop) => stop.id))).toBe(false);
+    expect(validateSchedule(trip, { ...schedule, days: [{ ...schedule.days[0], visits: interleaved }] })).toContain("Utrecht: visit the group's places in one go, not split by other visits.");
+  });
+  it("routes the last leg of a direct departure day to the station", async () => {
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true, stops: [{ ...newStop("Coffee by the station"), duration: 45 }, { ...newStop("Station sandwich"), duration: 15 }], departure: { mode: "TRAIN", time: "11:10", place: "Centraal", placeId: "centraal", direct: true } };
+    const schedule = await solveTrip(trip, routes(trip, 10));
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const day = schedule.days[0];
+    expect(day.visits.at(-1)!.end + day.returnLeg!.minutes).toBeLessThanOrEqual(minuteAt(trip, 0, "10:50"));
+    // Spare time sits before the train: the morning starts with the first visit.
+    expect(day.visits[0].start).toBeLessThanOrEqual(minuteAt(trip, 0, "08:10"));
+    const late = { ...trip, departure: { ...trip.departure!, time: "09:30" } };
+    expect(validateSchedule(late, schedule).join(" ")).toMatch(/hotel|return/i);
+  });
+  it("makes a visit to the departure station the last one that day, even when doubling back is shorter", async () => {
+    const coffee = { ...newStop("Coffee"), duration: 45, placeId: "coffee" };
+    const hall = { ...newStop("Station hall"), duration: 15, placeId: "centraal" };
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true, stops: [coffee, hall], departure: { mode: "TRAIN", time: "11:10", place: "Centraal", placeId: "centraal", direct: true } };
+    // The station is a quick ride from the hotel and the coffee is not: by travel alone, station first is 20 min shorter.
+    const minutes: Record<string, number> = { [`hotel>${hall.id}`]: 5, [`hotel>${coffee.id}`]: 30, [`${hall.id}>${coffee.id}`]: 5, [`${coffee.id}>${hall.id}`]: 5, [`${hall.id}>hotel`]: 0, [`${coffee.id}>hotel`]: 5 };
+    const travel = Object.entries(minutes).map(([key, value]): TravelEdge => { const [from, to] = key.split(">"); return { day: 0, from, to, mode: "TRANSIT", minutes: value, meters: value * 300 }; });
+    const schedule = await solveTrip(trip, travel, 2);
+    expect(schedule.days[0].visits.map((visit) => visit.stopId)).toEqual([coffee.id, hall.id]);
+    // Without the direct departure, the shorter order wins.
+    const ordinary = await solveTrip({ ...trip, departure: { ...trip.departure!, direct: undefined } }, travel, 2);
+    expect(ordinary.days[0].visits.map((visit) => visit.stopId)).toEqual([hall.id, coffee.id]);
+  });
+  it("starts the departure day's visits early so spare time sits before the train", () => {
+    const [coffee, station] = [{ ...newStop("Coffee"), duration: 45 }, { ...newStop("Station hall"), duration: 15 }];
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "08:00", dailyEnd: "21:00", returnToHotel: true, stops: [{ ...coffee, day: 1 }, { ...station, day: 1 }], departure: { mode: "TRAIN", time: "11:10", place: "Centraal", placeId: "centraal", direct: true } };
+    const leg = (day: number, from: string, to: string, minutes: number): TravelEdge => ({ day, from, to, mode: "TRANSIT", minutes, meters: 2000 });
+    const at = (day: number, time: string) => minuteAt(trip, day, time);
+    const schedule = { generatedAt: "", warnings: [], omitted: [], days: [
+      { day: 0, date: tripDate(trip, 0), visits: [] },
+      { day: 1, date: tripDate(trip, 1), visits: [{ stopId: coffee.id, start: at(1, "09:30"), end: at(1, "10:15"), leg: leg(1, "hotel", coffee.id, 20) }, { stopId: station.id, start: at(1, "10:30"), end: at(1, "10:45"), leg: leg(1, coffee.id, station.id, 15) }], returnLeg: leg(1, station.id, "hotel", 0) },
+    ] };
+    const early = compactWaits(trip, schedule).days[1].visits;
+    expect(early.map((visit) => [visit.start, visit.end])).toEqual([[at(1, "08:20"), at(1, "09:05")], [at(1, "09:20"), at(1, "09:35")]]);
+    expect(validateSchedule(trip, { ...schedule, days: [schedule.days[0], { ...schedule.days[1], visits: early }] })).toEqual([]);
+    // Without a departure the same day keeps its late start: waits move to the start of the day, not the end.
+    expect(compactWaits({ ...trip, departure: undefined }, schedule).days[1].visits.map((visit) => visit.start)).toEqual([at(1, "09:30"), at(1, "10:30")]);
+  });
+  it("plans a day by day trip whose own visits were never sampled towards each other", async () => {
+    const at = (lat: number) => ({ id: "x", name: "x", address: "", location: { lat, lng: 4.89 } });
+    const cruise = { ...newStop("Cruise"), day: 0, fixedTime: "18:15", duration: 75 };
+    const coffee = { ...newStop("Coffee"), day: 0, duration: 45, plannedTime: "16:00" };
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "09:00", dailyEnd: "21:00", stops: [cruise, coffee, { ...newStop("Museum"), day: 1, duration: 60 }] };
+    const places = { hotel: at(52.35), [cruise.id]: at(52.37), [coffee.id]: at(52.372), [trip.stops[2].id]: at(52.36) };
+    // Only hotel legs were sampled: nothing connects the coffee to the cruise directly.
+    const travel = routes(trip, 20).filter((edge) => edge.from === "hotel" || edge.to === "hotel");
+    const schedule = await solveTripByDays(trip, travel, 5, { places });
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.days[0].visits.map((visit) => visit.stopId)).toEqual([coffee.id, cruise.id]);
+    expect(schedule.days[0].visits[1].leg).toMatchObject({ from: coffee.id, estimated: true });
+  });
+});
+
+describe("day by day planning", () => {
+  it("spreads coffees across days instead of filling the roomiest day past its cap", async () => {
+    const [alpha, beta, gamma] = ["Alpha", "Beta", "Gamma"].map((name) => ({ ...newStop(`${name} Coffee`), duration: 45 }));
+    // Day 2 is mostly one long museum visit, so by room alone the third coffee would join the first two on day 1.
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "09:00", dailyEnd: "18:00", stops: [{ ...alpha, day: 0 }, { ...beta, day: 0 }, gamma, { ...newStop("Long museum"), day: 1, duration: 400 }] };
+    const schedule = await solveTripByDays(trip, routes(trip), 3);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.days[1].visits.map((visit) => visit.stopId)).toContain(gamma.id);
+  });
+});
+
+describe("squeezing in a place left out", () => {
+  it("names the gap that fits it with the least extra travel, and says when it breaks a cap", () => {
+    const [alpha, beta, museum, gamma] = [{ ...newStop("Alpha Coffee"), day: 0 }, { ...newStop("Beta Coffee"), day: 0 }, { ...newStop("Museum"), day: 0, duration: 60 }, { ...newStop("Gamma Coffee"), optional: true }];
+    const trip: Trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "18:00", returnToHotel: true, stops: [alpha, beta, museum, gamma] };
+    const at = (time: string) => minuteAt(trip, 0, time);
+    const leg = (from: string, to: string): TravelEdge => ({ day: 0, from, to, mode: "WALK", minutes: 10, meters: 600 });
+    const schedule = { generatedAt: "", warnings: [], omitted: [gamma.id], days: [{ day: 0, date: tripDate(trip, 0), visits: [
+      { stopId: alpha.id, start: at("09:10"), end: at("09:55"), leg: leg("hotel", alpha.id) },
+      { stopId: museum.id, start: at("12:00"), end: at("13:00"), leg: leg(alpha.id, museum.id) },
+      { stopId: beta.id, start: at("13:10"), end: at("13:55"), leg: leg(museum.id, beta.id) },
+    ], returnLeg: leg(beta.id, "hotel") }] };
+    // Before Alpha it would make Alpha late, and Museum to Beta leaves 10 min; after Alpha and after Beta both add 10 min.
+    const [fit] = squeezeIns(trip, schedule, routes(trip));
+    expect(fit).toMatchObject({ stopId: gamma.id, day: 0, after: alpha.id, start: at("10:05"), end: at("10:50"), extraMinutes: 10, overCap: { category: "coffee", count: 3 } });
+    expect(squeezeInNote(trip, fit)).toBe("Day 1 (Mon 12 Oct) after Alpha Coffee, about 10:05–10:50, adding about 10 min of travel; it would be the 3rd coffee that day");
+    // With no gap long enough anywhere, nothing is suggested.
+    const full = { ...schedule, days: [{ ...schedule.days[0], visits: schedule.days[0].visits.map((visit, index) => index === 1 ? { ...visit, start: at("10:05"), end: at("13:00") } : visit) }] };
+    expect(squeezeIns({ ...trip, dailyEnd: "14:30" }, full, routes(trip))).toEqual([]);
+  });
+});
+
+describe("straight-line travel estimates", () => {
+  const edge = (mode: TravelEdge["mode"], km: number, minutes: number, index: number): TravelEdge => ({ day: 0, from: `a${index}`, to: `b${index}`, mode, minutes, meters: km * 1000 });
+  it("scales mid-distance transit to the trip's real routes but never below the formula", () => {
+    // Formula: 2 km transit is 20 min, 0.5 km walk is 12 min. Google took 25-45 min for 2 km hops and 8 min for short walks.
+    const edges = [...[25, 30, 33, 33, 36, 40, 45].map((minutes, index) => edge("TRANSIT", 2, minutes, index)), ...Array.from({ length: 6 }, (_, index) => edge("WALK", 0.5, 8, 10 + index))];
+    const km = (travel: TravelEdge) => travel.meters / 1000;
+    const estimate = travelEstimator(edges, km);
+    expect(estimate("TRANSIT", 2)).toBe(33);
+    expect(estimate("TRANSIT", 1.8)).toBe(Math.ceil(20 * 1.65));
+    expect(estimate("WALK", 0.5)).toBe(12);
+    // Fewer than five routes in a band: the bare formula.
+    expect(estimate("TRANSIT", 6)).toBe(36);
+    expect(travelEstimator(edges, km, true)("TRANSIT", 2)).toBe(40);
+    expect(travelEstimator([...edges, { ...edge("TRANSIT", 2, 10, 99), estimated: true }], km)("TRANSIT", 2)).toBe(33);
+  });
+
+  it("times an unsampled mid-distance pair from the day's real transit, not the bare formula", async () => {
+    // Two visits 1.6 km apart with no sampled link, beyond the walking limit. The bare formula says 19 min of transit;
+    // this day's real transit runs 1.74 times the formula, as short hops in Amsterdam do with transfers and waits.
+    const at = (lat: number) => ({ lat, lng: 4.89 });
+    const [first, second] = [{ ...newStop("First"), duration: 30, location: at(52.37) }, { ...newStop("Second"), duration: 30, location: at(52.3844) }];
+    const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", days: 2, startDate: "2026-12-24", timeZone: "Europe/Amsterdam", dailyStart: "09:00", dailyEnd: "21:00", returnToHotel: true, hotelLocation: at(52.36), stops: [{ ...first, day: 0 }, { ...second, day: 0 }] };
+    const leg = (from: string, to: string, mode: TravelEdge["mode"], minutes: number): TravelEdge => ({ day: 0, from, to, mode, minutes, meters: 1500 });
+    // The hotel is 2.7 km from Second; Google's transit took 40 min there at every sampled departure (formula: 23 min).
+    const travel = [leg("hotel", first.id, "TRANSIT", 20), leg(first.id, "hotel", "TRANSIT", 20), leg(second.id, "hotel", "TRANSIT", 40), ...[540, 600, 660, 720, 780].map((minute) => ({ ...leg("hotel", second.id, "TRANSIT", 40), sampledDeparture: minute }))];
+    const schedule = await solveTripByDays(trip, travel, 2);
+    expect(schedule.days[0].visits[1].leg).toMatchObject({ mode: "TRANSIT", estimated: true, minutes: Math.ceil(19 * 40 / 23) });
   });
 });

@@ -10,6 +10,7 @@ import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTi
 import { validateSchedule } from "@/lib/schedule-validation";
 import { timingResultSchema, type TimingResult } from "@/lib/timing";
 import { alternativeGroups } from "@/lib/visit-slots";
+import { OmittedPlaces } from "./OmittedPlaces";
 
 type Props = {
   trip: Trip; canPlan: boolean; canResearch: boolean;
@@ -112,7 +113,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
     <div className="segmented planning-stages"><button disabled={Boolean(busy)} aria-pressed={stage === "preferences"} onClick={() => setStage("preferences")}><Settings2 size={15} />Preferences</button><button disabled={!preview || Boolean(busy)} aria-pressed={stage === "preview"} onClick={() => setStage("preview")}><Route size={15} />Suggested plan</button></div>
     {error && (fixes.length ? <div className="notice error planning-fixes" role="alert">
       <strong>{fixes.length === 1 ? "One visit can't be scheduled as set" : `${fixes.length} visits can't be scheduled as set`}</strong>
-      <ul>{fixes.map((fix) => <li key={fix.stopId}><strong>{fix.stopName}</strong>: {fix.issue} <span className="planning-fix-action">Suggested: {fix.action === "optimize-day" ? "set Day to Optimize" : "mark Optional"}</span></li>)}</ul>
+      <ul>{fixes.map((fix) => <li key={fix.stopId}><strong>{fix.stopName}</strong>: {fix.issue} <span className="planning-fix-action">Suggested: {fix.action === "optimize-day" ? "set Day to Optimize" : fix.action === "flexible-optional" ? "set Day to Optimize and mark Optional" : "mark Optional"}</span></li>)}</ul>
       <button className="button primary" disabled={Boolean(busy) || !confirmed || !!conflicts.length || !validated.success} onClick={applyFixes}><Check size={15} />Apply all suggestions and plan again</button>
       <details><summary>Details</summary><p>{error}</p></details>
     </div> : <p className="notice error" role="alert">{error}</p>)}
@@ -196,7 +197,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
           return <section className="plan-preview-day" key={day.day}><h3>Day {day.day + 1} <span>{day.date}</span></h3><p className="quiet">{day.visits.length} places / {Math.round(visitMinutes)} min visiting / {travel} min travel</p><ol>{day.visits.map((visit) => <li key={visit.stopId}><span className="preview-time">{formatMinute(draft, day.day, visit.start)} - {formatMinute(draft, day.day, visit.end)}</span><div><strong>{draft.stops.find((stop) => stop.id === visit.stopId)?.name}</strong><small>{visit.leg.mode === "WALK" ? <Footprints size={13} /> : <TrainFront size={13} />}{visit.leg.mode === "WALK" ? "Walk" : "Public transit"} {visit.leg.minutes} min{visit.leg.assumed ? " (assumed)" : ""}{visit.leg.timetableDate ? ` (timetable of ${visit.leg.timetableDate})` : ""}{draft.stops.find((stop) => stop.id === visit.stopId)?.fixedTime && <LockKeyhole size={12} />}</small></div></li>)}</ol>{day.returnLeg && <p className="quiet">Return to {draft.hotel}: {day.returnLeg.mode === "WALK" ? "walk" : "public transit"}, {day.returnLeg.minutes} min{day.returnLeg.assumed ? " (assumed)" : ""}{day.returnLeg.timetableDate ? ` (timetable of ${day.returnLeg.timetableDate})` : ""}</p>}{!day.visits.length && <p className="quiet">No places assigned.</p>}</section>;
         })}
       </div>
-      {!!preview.schedule.omitted.length && <div className="notice warning"><strong>Optional places not scheduled</strong><ul>{preview.schedule.omitted.map((id) => <li key={id}>{draft.stops.find((stop) => stop.id === id)?.name}</li>)}</ul></div>}
+      <OmittedPlaces trip={draft} schedule={preview.schedule} />
       <div className="route-notices">{preview.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>Walking routes may lack pedestrian paths. Transit can include walking to stations.</p><span>Route information: Google Maps</span></div>
       <div className="dialog-actions planning-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => setStage("preferences")}><Settings2 size={15} />Adjust preferences</button><button className="button primary" disabled={Boolean(busy)} onClick={() => apply(preview)}><Check size={15} />Use this plan</button></div>
     </>}

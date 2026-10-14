@@ -81,6 +81,24 @@ export function groupAllowedDays(trip: { days: number; stops: z.infer<typeof sto
     && (!group.exclusive || !trip.stops.some((stop) => !stop.optional && !group.stopIds.includes(stop.id) && stop.day === day)));
 }
 
+// How you reach a city on its first day and leave it on its last day. Allowances default by mode (see transferDefaults).
+export const transportModeSchema = z.enum(["FLIGHT", "TRAIN", "BUS", "CAR", "OTHER"]);
+export type TransportMode = z.infer<typeof transportModeSchema>;
+export const transferSchema = z.object({
+  mode: transportModeSchema,
+  time: timeSchema,
+  place: z.string().trim().max(200),
+  reference: z.string().trim().max(100).optional(),
+  bufferMinutes: z.number().int().min(0).max(360).optional(),
+  transferMinutes: z.number().int().min(0).max(360).optional(),
+  // The airport or station confirmed on the map; needed to route a direct departure to it.
+  placeId: z.string().trim().min(1).max(300).optional(),
+  // Departure only: check out in the morning and go there from the last visit, bags in hand, instead of returning to
+  // the hotel first.
+  direct: z.boolean().optional(),
+}).strict();
+export type Transfer = z.infer<typeof transferSchema>;
+
 export const tripSchema = z.object({
   id: z.uuid(),
   title: z.string().trim().min(1).max(150),
@@ -99,9 +117,14 @@ export const tripSchema = z.object({
   planning: planningPreferencesSchema.optional(),
   stops: z.array(stopSchema).max(maxStopsPerCity),
   dayGroups: z.array(dayGroupSchema).max(maxStopsPerCity).optional(),
+  arrival: transferSchema.optional(),
+  departure: transferSchema.optional(),
 }).strict().superRefine((trip, context) => {
   if (trip.dailyEnd <= trip.dailyStart) {
     context.addIssue({ code: "custom", message: "End the sightseeing day after it starts.", path: ["dailyEnd"] });
+  }
+  if (trip.days === 1 && trip.arrival && trip.departure && trip.departure.time <= trip.arrival.time) {
+    context.addIssue({ code: "custom", message: "Leave after you arrive on a one-day stay.", path: ["departure", "time"] });
   }
   if (new Set(trip.stops.map((stop) => stop.id)).size !== trip.stops.length) {
     context.addIssue({ code: "custom", message: "Stop identifiers must be unique.", path: ["stops"] });
@@ -189,7 +212,10 @@ export type TravelEdge = {
 };
 export type Visit = { stopId: string; start: number; end: number; leg: TravelEdge };
 export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge };
-export type Schedule = { days: DayPlan[]; omitted: string[]; warnings: string[]; generatedAt: string; optimization?: { weightedDurationLoss: number; durationOptimal: boolean; optionalOptimal: boolean; travelOptimal: boolean } };
+// Where a place left out of the plan could still go: between two visits (or at the start or end of a day), with the
+// least extra travel, and how much later the following visits would start. Times are estimates from the plan's routes.
+export type SqueezeIn = { stopId: string; day: number; after?: string; before?: string; start: number; end: number; extraMinutes: number; delayMinutes?: number; overCap?: { category: "breakfast" | "lunch" | "dinner" | "coffee"; count: number } };
+export type Schedule = { days: DayPlan[]; omitted: string[]; squeezeIns?: SqueezeIn[]; warnings: string[]; generatedAt: string; optimization?: { weightedDurationLoss: number; durationOptimal: boolean; optionalOptimal: boolean; travelOptimal: boolean } };
 const routeFieldsSchema = z.object({
   day: z.number().int().min(0).max(6), from: z.string().min(1).max(300), to: z.string().min(1).max(300),
   mode: z.enum(["WALK", "TRANSIT"]), minutes: z.number().min(0).max(2880), meters: z.number().min(0).max(40_000_000),
@@ -213,6 +239,11 @@ export const dayPlanSchema = z.object({
 export const scheduleSchema = z.object({
   days: z.array(dayPlanSchema).max(7),
   omitted: z.array(z.uuid()).max(maxStopsPerCity), warnings: z.array(z.string().max(4000)).max(200),
+  squeezeIns: z.array(z.object({
+    stopId: z.uuid(), day: z.number().int().min(0).max(6), after: z.uuid().optional(), before: z.uuid().optional(),
+    start: z.number().min(0).max(2880), end: z.number().min(0).max(2880), extraMinutes: z.number().min(0).max(2880), delayMinutes: z.number().int().min(1).max(2880).optional(),
+    overCap: z.object({ category: z.enum(["breakfast", "lunch", "dinner", "coffee"]), count: z.number().int().min(2).max(maxStopsPerCity) }).strict().optional(),
+  }).strict()).max(maxStopsPerCity).optional(),
   generatedAt: z.iso.datetime({ offset: true }),
   optimization: z.object({ weightedDurationLoss: z.number().min(0), durationOptimal: z.boolean(), optionalOptimal: z.boolean(), travelOptimal: z.boolean() }).strict().optional(),
 }).strict();
@@ -244,13 +275,13 @@ export type PlanResult = { status?: "verified"; schedule: Schedule; places: Reco
 export const planningFailureCodeSchema = z.enum(["hard-input-conflict", "sampled-model-conflict", "missing-data", "search-incomplete", "provider-error", "budget-exhausted", "verification-failed"]);
 export type PlanningFailureCode = z.infer<typeof planningFailureCodeSchema>;
 // A one-click change that resolves a planning failure for one visit; never touches bookings.
-export const planningFixSchema = z.object({ stopId: z.string(), stopName: z.string(), issue: z.string(), action: z.enum(["optimize-day", "make-optional"]) });
+export const planningFixSchema = z.object({ stopId: z.string(), stopName: z.string(), issue: z.string(), action: z.enum(["optimize-day", "make-optional", "flexible-optional"]) });
 export type PlanningFix = z.infer<typeof planningFixSchema>;
 
 export function applyPlanningFixes(trip: Trip, fixes: PlanningFix[]): Trip {
   return { ...trip, stops: trip.stops.map((stop) => {
     const fix = stop.fixedTime ? undefined : fixes.find((candidate) => candidate.stopId === stop.id);
-    return fix?.action === "optimize-day" ? { ...stop, day: null } : fix?.action === "make-optional" ? { ...stop, optional: true } : stop;
+    return fix?.action === "optimize-day" ? { ...stop, day: null } : fix?.action === "make-optional" ? { ...stop, optional: true } : fix?.action === "flexible-optional" ? { ...stop, day: null, optional: true } : stop;
   }) };
 }
 export const provisionalPlanSchema = z.object({
@@ -346,14 +377,79 @@ export function tripDate(trip: Trip, day: number) {
   return Temporal.PlainDate.from(trip.startDate).add({ days: day }).toString();
 }
 
+// A one-day copy of the trip for `day`: arrival applies only to the first day and departure only to the last.
+export function tripForDay(trip: Trip, day: number, patch: Partial<Trip> = {}): Trip {
+  const { arrival, departure, ...rest } = trip;
+  return { ...rest, ...(day === 0 && arrival ? { arrival } : {}), ...(day === trip.days - 1 && departure ? { departure } : {}), days: 1, startDate: tripDate(trip, day), ...patch };
+}
+
 export function instantAt(trip: Trip, day: number, time: string) {
   return Temporal.ZonedDateTime.from(`${tripDate(trip, day)}T${time}[${trip.timeZone}]`, { disambiguation: "reject" }).toInstant();
 }
 
 // "Sightseeing ends" bounds the last visit; the trip back to the hotel may follow, up to this many minutes later.
 export const hotelReturnAllowance = 120;
+
+// Time at the airport or station (after landing, before departing), the transfer to or from the hotel, and the hotel
+// stop to drop or collect bags. Airlines advise about three hours for international departures.
+export const transferDefaults = {
+  arrival: { buffer: { FLIGHT: 45, TRAIN: 10, BUS: 10, CAR: 0, OTHER: 15 }, transfer: { FLIGHT: 45, TRAIN: 20, BUS: 20, CAR: 30, OTHER: 30 } },
+  departure: { buffer: { FLIGHT: 180, TRAIN: 20, BUS: 15, CAR: 0, OTHER: 30 }, transfer: { FLIGHT: 45, TRAIN: 20, BUS: 20, CAR: 30, OTHER: 30 } },
+  hotelMinutes: 15,
+} as const;
+
+// Arrival day: sightseeing starts from the hotel once you have landed, cleared the airport or station, travelled to the
+// hotel and dropped your bags.
+export function arrivalTimes(trip: Trip) {
+  if (!trip.arrival) return null;
+  const arrive = minuteAt(trip, 0, trip.arrival.time);
+  const buffer = trip.arrival.bufferMinutes ?? transferDefaults.arrival.buffer[trip.arrival.mode];
+  const transfer = trip.arrival.transferMinutes ?? transferDefaults.arrival.transfer[trip.arrival.mode];
+  return { arrive, buffer, transfer, atHotel: arrive + buffer + transfer, ready: arrive + buffer + transfer + transferDefaults.hotelMinutes };
+}
+
+// Departure day (the city's last day): back at the hotel to collect bags, then leave in time for the airport or station,
+// or, for a direct departure, straight from the last visit to the airport or station.
+export function departureTimes(trip: Trip) {
+  if (!trip.departure) return null;
+  const day = trip.days - 1;
+  const depart = minuteAt(trip, day, trip.departure.time);
+  const buffer = trip.departure.bufferMinutes ?? transferDefaults.departure.buffer[trip.departure.mode];
+  const transfer = trip.departure.transferMinutes ?? transferDefaults.departure.transfer[trip.departure.mode];
+  const leaveHotel = depart - buffer - transfer;
+  // A direct departure ends the day's route at the airport or station (`end`), reached from the last visit.
+  const end = directDeparture(trip) ? depart - buffer : leaveHotel - transferDefaults.hotelMinutes;
+  return { day, depart, buffer, transfer, leaveHotel, backAtHotel: leaveHotel - transferDefaults.hotelMinutes, end, direct: directDeparture(trip) };
+}
+
+// Checked out and heading for the airport or station from the last visit: only with a confirmed place to route to and
+// a daily route that returns (the last leg goes there instead of the hotel).
+export function directDeparture(trip: Trip) {
+  return Boolean(trip.departure?.direct && trip.departure.placeId && trip.returnToHotel);
+}
+
+// Route endpoints are "hotel" in the model; on a direct departure day the final leg's destination is the departure place.
+export function endpointKey(trip: Trip, day: number, id: string, role: "from" | "to") {
+  return id === "hotel" && role === "to" && directDeparture(trip) && day === trip.days - 1 ? "departure" : id;
+}
+
+// The window each day's visits must fit in: daily hours, narrowed by arrival and departure. Never negative.
+export function dayStart(trip: Trip, day: number) {
+  const base = minuteAt(trip, day, trip.dailyStart);
+  const arrival = day === 0 ? arrivalTimes(trip) : null;
+  return arrival ? Math.max(base, arrival.ready) : base;
+}
+
+export function dayEnd(trip: Trip, day: number) {
+  const departure = departureTimes(trip);
+  const end = minuteAt(trip, day, trip.dailyEnd);
+  return Math.max(dayStart(trip, day), departure?.day === day ? Math.min(end, departure.end) : end);
+}
+
 export function returnDeadline(trip: Trip, day: number) {
-  return minuteAt(trip, day, trip.dailyEnd) + hotelReturnAllowance;
+  const departure = departureTimes(trip);
+  const usual = Math.max(dayStart(trip, day), minuteAt(trip, day, trip.dailyEnd)) + hotelReturnAllowance;
+  return departure?.day === day ? Math.max(dayStart(trip, day), Math.min(usual, departure.end)) : usual;
 }
 
 export function minuteAt(trip: Trip, day: number, time: string) {
@@ -363,12 +459,14 @@ export function minuteAt(trip: Trip, day: number, time: string) {
 export function bookingConflictDetails(trip: Trip) {
   const issues: { day: number; stopIds: string[]; message: string }[] = [];
   for (let day = 0; day < trip.days; day++) {
-    const start = minuteAt(trip, day, trip.dailyStart);
-    const end = minuteAt(trip, day, trip.dailyEnd);
+    const start = dayStart(trip, day);
+    const end = dayEnd(trip, day);
     const booked = trip.stops.filter((stop) => stop.day === day && stop.fixedTime).map((stop) => ({ stop, at: minuteAt(trip, day, stop.fixedTime!) })).sort((left, right) => left.at - right.at);
+    const arrival = day === 0 ? arrivalTimes(trip) : null;
+    const departure = departureTimes(trip)?.day === day ? departureTimes(trip) : null;
     for (const { stop, at } of booked) {
-      if (at < start) issues.push({ day, stopIds: [stop.id], message: `Day ${day + 1}: ${stop.name} is booked at ${stop.fixedTime}, before the day starts.` });
-      else if (at + stop.duration > end) issues.push({ day, stopIds: [stop.id], message: `Day ${day + 1}: ${stop.name} (${stop.fixedTime}, ${stop.duration} min) ends after the day ends.` });
+      if (at < start) issues.push({ day, stopIds: [stop.id], message: arrival && start > minuteAt(trip, day, trip.dailyStart) ? `Day ${day + 1}: ${stop.name} is booked at ${stop.fixedTime}, before you can start after arriving at ${trip.arrival!.time} (about ${formatMinute(trip, day, start)} once at the hotel).` : `Day ${day + 1}: ${stop.name} is booked at ${stop.fixedTime}, before the day starts.` });
+      else if (at + stop.duration > end) issues.push({ day, stopIds: [stop.id], message: departure && end < minuteAt(trip, day, trip.dailyEnd) ? `Day ${day + 1}: ${stop.name} (${stop.fixedTime}, ${stop.duration} min) ends after you need to be ${directDeparture(trip) ? `at ${trip.departure!.place || "the station"}` : "back at the hotel"} (${formatMinute(trip, day, end)}) for your ${trip.departure!.time} departure.` : `Day ${day + 1}: ${stop.name} (${stop.fixedTime}, ${stop.duration} min) ends after the day ends.` });
     }
     booked.slice(1).forEach(({ stop, at }, index) => {
       const previous = booked[index];
@@ -391,8 +489,8 @@ export function bookingTimeSuggestion(trip: Trip, stopId: string): string | null
   const stop = trip.stops.find((item) => item.id === stopId);
   if (!stop?.fixedTime || stop.day === null) return null;
   const current = minuteAt(trip, stop.day, stop.fixedTime);
-  const latest = minuteAt(trip, stop.day, trip.dailyEnd) - stop.duration;
-  let earliest = minuteAt(trip, stop.day, trip.dailyStart) + stop.buffer;
+  const latest = dayEnd(trip, stop.day) - stop.duration;
+  let earliest = dayStart(trip, stop.day) + stop.buffer;
   const booked = trip.stops.filter((other) => other.id !== stop.id && other.day === stop.day && other.fixedTime)
     .map((other) => ({ stop: other, at: minuteAt(trip, stop.day!, other.fixedTime!) })).sort((left, right) => left.at - right.at);
   const windows: { start: number; end: number }[] = [];
@@ -410,6 +508,19 @@ export function bookingTimeSuggestion(trip: Trip, stopId: string): string | null
 
 export function formatMinute(trip: Trip, day: number, minute: number) {
   return instantForMinute(trip, day, minute).toZonedDateTimeISO(trip.timeZone).toPlainTime().toString({ smallestUnit: "minute" });
+}
+
+const ordinal = (count: number) => `${count}${count % 10 === 1 && count % 100 !== 11 ? "st" : count % 10 === 2 && count % 100 !== 12 ? "nd" : count % 10 === 3 && count % 100 !== 13 ? "rd" : "th"}`;
+
+// "Day 3 (Sat 26 Dec) after Sango, about 14:00–14:45, adding about 12 min of travel; it would be the 3rd coffee that day".
+export function squeezeInNote(trip: Trip, squeeze: SqueezeIn) {
+  const name = (id: string) => trip.stops.find((stop) => stop.id === id)?.name ?? "a visit";
+  const date = Temporal.PlainDate.from(tripDate(trip, squeeze.day)).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  const where = squeeze.after ? `after ${name(squeeze.after)}` : squeeze.before ? `before ${name(squeeze.before)}` : "";
+  const travel = squeeze.extraMinutes >= 1 ? `adding about ${Math.round(squeeze.extraMinutes)} min of travel` : "with no extra travel";
+  const delay = squeeze.delayMinutes ? `, with later visits up to ${squeeze.delayMinutes} min later` : "";
+  const cap = squeeze.overCap ? `; it would be the ${ordinal(squeeze.overCap.count)} ${squeeze.overCap.category === "coffee" ? "coffee" : squeeze.overCap.category} that day` : "";
+  return `Day ${squeeze.day + 1} (${date})${where ? ` ${where}` : ""}, about ${formatMinute(trip, squeeze.day, squeeze.start)}–${formatMinute(trip, squeeze.day, squeeze.end)}, ${travel}${delay}${cap}`;
 }
 
 export function persistedPlan(schedule: Schedule, trip?: Trip, places: Record<string, Place> = {}): SavedPlan {
