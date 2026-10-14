@@ -14,6 +14,7 @@ import { VisitTimingFields } from "./VisitTiming";
 import { NewTripDialog } from "./NewTripDialog";
 import { PlanningDialog } from "./PlanningDialog";
 import { DayRecoveryDialog } from "./DayRecoveryDialog";
+import { ExportMenu } from "./ExportMenu";
 import { applyDayRecovery, newDayProgress, recoveryMinute, recoveryPlanKey, remainingIds, validateDayRecovery, type CheckedNextRoute, type DayProgress, type RecoveryRequest } from "@/lib/day-recovery";
 import { duplicateStopPairs, mergeReviewedDuplicate } from "@/lib/duplicates";
 import type { ExtractionServices } from "@/lib/import";
@@ -394,7 +395,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     <main className="planner-main">
       <section className="trip-heading">
         <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : ""}`}>{snapshot === savedFor ? "Saved" : "Unsaved draft"}</span></div></div>
-        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
+        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} /><button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
       </section>
 
       {(error || notice) && <div className={`banner ${error ? "error" : "success"}`} role={error ? "alert" : "status"}><span>{error || notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => { setError(""); setNotice(""); }}><X size={16} /></button></div>}

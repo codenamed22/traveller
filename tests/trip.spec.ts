@@ -786,6 +786,64 @@ test("itinerary persistence restores timings and complete routes without regener
   expect(errors).toEqual([]);
 });
 
+test("exports the accepted itinerary as a printable page, Excel workbook and calendar", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.context().addInitScript(() => { window.print = () => undefined; });
+  await page.route("**/api/plan", async (route) => {
+    const candidate = route.request().postDataJSON().trip as Trip;
+    const generated = previewFixture(candidate);
+    generated.places = Object.fromEntries([["hotel", { id: "hotel-id", name: candidate.hotel, address: "1 Rue de Rivoli, Paris", location: { lat: 48.85, lng: 2.35 } }],
+      ...candidate.stops.map((stop) => [stop.id, { id: stop.placeId!, name: stop.name, address: `${stop.name}, Paris`, location: { lat: 48.86, lng: 2.34 } }])]);
+    await route.fulfill({ json: generated });
+  });
+  await openPlanningTrip(page);
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  const exportButton = page.getByRole("button", { name: "Export itinerary" });
+  await expect(exportButton).toBeDisabled();
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await dialog.getByRole("button", { name: "Use this plan" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(exportButton).toBeEnabled();
+
+  await exportButton.click();
+  await page.screenshot({ path: testInfo.outputPath("export-menu.png") });
+  const workbook = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: /Excel/ }).click();
+  const xlsx = await workbook;
+  expect(xlsx.suggestedFilename()).toMatch(/\.xlsx$/);
+  const xlsxPath = testInfo.outputPath("itinerary.xlsx");
+  await xlsx.saveAs(xlsxPath);
+  expect((await readFile(xlsxPath)).subarray(0, 2).toString()).toBe("PK");
+  await expect(page.getByRole("menu", { name: "Export itinerary" })).toHaveCount(0);
+
+  await exportButton.click();
+  const calendar = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: /Calendar/ }).click();
+  const icsPath = testInfo.outputPath("itinerary.ics");
+  await (await calendar).saveAs(icsPath);
+  const ics = await readFile(icsPath, "utf8");
+  expect(ics.match(/BEGIN:VEVENT/g)).toHaveLength(2);
+  expect(ics).toContain("SUMMARY:Louvre Museum (booked)");
+  expect(ics).toContain("DTSTART:20261012T083000Z");
+
+  await exportButton.click();
+  const popup = page.waitForEvent("popup");
+  await page.getByRole("menuitem", { name: /PDF/ }).click();
+  const printable = await popup;
+  await printable.waitForLoadState();
+  await expect(printable.getByRole("button", { name: "Save as PDF / Print" })).toBeVisible();
+  await expect(printable.locator("h2")).toContainText("Paris");
+  await expect(printable.locator(".visit").first()).toContainText("Louvre Museum");
+  await expect(printable.getByText("Back at Private hotel around", { exact: false })).toBeVisible();
+  await printable.close();
+
+  await exportButton.click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu", { name: "Export itinerary" })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("day-trip groups distinguish provisional outlines from approved itineraries", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

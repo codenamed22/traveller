@@ -114,6 +114,16 @@ Per-place walking/transit overrides take precedence over the city default; the h
 
 **Refresh travel times** follows the saved days and visit order, fetching each walking/transit connection at its chronological departure time, including hotel return. It does not regroup days, request a route matrix or invoke the optimizer. Durations, omissions, required visits and fixed bookings are retained; flexible visits can shift later when travel requires it. Published substitute timetables remain explicitly labeled as estimates, not actual trip-date service. The independently validated preview replaces saved timings/routes only after **Use refreshed times**; cancellation, missing routes, booking/day-end conflicts, changed input and provider failures preserve the saved itinerary. **Replan itinerary** is a separate explicit action if a different order is needed. Refresh reserves 3 service units per started block of 10 legs (minimum 3, maximum 21), with at most four route calls per leg including timetable fallbacks, no matrix calls and a shared 110-second place/route-work deadline. Missing place display data may require at most one place lookup per hotel/scheduled visit; matching saved places or confirmed coordinates are reused. Existing authentication, operation-ID deduplication and same-origin protections apply.
 
+### Sharing And Export
+
+**Export itinerary** (the share icon next to the backup download) turns every city's accepted itinerary into a shareable file. It is enabled once at least one city has an accepted plan; unaccepted previews are never exported, and a plan made before the city's latest edits is marked out of date. Exports are built in the browser from saved snapshots: no Google, AI or server calls.
+
+- **PDF**: opens a printable itinerary in a new tab and the browser's print dialog; choose **Save as PDF**. One section per city with hotel, departure time, each visit's times, booking/optional tags, address, notes, travel (mode, minutes, transit lines, fare) and return to the hotel. Place names link to Google Maps and each leg links to directions. If pop-ups are blocked the page is downloaded as HTML instead.
+- **Excel (.xlsx)**: an *Itinerary* sheet with one row per visit and hotel return (city, date, times, place, booked, minutes, travel, address, notes, map and directions links), plus *Not scheduled* and *Stays* sheets. The workbook is written directly (Office Open XML in a stored ZIP), with no spreadsheet library.
+- **Calendar (.ics)**: one event per visit in UTC with address, travel, notes and links, for Google Calendar, Apple Calendar or Outlook.
+
+Notes copied from an original itinerary drop their own clock-time lines (for example "17:50 – 18:35 | Toki") so they never contradict the planned times.
+
 ### Today And Day Recovery
 
 On the actual trip date in the city's timezone, open **Itinerary > Today** from an accepted day, including a saved order restored from a backup or Neon. Record **Done** with actual start/finish times, correct those times explicitly, add **+10/+20 min**, or enter a custom **Ready to leave** time. **Skip visit** records a day-local fact without deleting the place. A fixed reservation requires **Record missed booking**; this does not cancel or refund its ticket. These local actions do not call paid providers.
