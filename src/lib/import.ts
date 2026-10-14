@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { newStop, sourceUrlSchema, stopSchema, timeSchema, tripDate, type Stop, type Trip } from "./trip";
+import { newStop, sourceUrlSchema, stopSchema, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
 import { duplicateNames } from "./duplicates";
 
 export const extractionProviderSchema = z.object({ provider: z.enum(["gemini", "openrouter"]), model: z.string().min(1).max(200) }).strict();
@@ -14,6 +14,10 @@ export const candidateSchema = z.object({
   duration: z.number().int().min(5).max(480).nullable(),
   source: z.string().max(1000),
   warning: z.string().max(500),
+  kind: visitKindSchema.nullish(),
+  slot: visitSlotSchema.nullish(),
+  plannedTime: timeSchema.nullish(),
+  alternativeGroup: z.string().trim().min(1).max(40).nullish(),
 }).strict();
 export const extractionSchema = z.object({ places: z.array(candidateSchema).max(25) }).strict();
 export const importResultSchema = z.object({ places: z.array(candidateSchema.extend({ sourceUrl: sourceUrlSchema.optional() })).max(25) }).strict();
@@ -105,11 +109,21 @@ export function manualCandidates(text: string): ImportCandidate[] {
 }
 
 export function candidatesToStops(candidates: ImportCandidate[], trip: Trip, options: { ideas?: boolean } = {}): Stop[] {
+  // Alternative labels are only meaningful within one import batch; give each shared label a fresh identifier.
+  const labels = new Map<string, string>();
+  for (const label of candidates.map((candidate) => candidate.alternativeGroup).filter((label): label is string => Boolean(label))) {
+    if (!labels.has(label) && candidates.filter((candidate) => candidate.alternativeGroup === label).length > 1) labels.set(label, crypto.randomUUID());
+  }
   return candidates.map((candidate) => {
     const day = candidate.date ? Temporal.PlainDate.from(trip.startDate).until(Temporal.PlainDate.from(candidate.date)).days : null;
     if (day !== null && (day < 0 || day >= trip.days)) throw new Error(`${candidate.name} falls outside the trip dates.`);
     if (candidate.time && day === null) throw new Error(`Assign a date to ${candidate.name} before importing its booked time.`);
-    return { ...newStop(candidate.name), day, fixedTime: candidate.time, duration: candidate.duration ?? 45, source: candidate.source, ...(candidate.sourceUrl ? { sourceUrl: candidate.sourceUrl } : {}), optional: Boolean(options.ideas && !candidate.time) };
+    const group = candidate.alternativeGroup ? labels.get(candidate.alternativeGroup) : undefined;
+    return {
+      ...newStop(candidate.name), day, fixedTime: candidate.time, duration: candidate.duration ?? 45, source: candidate.source, ...(candidate.sourceUrl ? { sourceUrl: candidate.sourceUrl } : {}), optional: Boolean(options.ideas && !candidate.time),
+      ...(candidate.kind ? { kind: candidate.kind } : {}), ...(candidate.slot && !candidate.time ? { slot: candidate.slot } : {}),
+      ...(candidate.plannedTime && !candidate.time ? { plannedTime: candidate.plannedTime } : {}), ...(group ? { alternativeGroup: group } : {}),
+    };
   });
 }
 

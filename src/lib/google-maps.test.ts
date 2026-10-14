@@ -4,7 +4,7 @@ import { instantAt, newStop, newTrip, planningPreferences, type Trip } from "./t
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, planWithGoogle, recoverDayWithGoogle, refreshSavedPlanWithGoogle, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, planWithGoogle, recoverDayWithGoogle, refreshSavedPlanWithGoogle, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -32,6 +32,107 @@ function mockGoogle(walkingSeconds = 600, transitSeconds = 900) {
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+describe("on-demand place photos", () => {
+  it("resolves only the requested first-four photo and never returns provider resource names", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "private-test-key");
+    const requestOptions: RequestInit[] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requestOptions.push(init ?? {});
+      const url = String(input);
+      if (url.includes("/media?")) return Response.json({ photoUri: "https://lh3.googleusercontent.com/photo" });
+      return Response.json({ id: "museum-id", photos: Array.from({ length: 7 }, (_, index) => ({
+        name: `places/museum-id/photos/photo-${index}`, widthPx: 1200, heightPx: 800,
+        authorAttributions: [{ displayName: "Photographer", uri: "https://example.com/author", photoUri: "https://lh3.googleusercontent.com/avatar" }],
+        googleMapsUri: "https://maps.google.com/maps?cid=123", flagContentUri: "https://example.com/report",
+      })) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getPlacePhoto("museum-id", 2);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestOptions[0].headers).toMatchObject({ "X-Goog-Api-Key": "private-test-key", "X-Goog-FieldMask": "id,photos" });
+    expect(requestOptions[1].headers).toMatchObject({ "X-Goog-Api-Key": "private-test-key" });
+    expect(requestOptions[1].headers).not.toHaveProperty("X-Goog-FieldMask");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("photo-2/media?maxWidthPx=960&maxHeightPx=720&skipHttpRedirect=true");
+    expect(result).toMatchObject({ placeId: "museum-id", index: 2, total: 4, photo: { uri: "https://lh3.googleusercontent.com/photo", authors: [{ displayName: "Photographer" }], googleMapsUri: "https://maps.google.com/maps?cid=123" } });
+    expect(JSON.stringify(result)).not.toContain("photo-2");
+    await expect(getPlacePhoto("museum-id", 4)).rejects.toThrow("first four");
+  });
+
+  it("does not request media when no photo exists and rejects mismatched place responses", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "private-test-key");
+    const fetchMock = vi.fn(async () => Response.json({ id: "museum-id", photos: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getPlacePhoto("museum-id", 0)).resolves.toEqual({ placeId: "museum-id", index: 0, total: 0, photo: null });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ id: "other-place", photos: [] }));
+    await expect(getPlacePhoto("museum-id", 0)).rejects.toThrow("different place");
+  });
+
+  it("rejects a photo URL outside Google's image hosts", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "private-test-key");
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => String(input).includes("/media?")
+      ? Response.json({ photoUri: "https://attacker.example/photo" })
+      : Response.json({ id: "museum-id", photos: [{ name: "places/museum-id/photos/photo", googleMapsUri: "https://maps.google.com/maps?cid=123" }] })));
+    await expect(getPlacePhoto("museum-id", 0)).rejects.toThrow("invalid photo URL");
+  });
+});
+
+describe("time-of-day planning with Google place details", () => {
+  it("fetches opening hours and types, enforces hours and dinner slots, and bypasses OR-Tools", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    vi.stubEnv("TRAVELLER_ROUTING_PYTHON", "/nonexistent/python");
+    const fieldMasks: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("places.googleapis.com")) {
+        const id = url.split("/").at(-1)!;
+        fieldMasks.push(String((init?.headers as Record<string, string>)["X-Goog-FieldMask"]));
+        const hours = id === "bistro-place" ? { regularOpeningHours: { periods: Array.from({ length: 7 }, (_, day) => ({ open: { day, hour: 12, minute: 0 }, close: { day, hour: 23, minute: 0 } })) } } : {};
+        return Response.json({ id, displayName: { text: id }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" }, primaryType: id === "bistro-place" ? "french_restaurant" : "museum", ...hours });
+      }
+      const body = JSON.parse(init!.body as string);
+      if (url.includes("computeRouteMatrix")) return Response.json(body.destinations.map((_: unknown, destinationIndex: number) => ({ destinationIndex, condition: "ROUTE_EXISTS", duration: "600s", distanceMeters: 800 })));
+      return Response.json({ routes: [{ duration: "600s", distanceMeters: 800 }] });
+    }));
+    const bistro = { ...newStop("Bistro"), placeId: "bistro-place", slot: "any" as const, duration: 60 };
+    const dinner = { ...newStop("Le Chef"), placeId: "chef-place", source: "Dinner: Le Chef tasting menu." };
+    const trip = { ...fixture(), dailyStart: "09:00", dailyEnd: "22:00", stops: [{ ...newStop("Museum"), placeId: "museum-place" }, bistro, dinner] };
+    const result = await planWithGoogle(trip);
+    expect(validateSchedule(trip, result.schedule)).toEqual([]);
+    expect(fieldMasks.every((mask) => mask.includes("regularOpeningHours") && mask.includes("primaryType") && mask.includes("types"))).toBe(true);
+    expect(result.places[bistro.id].hours).toHaveLength(7);
+    const start = (id: string) => result.schedule.days[0].visits.find((visit) => visit.stopId === id)!.start;
+    expect(start(bistro.id)).toBeGreaterThanOrEqual(12 * 60);
+    expect(start(dinner.id)).toBeGreaterThanOrEqual(18 * 60);
+    expect(result.schedule.warnings.join(" ")).toContain("regular opening hours were applied");
+  });
+
+  it("returns opening-hour fixes as an error, not a provisional outline, for trips with day groups", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("places.googleapis.com")) {
+        const id = url.split("/").at(-1)!;
+        const hours = id === "bistro-place" ? { regularOpeningHours: { periods: Array.from({ length: 7 }, (_, day) => ({ open: { day, hour: 12, minute: 0 }, close: { day, hour: 14, minute: 0 } })) } } : {};
+        return Response.json({ id, displayName: { text: id }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" }, ...hours });
+      }
+      const body = JSON.parse(init!.body as string);
+      if (url.includes("computeRouteMatrix")) return Response.json(body.destinations.map((_: unknown, destinationIndex: number) => ({ destinationIndex, condition: "ROUTE_EXISTS", duration: "600s", distanceMeters: 800 })));
+      return Response.json({ routes: [{ duration: "600s", distanceMeters: 800 }] });
+    }));
+    // The bistro opens 12:00–14:00, but Day 1's 12:00 booking leaves only 13:10–14:00 for a 60-minute visit.
+    const bistro = { ...newStop("Bistro"), placeId: "bistro-place", slot: "any" as const, duration: 60, day: 0 };
+    const garden = { ...newStop("Garden"), placeId: "garden-place" };
+    const tower = { ...newStop("Tower"), placeId: "tower-place" };
+    const trip: Trip = { ...fixture(), days: 2, dailyStart: "09:00", dailyEnd: "20:00", stops: [{ ...newStop("Museum"), placeId: "museum-place", day: 0, fixedTime: "12:00", duration: 60 }, bistro, garden, tower],
+      dayGroups: [{ id: crypto.randomUUID(), name: "Gardens", stopIds: [garden.id, tower.id], allowedDays: [0, 1], exclusive: false }] };
+    const failure = await planWithGoogle(trip).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(PlanningFailure);
+    expect((failure as PlanningFailure).provisional).toBeUndefined();
+    expect((failure as PlanningFailure).fixes).toEqual([expect.objectContaining({ stopId: bistro.id, action: "optimize-day" })]);
+  });
+});
 
 describe("departure-specific route samples", () => {
   it("refreshes a saved order without assignment, route matrices or solver search", async () => {
@@ -121,7 +222,7 @@ describe("departure-specific route samples", () => {
     vi.spyOn(Temporal.Now, "instant").mockReturnValue(Temporal.Instant.from("2026-10-13T12:00:00Z"));
     const trip = { ...fixture(), timeZone: "UTC", startDate: "2026-10-13", dailyStart: "08:00", dailyEnd: "12:55", stops: [{ ...newStop("A"), placeId: "A", duration: 10 }, { ...newStop("B"), placeId: "B", duration: 10 }] };
     const stopIds = trip.stops.map((stop) => stop.id);
-    const minutes = (from: string, to: string, fresh: boolean) => fresh && from === "B" && to === trip.hotelPlaceId ? 90 : from === trip.hotelPlaceId && to === "B" || from === "B" && to === "A" ? 2 : 1;
+    const minutes = (from: string, to: string, fresh: boolean) => fresh && from === "B" && to === trip.hotelPlaceId ? 200 : from === trip.hotelPlaceId && to === "B" || from === "B" && to === "A" ? 2 : 1;
     let routeCalls = 0; let elements = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       const body = JSON.parse(init!.body as string);
@@ -420,7 +521,7 @@ describe("Google-backed configurable planning", () => {
   });
   it("relaxes selected durations within one route acquisition and verifies the chosen lengths", async () => {
     const requests = mockGoogle();
-    const trip = { ...fixture(), dailyEnd: "11:24", stops: [
+    const trip = { ...fixture(), dailyEnd: "11:14", stops: [
       { ...newStop("Lunch"), placeId: "lunch", duration: 60, durationOptions: [60, 54, 48], priority: 5 },
       { ...newStop("Cafe"), placeId: "cafe", duration: 60, durationOptions: [60, 54, 48] },
     ] };
@@ -555,7 +656,11 @@ describe("Google-backed configurable planning", () => {
     expect(later.every((request) => (request.origins as { waypoint: { placeId: string } }[])[0].waypoint.placeId !== trip.hotelPlaceId)).toBe(true);
     expect(later.some((request) => request.departureTime === instantAt(trip, 0, "10:05").toString())).toBe(true);
     expect(requests.filter((request) => request.destinations).reduce((total, request) => total + (request.destinations as unknown[]).length, 0)).toBeLessThanOrEqual(1000);
-    expect(requests.filter((request) => request.origin)).toHaveLength(20);
+    // One verification round per schedule; a schedule that relied on nearby estimates may cost one extra round
+    // before estimates are distrusted for the rest of the run.
+    const verified = requests.filter((request) => request.origin).length;
+    expect(verified % 20).toBe(0);
+    expect(verified).toBeLessThanOrEqual(40);
     expect(trip).toEqual(original);
   }, 20_000);
   it("checks only fixed-booking legs at departure with no Places, matrix, or optimizer requests", async () => {

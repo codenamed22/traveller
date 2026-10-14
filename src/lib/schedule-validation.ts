@@ -1,4 +1,5 @@
-import { allowsTravelEdge, groupAllowedDays, minuteAt, planningPreferences, tripDate, type Schedule, type Trip } from "./trip";
+import { allowsTravelEdge, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Schedule, type Trip } from "./trip";
+import { alternativeGroups, isRequiredStop } from "./visit-slots";
 
 export type ScheduleBoundary = { startId: string; startMinute: number };
 
@@ -40,7 +41,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
     }
     if ((day.visits.length || boundary) && trip.returnToHotel) {
       const leg = day.returnLeg;
-      if (!leg || leg.from !== previousId || leg.to !== "hotel" || leg.day !== day.day || !Number.isFinite(leg.minutes) || leg.minutes < 0 || previousEnd + leg.minutes > dayEnd + 0.01) {
+      if (!leg || leg.from !== previousId || leg.to !== "hotel" || leg.day !== day.day || !Number.isFinite(leg.minutes) || leg.minutes < 0 || previousEnd + leg.minutes > returnDeadline(trip, day.day) + 0.01) {
         errors.push(`Day ${day.day + 1}: no timely return to the hotel.`);
       }
       if (leg && !allowsTravelEdge(trip, leg)) errors.push(`Day ${day.day + 1}: hotel return violates transport preferences.`);
@@ -55,10 +56,14 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
     }
   }
   if (seenDays.size !== trip.days) errors.push("Missing sightseeing day.");
+  const alternatives = alternativeGroups(trip);
+  for (const group of alternatives) {
+    if (group.required && !group.stopIds.some((id) => seen.has(id))) errors.push(`${group.stopIds.map((id) => stops.get(id)!.name).join(" / ")}: plan at least one of these alternatives.`);
+  }
   const omitted = new Set(schedule.omitted);
   if (omitted.size !== schedule.omitted.length) errors.push("Repeated omitted stop.");
   for (const stop of trip.stops) {
-    if (!seen.has(stop.id) && !stop.optional) errors.push(`${stop.name}: required stop is missing.`);
+    if (!seen.has(stop.id) && isRequiredStop(stop, alternatives)) errors.push(`${stop.name}: required stop is missing.`);
     if (!seen.has(stop.id) && !omitted.has(stop.id)) errors.push(`${stop.name}: omission is not explained.`);
     if (seen.has(stop.id) && omitted.has(stop.id)) errors.push(`${stop.name}: both scheduled and omitted.`);
   }

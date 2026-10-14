@@ -20,7 +20,8 @@ def solve(payload):
 
     manager = pywrapcp.RoutingIndexManager(len(ids), len(days), 0)
     routing = pywrapcp.RoutingModel(manager)
-    horizon = max(day["end"] for day in days)
+    horizon = max(day.get("returnEnd", day["end"]) for day in days)
+    visits_end = max(day["end"] for day in days)
 
     def callback(day, include_service):
         def transit(from_index, to_index):
@@ -45,7 +46,8 @@ def solve(payload):
     timing = routing.GetDimensionOrDie("Time")
     for day, limits in enumerate(days):
         timing.CumulVar(routing.Start(day)).SetRange(limits["start"], limits["start"])
-        timing.CumulVar(routing.End(day)).SetRange(limits["start"], limits["end"])
+        # Visits end by "end"; the trip back to the hotel may arrive by "returnEnd".
+        timing.CumulVar(routing.End(day)).SetRange(limits["start"], limits.get("returnEnd", limits["end"]))
     for node, stop in enumerate(stops, 1):
         index = manager.NodeToIndex(node)
         if stop["day"] is not None:
@@ -53,7 +55,7 @@ def solve(payload):
         if stop["fixedMinute"] is not None:
             timing.CumulVar(index).SetRange(stop["fixedMinute"], stop["fixedMinute"])
         else:
-            timing.CumulVar(index).SetRange(min(day["start"] for day in days), horizon)
+            timing.CumulVar(index).SetRange(min(day["start"] for day in days), max(min(day["start"] for day in days), visits_end - stop["duration"]))
         if stop["optional"]:
             routing.AddDisjunction([index], 100_000 * stop["priority"])
     count_index = routing.RegisterUnaryTransitCallback(lambda index: int(manager.IndexToNode(index) != 0))

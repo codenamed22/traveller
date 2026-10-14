@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { PlanningError, type SolverStage } from "./planner";
-import { allowsTravelEdge, bookingConflicts, minuteAt, planningPreferences, tripDate, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
+import { allowsTravelEdge, bookingConflicts, minuteAt, planningPreferences, returnDeadline, tripDate, tripSchema, type Schedule, type TravelEdge, type Trip } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 const integer = z.number().int().nonnegative();
@@ -31,7 +31,7 @@ export async function solveTripWithOrTools(input: Trip, travel: TravelEdge[], se
   const edges = travel.filter((edge) => Number.isInteger(edge.day) && edge.day >= 0 && edge.day < trip.days && ids.has(edge.from) && ids.has(edge.to) && edge.from !== edge.to && allowsTravelEdge(trip, edge) && Number.isInteger(edge.minutes) && edge.minutes >= 0 && Number.isFinite(edge.meters) && edge.meters >= 0);
   const payload = {
     stops: trip.stops.map((stop) => ({ id: stop.id, day: stop.day, duration: stop.duration, buffer: stop.buffer, optional: stop.optional, priority: stop.priority, fixedMinute: stop.fixedTime ? minuteAt(trip, stop.day!, stop.fixedTime) : null })),
-    days: Array.from({ length: trip.days }, (_, day) => ({ date: tripDate(trip, day), start: minuteAt(trip, day, trip.dailyStart), end: minuteAt(trip, day, trip.dailyEnd) })),
+    days: Array.from({ length: trip.days }, (_, day) => ({ date: tripDate(trip, day), start: minuteAt(trip, day, trip.dailyStart), end: minuteAt(trip, day, trip.dailyEnd), returnEnd: returnDeadline(trip, day) })),
     travel: edges.map(({ day, from, to, mode, minutes, meters }) => ({ day, from, to, mode, minutes, meters })),
     returnToHotel: trip.returnToHotel, maxStopsPerDay: planningPreferences(trip).maxStopsPerDay, goal: planningPreferences(trip).goal,
     initialRoutes: options.initialSchedule ? Array.from({ length: trip.days }, (_, day) => options.initialSchedule!.days.find((candidate) => candidate.day === day)?.visits.map((visit) => visit.stopId) ?? []) : undefined,

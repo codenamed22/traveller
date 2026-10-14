@@ -1,18 +1,23 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { APIProvider, AdvancedMarker, Map as GoogleMap, useMap } from "@vis.gl/react-google-maps";
+import { APIProvider, AdvancedMarker, InfoWindow, Map as GoogleMap, useMap } from "@vis.gl/react-google-maps";
 import { decode } from "@googlemaps/polyline-codec";
 import { Hotel, LocateFixed, MapPinned } from "lucide-react";
 import type { Place, Schedule, TravelEdge, Trip } from "@/lib/trip";
+import type { PlacePhoto } from "@/lib/place-photos";
+import { placeMarkerLabel } from "@/lib/map-markers";
+import { PlacePhotos } from "./PlacePhotos";
 
-type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | null; day: number; selected: string | null; onSelect: (id: string) => void; currentLocation?: { lat: number; lng: number }; selectedRoute?: TravelEdge };
+type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | null; day: number; selected: string | null; onSelect: (id: string | null) => void; currentLocation?: { lat: number; lng: number }; selectedRoute?: TravelEdge; markerOrder?: string[]; photoTotal?: number; photoFrames: Partial<Record<number, PlacePhoto | null>>; photoLoading: Partial<Record<number, boolean>>; photoErrors: Partial<Record<number, boolean>>; photoDisabledMessage?: string; onPhotoRequest: (placeId: string, index: number) => void; onPhotoRetry: (placeId: string, index: number) => void };
 
-function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute }: Props) {
+function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry }: Props) {
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
   const stopIds = visits ? visits.visits.map((visit) => visit.stopId) : selectedRoute ? [selectedRoute.to].filter((id) => id !== "hotel") : trip.stops.map((stop) => stop.id);
   const visiblePlaces = Object.entries(places).filter(([id]) => id === "hotel" || stopIds.includes(id));
+  const selectedPlace = visiblePlaces.find(([id]) => id === selected)?.[1];
+  const selectedName = selected === "hotel" ? places.hotel?.name : trip.stops.find((stop) => stop.id === selected)?.name ?? selectedPlace?.name;
   const locationKey = visiblePlaces.map(([id, place]) => `${id}:${place.location.lat},${place.location.lng}`).join("|") + (currentLocation ? `|current:${currentLocation.lat},${currentLocation.lng}` : "");
   useEffect(() => {
     if (!map || !locationKey) return;
@@ -32,9 +37,15 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
     return () => lines.forEach((line) => line.setMap(null));
   }, [map, visits, selectedRoute]);
   return <>
-    {places.hotel && <AdvancedMarker position={places.hotel.location} title={trip.hotel}><span className="hotel-marker"><Hotel size={19} /></span></AdvancedMarker>}
+    {places.hotel && <AdvancedMarker position={places.hotel.location} title={places.hotel.name || trip.hotel} onClick={() => onSelect("hotel")}><span className="hotel-marker"><Hotel size={19} /></span></AdvancedMarker>}
     {currentLocation && <AdvancedMarker position={currentLocation} title="Current location"><span className="current-marker"><LocateFixed size={21} /></span></AdvancedMarker>}
-    {stopIds.map((id, index) => places[id] && <AdvancedMarker key={id} position={places[id].location} title={trip.stops.find((stop) => stop.id === id)?.name} onClick={() => onSelect(id)}><span className={`place-marker ${selected === id ? "selected" : ""}`}>{index + 1}</span></AdvancedMarker>)}
+    {stopIds.map((id, index) => {
+      const visitIndex = markerOrder?.indexOf(id) ?? -1;
+      return places[id] && <AdvancedMarker key={id} position={places[id].location} title={trip.stops.find((stop) => stop.id === id)?.name ?? places[id].name} onClick={() => onSelect(id)}><span className={`place-marker ${selected === id ? "selected" : ""} ${markerOrder && visitIndex < 0 ? "unscheduled" : ""}`}>{placeMarkerLabel(id, index, markerOrder)}</span></AdvancedMarker>;
+    })}
+    {selected && selectedPlace && selectedName && <InfoWindow position={selectedPlace.location} onCloseClick={() => onSelect(null)} shouldFocus={false}>
+      <div className="map-photo-popup"><h2>{selectedName}</h2><PlacePhotos key={selectedPlace.id} placeName={selectedName} variant="popup" total={photoTotal} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => onPhotoRequest(selectedPlace.id, index)} onRetry={(index) => onPhotoRetry(selectedPlace.id, index)} /></div>
+    </InfoWindow>}
   </>;
 }
 

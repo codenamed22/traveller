@@ -3,6 +3,27 @@ import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manua
 import { newStop, newTrip, stopSchema } from "./trip";
 import { duplicateStopPairs, mergeDuplicateStops, mergeReviewedDuplicate } from "./duplicates";
 
+describe("time-of-day import fields", () => {
+  it("maps kind, slot, itinerary time and shared alternative labels onto stops", () => {
+    const trip = { ...newTrip(), startDate: "2026-10-13", days: 2 };
+    const base = { date: null, time: null, duration: null, source: "", warning: "" };
+    const stops = candidatesToStops([
+      { ...base, name: "Five Ways", kind: "coffee", alternativeGroup: "coffee-a" },
+      { ...base, name: "Rum Baba", kind: "coffee", alternativeGroup: "coffee-a" },
+      { ...base, name: "Solo", alternativeGroup: "lonely" },
+      { ...base, name: "Bouillon", kind: "meal", slot: "dinner", plannedTime: "19:00" },
+      { ...base, name: "Booked", date: "2026-10-13", time: "10:00", slot: "morning", plannedTime: "09:00" },
+    ], trip);
+    expect(stops[0].alternativeGroup).toBeDefined();
+    expect(stops[0].alternativeGroup).toBe(stops[1].alternativeGroup);
+    expect(stops[0].alternativeGroup).not.toBe("coffee-a");
+    expect(stops[2].alternativeGroup).toBeUndefined();
+    expect(stops[3]).toMatchObject({ kind: "meal", slot: "dinner", plannedTime: "19:00" });
+    expect(stops[4].slot).toBeUndefined();
+    expect(stops[4].plannedTime).toBeUndefined();
+  });
+});
+
 describe("itinerary import", () => {
   it.each([
     ["Sango", "Sango Specialty Coffee"],

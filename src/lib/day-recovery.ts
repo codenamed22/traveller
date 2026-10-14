@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, dayPlanSchema, instantForMinute, minuteAt, placeSchema, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
+import { allowsTravelEdge, dayPlanSchema, instantForMinute, minuteAt, placeSchema, returnDeadline, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
 
 const idsSchema = z.array(z.uuid()).max(60).refine((ids) => new Set(ids).size === ids.length, "Visits must be unique.");
 const recoveryOriginSchema = z.object({ id: z.union([z.literal("hotel"), z.uuid()]), location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional() }).strict();
@@ -132,7 +132,7 @@ export function validateDayRecovery(request: RecoveryRequest, option: RecoveryOp
   if (visited.size + progress.completed.length > (trip.planning?.maxStopsPerDay ?? 25)) errors.push("Too many visits today.");
   if (trip.returnToHotel) {
     edgeErrors(option.day.returnLeg, "hotel");
-    if (end + (option.day.returnLeg?.minutes ?? Infinity) > minuteAt(trip, day, trip.dailyEnd)) errors.push("No timely hotel return.");
+    if (end + (option.day.returnLeg?.minutes ?? Infinity) > returnDeadline(trip, day)) errors.push("No timely hotel return.");
   }
   return errors;
 }

@@ -155,12 +155,39 @@ test("review pasted places and keep AI off without consent", async ({ page }) =>
 });
 
 test("paid and persistence endpoints reject unauthenticated access", async ({ request }) => {
-  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/timing", "/api/day-recovery"]) {
+  for (const path of ["/api/plan", "/api/import", "/api/places", "/api/place-photos", "/api/timing", "/api/day-recovery"]) {
     const response = await request.post(path, { data: {} });
     expect([401, 503]).toContain(response.status());
   }
   const response = await request.get("/api/trips");
   expect([401, 503]).toContain(response.status());
+});
+
+test("place photos stay unavailable without connections and never enter trip backups", async ({ page }, testInfo) => {
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: [
+    { ...newStop("Confirmed museum"), placeId: "museum-id" },
+    newStop("Unconfirmed garden"),
+  ] };
+  let photoRequests = 0;
+  page.on("request", (request) => { if (request.url().endsWith("/api/place-photos")) photoRequests++; });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "photo-trip.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip })) });
+
+  const confirmed = page.getByRole("button", { name: /Confirmed museum/ });
+  await confirmed.click();
+  await expect(page.locator(".place-photos-carousel")).toContainText("Photos are unavailable");
+  await page.getByRole("button", { name: /Unconfirmed garden/ }).click();
+  await expect(page.locator(".place-photos-carousel")).toContainText("Confirm this place to view photos");
+  expect(photoRequests).toBe(0);
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const download = await downloadPromise;
+  const output = testInfo.outputPath("photo-trip-backup.json");
+  await download.saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(JSON.stringify(backup)).not.toMatch(/photoUri|googleMapsUri|authorAttributions/);
 });
 
 test("recovery records progress, checks a selected route, previews and applies only today's decisions", async ({ page }, testInfo) => {
@@ -1254,27 +1281,83 @@ test("planning popup previews before accepting and retains an accepted plan afte
   expect(errors).toEqual([]);
 });
 
-test("planning popup research requires consent and leaves duration overrides in control", async ({ page }, testInfo) => {
-  const requests: { city: string; places: { id: string; name: string }[]; consent: boolean }[] = [];
+test("planning failures offer one click to apply all suggested fixes and plan again", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const submitted: Trip[] = [];
+  await page.route("**/api/plan", async (route) => {
+    const trip = route.request().postDataJSON().trip as Trip;
+    submitted.push(trip);
+    const [, garden, cafe] = trip.stops;
+    await route.fulfill(submitted.length === 1 ? { status: 422, json: { error: "No schedule fits these bookings and opening hours. Long explanation.", code: "sampled-model-conflict", fixes: [
+      { stopId: garden.id, stopName: garden.name, issue: "Open 12:00–21:00, which leaves no gap around Day 1's bookings. Day 2 has room.", action: "optimize-day" },
+      { stopId: cafe.id, stopName: cafe.name, issue: "Closed, or open too briefly, on every trip day.", action: "make-optional" },
+    ] } } : { json: previewFixture(trip) });
+  });
+  await openPlanningTrip(page, "Private hotel", [
+    { ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:30" },
+    { ...newStop("Luxembourg Gardens"), placeId: "garden-id", day: 0 },
+    { ...newStop("Corner Cafe"), placeId: "cafe-id" },
+  ]);
+  const dialog = page.getByRole("dialog", { name: "Plan my days" });
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  const alert = dialog.getByRole("alert");
+  await expect(alert).toContainText("2 visits can't be scheduled as set");
+  await expect(alert).toContainText("Luxembourg Gardens: Open 12:00–21:00");
+  await expect(alert).toContainText("Suggested: set Day to Optimize");
+  await expect(alert).toContainText("Suggested: mark Optional");
+  await expect(alert.getByText("Long explanation.")).toBeHidden();
+  await alert.getByRole("button", { name: "Apply all suggestions and plan again" }).click();
+  await expect(dialog.getByRole("button", { name: "Use this plan" })).toBeVisible();
+  expect(submitted).toHaveLength(2);
+  expect(submitted[1].stops.map((stop) => [stop.day, stop.optional])).toEqual([[0, false], [null, false], [null, true]]);
+  await dialog.getByRole("button", { name: "Preferences", exact: true }).click();
+  await expect(dialog.getByLabel("Day for Luxembourg Gardens", { exact: true })).toHaveValue("");
+  await expect(dialog.getByLabel("Optional Corner Cafe")).toBeChecked();
+  expect(errors).toEqual([]);
+});
+
+test("planning timing guidance uses original references as opt-in soft windows", async ({ page }, testInfo) => {
+  const requests: { city: string; places: { id: string; name: string; source: string; sourceUrl?: string }[]; consent: boolean }[] = [];
+  const planningRequests: { trip: Trip }[] = [];
+  await page.route("**/api/plan", async (route) => {
+    planningRequests.push(route.request().postDataJSON());
+    await route.fulfill({ status: 422, json: { error: "No schedule fits the supplied preview." } });
+  });
   await page.route("**/api/timing", async (route) => {
     const body = route.request().postDataJSON();
     requests.push(body);
-    await route.fulfill({ json: { recommendations: [{ stopId: body.places[0].id, duration: 120, bestTime: "Morning", reason: "A typical leisurely visit.", sourceIndexes: [0] }], sources: [{ title: "Official garden guide", url: "https://example.com/garden" }], research: "Allow around two hours; morning is an estimate, not an opening-hours guarantee.", searchEntryPoint: "<a href='https://www.google.com/search?q=garden' target='_blank'>Google Search</a>" } });
+    await route.fulfill({ json: { recommendations: [{ stopId: body.places[0].id, duration: 120, bestTime: "Dinner service", reason: "The original itinerary describes an evening meal.", preferredTimeWindow: { start: "18:00", end: "21:00" }, sourceIndexes: [0, 1] }], sources: [{ title: "Official garden guide", url: "https://example.com/garden" }, { title: "Original itinerary: Luxembourg Gardens", url: "https://example.com/original-itinerary" }], research: "The original note identifies an evening meal; use the venue's evening service window as a flexible preference.", searchEntryPoint: "<a href='https://www.google.com/search?q=garden' target='_blank'>Google Search</a>" } });
   });
-  const trip = await openPlanningTrip(page);
+  const trip = await openPlanningTrip(page, "Private hotel", [
+    { ...newStop("Louvre Museum"), placeId: "museum-id" },
+    { ...newStop("Luxembourg Gardens"), placeId: "garden-id", source: "Original itinerary: dinner at this bouillon.", sourceUrl: "https://example.com/original-itinerary" },
+  ]);
   const dialog = page.getByRole("dialog", { name: "Plan my days" });
-  const research = dialog.getByRole("button", { name: "Research selected timings" });
+  const research = dialog.getByRole("button", { name: "Research timing windows" });
   await expect(research).toBeDisabled();
   await dialog.getByLabel("Research timing for Luxembourg Gardens").check();
   await expect(research).toBeDisabled();
-  await dialog.getByLabel(/Send selected place names/).check();
+  await dialog.getByLabel(/Send selected place names, original notes and links/).check();
   await research.click();
   await expect(dialog.getByText("Suggested: 120 min", { exact: true })).toBeVisible();
   expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ city: "Paris", consent: true, places: [{ id: trip.stops[1].id, name: "Luxembourg Gardens" }] });
+  expect(requests[0]).toMatchObject({ city: "Paris", consent: true, places: [{ id: trip.stops[1].id, name: "Luxembourg Gardens", source: "Original itinerary: dinner at this bouillon.", sourceUrl: "https://example.com/original-itinerary" }] });
   expect(JSON.stringify(requests)).not.toContain("Private hotel");
   expect(JSON.stringify(requests)).not.toContain("10:30");
   await expect(dialog.getByLabel("Visit minutes for Luxembourg Gardens")).toHaveValue("45");
+  await dialog.getByRole("button", { name: "Use this time window" }).click();
+  const preferredStart = dialog.getByLabel("Preferred start time for Luxembourg Gardens");
+  await expect(preferredStart).toHaveValue("18:00");
+  await dialog.getByLabel("Preferred end time for Luxembourg Gardens").fill("21:00");
+  await preferredStart.fill("17:30");
+  await dialog.getByRole("button", { name: "Optimize preview" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("No schedule fits the supplied preview");
+  expect(planningRequests).toHaveLength(1);
+  expect(planningRequests[0].trip.stops[1].preferredTimeWindow).toEqual({ start: "17:30", end: "21:00", sources: ["https://example.com/garden", "https://example.com/original-itinerary"] });
+  await dialog.getByRole("button", { name: "Clear time preference" }).click();
+  await expect(dialog.getByLabel("Preferred start time for Luxembourg Gardens")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Use this time window" }).click();
   await expect(dialog.locator("iframe")).toHaveAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
   await dialog.getByRole("button", { name: "Use 120 min for Luxembourg Gardens" }).click();
   await expect(dialog.getByLabel("Visit minutes for Luxembourg Gardens")).toHaveValue("120");
@@ -1284,7 +1367,7 @@ test("planning popup research requires consent and leaves duration overrides in 
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("planning-research.png"), fullPage: true });
   await dialog.getByLabel("Research timing for Luxembourg Gardens").uncheck();
-  await expect(dialog.getByLabel(/Send selected place names/)).not.toBeChecked();
+  await expect(dialog.getByLabel(/Send selected place names, original notes and links/)).not.toBeChecked();
   await expect(dialog.getByText("Suggested: 120 min", { exact: true })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Apply preferences" }).click();
   const download = page.waitForEvent("download");
@@ -1293,5 +1376,6 @@ test("planning popup research requires consent and leaves duration overrides in 
   await (await download).saveAs(output);
   const backup = JSON.parse(await readFile(output, "utf8"));
   expect(backup.trip.stops[1].duration).toBe(75);
-  expect(JSON.stringify(backup)).not.toContain("Official garden guide");
+  expect(backup.trip.stops[1].preferredTimeWindow).toEqual({ start: "18:00", end: "21:00", sources: ["https://example.com/garden", "https://example.com/original-itinerary"] });
+  expect(JSON.stringify(backup)).toContain("https://example.com/garden");
 });

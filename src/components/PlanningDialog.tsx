@@ -5,9 +5,11 @@ import { ArrowUpRight, Check, Footprints, LoaderCircle, LockKeyhole, Plus, Route
 import { ZodError } from "zod";
 import { Dialog } from "./Dialog";
 import { ConflictResolution, ProvisionalOutline } from "./ConflictResolution";
-import { applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
+import { VisitTimingFields } from "./VisitTiming";
+import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningFix, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
 import { validateSchedule } from "@/lib/schedule-validation";
 import { timingResultSchema, type TimingResult } from "@/lib/timing";
+import { alternativeGroups } from "@/lib/visit-slots";
 
 type Props = {
   trip: Trip; canPlan: boolean; canResearch: boolean;
@@ -15,7 +17,7 @@ type Props = {
   onPreview: (trip: Trip) => Promise<PlanningPreview>;
   onCheck: (trip: Trip) => Promise<BookingTravelCheck>;
   onApply: (trip: Trip, result?: PlanResult) => void;
-  onResearch: (places: { id: string; name: string }[]) => Promise<TimingResult>;
+  onResearch: (places: { id: string; name: string; source: string; sourceUrl?: string }[]) => Promise<TimingResult>;
   places?: Record<string, Place>;
 };
 
@@ -27,6 +29,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   const [stage, setStage] = useState<"preferences" | "preview">("preferences");
   const [busy, setBusy] = useState<"planning" | "research" | null>(null);
   const [error, setError] = useState("");
+  const [fixes, setFixes] = useState<PlanningFix[]>([]);
   const [consent, setConsent] = useState(false);
   const [researchIds, setResearchIds] = useState<string[]>([]);
   const [timing, setTiming] = useState<TimingResult | null>(null);
@@ -37,6 +40,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   const suggestions = new Map<string, string>();
   const dayTripSuggestions = suggestDayTrips(draft, places);
   const validated = tripSchema.safeParse(draft);
+  const draftAlternatives = alternativeGroups(draft);
   const invalidGroups = !validated.success && validated.error.issues.some((issue) => issue.path[0] === "dayGroups");
   if (validated.success) {
     try {
@@ -48,8 +52,11 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
     } catch { conflicts = ["A booked or daily time does not exist or is ambiguous on this date in the selected timezone."]; }
   }
 
-  function report(cause: unknown) { setError(cause instanceof ZodError ? cause.issues[0].message : cause instanceof Error ? cause.message : "Unable to complete this request."); }
-  function edit(patch: Partial<Trip>) { setDraft((current) => ({ ...current, ...patch })); setPreview(null); setError(""); }
+  function report(cause: unknown) {
+    setError(cause instanceof ZodError ? cause.issues[0].message : cause instanceof Error ? cause.message : "Unable to complete this request.");
+    setFixes(cause instanceof Error && "fixes" in cause && Array.isArray(cause.fixes) ? cause.fixes as PlanningFix[] : []);
+  }
+  function edit(patch: Partial<Trip>) { setDraft((current) => ({ ...current, ...patch })); setPreview(null); setError(""); setFixes([]); }
   function editPreferences(patch: Partial<PlanningPreferences>) { edit({ planning: { ...preferences, ...patch } }); }
   function editGroup(id: string, patch: Partial<DayGroup>) { edit({ dayGroups: draft.dayGroups?.map((group) => group.id === id ? { ...group, ...patch } : group) }); }
   function editStop(id: string, patch: Partial<Stop>) {
@@ -60,14 +67,14 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
     }
   }
 
-  async function optimize() {
+  async function optimize(candidate = draft) {
     if (conflicts.length) return;
-    setBusy("planning"); setError("");
+    setBusy("planning"); setError(""); setFixes([]);
     try {
-      const result = await onPreview(tripSchema.parse(draft));
+      const result = await onPreview(tripSchema.parse(candidate));
       if (result.status === "provisional") { setPreview(result); setStage("preview"); return; }
       if (!result.verified) throw new Error("This route has not passed travel-time checks. Adjust preferences and try again.");
-      const issues = validateSchedule(draft, result.schedule);
+      const issues = validateSchedule(candidate, result.schedule);
       if (issues.length) throw new Error(issues.join(" "));
       setPreview(result); setStage("preview");
     } catch (cause) { report(cause); }
@@ -77,13 +84,20 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   async function research() {
     if (!consent || !researchIds.length || researchIds.length > 5) return;
     setBusy("research"); setError("");
-    try { setTiming(timingResultSchema.parse(await onResearch(draft.stops.filter((stop) => researchIds.includes(stop.id)).map(({ id, name }) => ({ id, name }))))); }
+    const places = draft.stops.filter((stop) => researchIds.includes(stop.id)).map(({ id, name, source, sourceUrl }) => ({ id, name, source, ...(sourceUrl ? { sourceUrl } : {}) }));
+    try { setTiming(timingResultSchema.parse(await onResearch(places))); }
     catch (cause) { report(cause); }
     finally { setBusy(null); }
   }
 
   function apply(result?: PlanResult) {
     try { onApply(result ? applyScheduleDurations(draft, result.schedule) : draft, result); } catch (cause) { report(cause); }
+  }
+
+  function applyFixes() {
+    const next = applyPlanningFixes(draft, fixes);
+    setDraft(next); setPreview(null);
+    void optimize(next);
   }
 
   function reviewVisitTimes() { document.getElementById("planning-visits")?.focus(); }
@@ -96,7 +110,12 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   return <Dialog title="Plan my days" className="planning-dialog" busy={Boolean(busy)} onClose={onClose}>
     <div className="planning-context"><span>{draft.city}</span><span>{draft.days} days</span><span>{draft.stops.length} places</span><span><LockKeyhole size={13} />{draft.stops.filter((stop) => stop.fixedTime).length} fixed bookings</span></div>
     <div className="segmented planning-stages"><button disabled={Boolean(busy)} aria-pressed={stage === "preferences"} onClick={() => setStage("preferences")}><Settings2 size={15} />Preferences</button><button disabled={!preview || Boolean(busy)} aria-pressed={stage === "preview"} onClick={() => setStage("preview")}><Route size={15} />Suggested plan</button></div>
-    {error && <p className="notice error" role="alert">{error}</p>}
+    {error && (fixes.length ? <div className="notice error planning-fixes" role="alert">
+      <strong>{fixes.length === 1 ? "One visit can't be scheduled as set" : `${fixes.length} visits can't be scheduled as set`}</strong>
+      <ul>{fixes.map((fix) => <li key={fix.stopId}><strong>{fix.stopName}</strong>: {fix.issue} <span className="planning-fix-action">Suggested: {fix.action === "optimize-day" ? "set Day to Optimize" : "mark Optional"}</span></li>)}</ul>
+      <button className="button primary" disabled={Boolean(busy) || !confirmed || !!conflicts.length || !validated.success} onClick={applyFixes}><Check size={15} />Apply all suggestions and plan again</button>
+      <details><summary>Details</summary><p>{error}</p></details>
+    </div> : <p className="notice error" role="alert">{error}</p>)}
     {error && !!dayTripSuggestions.length && <p className="notice warning">Consider grouping distant visits as a day trip.</p>}
     {busy && <p className="planning-progress" role="status"><LoaderCircle size={16} className="spin" />{busy === "planning" ? "Planning your days..." : "Checking visit durations..."}</p>}
     {stage === "preferences" ? <>
@@ -143,21 +162,23 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
                 <label className="field">Booked time<input aria-label={`Booked time for ${stop.name}`} type="time" disabled={!stop.fixedTime} value={stop.fixedTime ?? ""} onChange={(event) => editStop(stop.id, { fixedTime: event.target.value || null })} /></label>
                 <label className="field">Arrival buffer (min)<input aria-label={`Arrival buffer for ${stop.name}`} type="number" min={0} max={120} value={stop.buffer} onChange={(event) => editStop(stop.id, { buffer: Number(event.target.value) })} /></label>
               </div>
+              <VisitTimingFields trip={draft} stop={stop} place={places?.[stop.id]} groups={draftAlternatives} onChange={(patch) => editStop(stop.id, patch)} />
               <div className="planning-visit-options"><label className="checkbox"><input type="checkbox" aria-label={`Any time slot for ${stop.name}`} checked={!stop.fixedTime} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: null } : { fixedTime: bookedTimes[stop.id] ?? draft.dailyStart, day: stop.day ?? 0, optional: false })} />Any time slot</label><label className="checkbox"><input type="checkbox" aria-label={`Optional ${stop.name}`} disabled={Boolean(stop.fixedTime)} checked={stop.optional} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional</label>
                 {!stop.fixedTime && <label className="checkbox"><input type="checkbox" aria-label={`Research timing for ${stop.name}`} checked={researchIds.includes(stop.id)} disabled={!researchIds.includes(stop.id) && researchIds.length >= 5} onChange={(event) => { setResearchIds((current) => event.target.checked ? [...current, stop.id] : current.filter((id) => id !== stop.id)); setConsent(false); setTiming(null); }} />Research timing</label>}
               </div>
               {suggestedTime && <div className="planning-visit-options"><span className="quiet">Suggested time: {suggestedTime} (before travel)</span><button className="text-button" aria-label={`Use suggested time ${suggestedTime} for ${stop.name}`} onClick={() => editStop(stop.id, { fixedTime: suggestedTime })}><Check size={14} />Use {suggestedTime}</button></div>}
               {stop.source && <details className="research-evidence"><summary>Original source</summary><p>{stop.source}</p>{stop.sourceUrl && <a href={stop.sourceUrl} target="_blank" rel="noopener noreferrer">Source link<ArrowUpRight size={12} /></a>}</details>}
-              {recommendation && timing && <div className="timing-suggestion"><strong>Suggested: {recommendation.duration} min</strong><p>{recommendation.reason}</p>{recommendation.bestTime && <p>Time-of-day advice (not scheduled): {recommendation.bestTime}</p>}<div className="timing-links">{recommendation.sourceIndexes.map((index) => timing.sources[index] && <a key={index} href={timing.sources[index].url} target="_blank" rel="noopener noreferrer">{timing.sources[index].title}<ArrowUpRight size={12} /></a>)}</div><button className="text-button" onClick={() => editStop(stop.id, { duration: recommendation.duration })}><Check size={14} />Use {recommendation.duration} min for {stop.name}</button></div>}
+              {stop.preferredTimeWindow && <div className="preferred-time-window"><strong>Preferred start time</strong><span>{stop.fixedTime ? "Booked time takes precedence." : "The visit should start in this range. A strongly weighted soft preference; opening hours come first."}</span><div className="form-grid"><label className="field">From<input aria-label={`Preferred start time for ${stop.name}`} type="time" max={stop.preferredTimeWindow.end} value={stop.preferredTimeWindow.start} onChange={(event) => { if (event.target.value && event.target.value < stop.preferredTimeWindow!.end) editStop(stop.id, { preferredTimeWindow: { ...stop.preferredTimeWindow!, start: event.target.value } }); }} /></label><label className="field">Until<input aria-label={`Preferred end time for ${stop.name}`} type="time" min={stop.preferredTimeWindow.start} value={stop.preferredTimeWindow.end} onChange={(event) => { if (event.target.value && event.target.value > stop.preferredTimeWindow!.start) editStop(stop.id, { preferredTimeWindow: { ...stop.preferredTimeWindow!, end: event.target.value } }); }} /></label></div><div className="timing-links">{[...new Set(stop.preferredTimeWindow.sources)].map((url) => <a key={url} href={url} target="_blank" rel="noopener noreferrer">Timing source<ArrowUpRight size={12} /></a>)}</div><button className="text-button" onClick={() => editStop(stop.id, { preferredTimeWindow: undefined })}>Clear time preference</button></div>}
+              {recommendation && timing && <div className="timing-suggestion"><strong>Suggested: {recommendation.duration} min</strong><p>{recommendation.reason}</p>{recommendation.bestTime && <p>Time-of-day guidance: {recommendation.bestTime}</p>}{recommendation.preferredTimeWindow && <p>Flexible range: {recommendation.preferredTimeWindow.start}–{recommendation.preferredTimeWindow.end}</p>}<div className="timing-links">{recommendation.sourceIndexes.map((index) => timing.sources[index] && <a key={index} href={timing.sources[index].url} target="_blank" rel="noopener noreferrer">{timing.sources[index].title}<ArrowUpRight size={12} /></a>)}</div>{recommendation.preferredTimeWindow && <button className="text-button" onClick={() => editStop(stop.id, { preferredTimeWindow: { ...recommendation.preferredTimeWindow!, sources: [...new Set(recommendation.sourceIndexes.map((index) => timing.sources[index].url))] } })}><Check size={14} />Use this time window</button>}<button className="text-button" onClick={() => editStop(stop.id, { duration: recommendation.duration })}><Check size={14} />Use {recommendation.duration} min for {stop.name}</button></div>}
             </div>;
           })}
         </div>
         <div className="planning-section timing-research">
-          <h3>Optional timing research <span>{researchIds.length}/5 selected</span></h3>
+          <h3>Timing guidance <span>{researchIds.length}/5 selected</span></h3>
           {!canResearch && <p className="notice">Visit research is unavailable. Check your sign-in and connections.</p>}
-          <label className="checkbox consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />Send selected place names and city to Gemini and Google Search. Paid usage and provider retention policies apply.</label>
-          <button className="button secondary" disabled={!consent || !researchIds.length} onClick={() => void research()}><Search size={15} />Research selected timings</button>
-          {timing && <><p className="quiet">{timing.recommendations.length} timing suggestions. Opening hours and ticket conditions still need checking.</p><details className="research-evidence"><summary>Google Search evidence</summary><p>{timing.research}</p><ul>{timing.sources.map((source, index) => <li key={index}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></details>{timing.searchEntryPoint && <iframe title="Google Search suggestions" className="search-attribution" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={timing.searchEntryPoint} />}</>}
+          <label className="checkbox consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />Send selected place names, original notes and links to Gemini and Google Search. Paid usage and provider retention policies apply.</label>
+          <button className="button secondary" disabled={!consent || !researchIds.length} onClick={() => void research()}><Search size={15} />Research timing windows</button>
+          {timing && <><p className="quiet">{timing.recommendations.length} grounded suggestions. Apply a flexible range before route planning; bookings always take precedence.</p><details className="research-evidence"><summary>Google Search evidence</summary><p>{timing.research}</p><ul>{timing.sources.map((source, index) => <li key={index}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></details>{timing.searchEntryPoint && <iframe title="Google Search suggestions" className="search-attribution" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={timing.searchEntryPoint} />}</>}
         </div>
       </fieldset>
       {!confirmed && <p className="notice warning">Confirm the hotel and all places on the map before planning.{unconfirmed.length > 0 && ` Unconfirmed: ${unconfirmed.join(", ")}.`}</p>}

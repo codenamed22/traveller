@@ -9,6 +9,8 @@ import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Com
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
+import { PlacePhotos } from "./PlacePhotos";
+import { VisitTimingFields } from "./VisitTiming";
 import { NewTripDialog } from "./NewTripDialog";
 import { PlanningDialog } from "./PlanningDialog";
 import { DayRecoveryDialog } from "./DayRecoveryDialog";
@@ -17,15 +19,21 @@ import { duplicateStopPairs, mergeReviewedDuplicate } from "@/lib/duplicates";
 import type { ExtractionServices } from "@/lib/import";
 import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, type Journey, type StoredTrip } from "@/lib/journey";
 import { validateSchedule } from "@/lib/schedule-validation";
-import { changeStartDate, formatMinute, maxStopsPerCity, minuteAt, newStop, newTrip, persistedPlan, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
+import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
+import { alternativeGroups } from "@/lib/visit-slots";
+import { changeStartDate, formatMinute, hotelReturnAllowance, maxStopsPerCity, minuteAt, newStop, newTrip, persistedPlan, planningFixSchema, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type TravelEdge, type Trip } from "@/lib/trip";
 
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; updatedAt: string };
+type PhotoSession = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
 async function requestJson(url: string, body?: unknown, method = "POST", signal?: AbortSignal) {
   const response = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined, signal });
   const data = response.status === 204 ? null : await response.json();
-  if (!response.ok) throw new Error(data?.error ?? "The request failed.");
+  if (!response.ok) {
+    const fixes = planningFixSchema.array().safeParse(data?.fixes);
+    throw Object.assign(new Error(data?.error ?? "The request failed."), fixes.success ? { fixes: fixes.data } : {});
+  }
   return data;
 }
 
@@ -51,6 +59,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [plannedFor, setPlannedFor] = useState("");
   const [day, setDay] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [photoSession, setPhotoSession] = useState<PhotoSession | null>(null);
+  const photoSessionRef = useRef<PhotoSession | null>(null);
+  const activePhotoKeyRef = useRef<string | null>(null);
+  const photoRequests = useRef(new globalThis.Map<string, AbortController>());
   const [view, setView] = useState<"list" | "map">("list");
   const [tab, setTab] = useState<"places" | "itinerary">("places");
   const [importOpen, setImportOpen] = useState(false);
@@ -119,13 +131,104 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     setJourney((current) => ({ ...current, execution: { ...current.execution, [trip.id]: { ...current.execution?.[trip.id], [date]: next } } }));
   }
   const mapSchedule = tab === "places" ? null : checkedDay ? { generatedAt: checkedDay.checkedAt, warnings: [], omitted: [], days: [checkedDay.day] } : savedRecovery ? { generatedAt: savedRecovery.checkedAt, warnings: [], omitted: [], days: [savedRecovery.day] } : execution ? null : result?.schedule ?? null;
+  const markerOrder = tab === "places"
+    ? savedPlan?.days.slice().sort((left, right) => left.day - right.day).flatMap((entry) => entry.stopIds)
+    : currentDay?.visits.map((visit) => visit.stopId);
   const mapOrigin = checkedRoute?.origin ?? checkedDay?.origin ?? savedRecovery?.origin;
   const mapLocation = mapOrigin?.location ?? (mapOrigin ? places[mapOrigin.id]?.location : undefined);
   const itineraryPlaces = savedRecovery?.places ?? savedPlan?.snapshot?.places ?? places;
   const recoveryOrigin = checkedDay?.origin ?? savedRecovery?.origin;
   const recoveryPlaces = recoveryOrigin ? { ...(checkedDay ? places : itineraryPlaces), current: { id: recoveryOrigin.location ? "" : itineraryPlaces[recoveryOrigin.id]?.id ?? "", name: recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name ?? "Current location", address: "", location: recoveryOrigin.location ?? itineraryPlaces[recoveryOrigin.id]?.location ?? { lat: 0, lng: 0 } } } : itineraryPlaces;
+  const photoPlaces = tab === "itinerary" ? recoveryPlaces : places;
+  const photoTrip = tab === "itinerary" ? itineraryTrip : trip;
+  const photoStop = selected ? photoTrip.stops.find((stop) => stop.id === selected) : undefined;
+  const photoPlaceId = selected === "hotel" ? photoPlaces.hotel?.id ?? photoTrip.hotelPlaceId : selected ? photoPlaces[selected]?.id ?? photoStop?.placeId : undefined;
+  const photoKey = photoPlaceId ? `${trip.id}:${photoPlaceId}` : null;
+  const canLoadPhotos = canUseServices && config.routes;
+  const activePhotoSession = photoSession?.key === photoKey ? photoSession : null;
+  const photoFrames = activePhotoSession?.frames ?? {};
+  const photoLoading = Object.fromEntries(activePhotoSession?.loading.map((index) => [index, true]) ?? []);
+  const photoErrors = Object.fromEntries(activePhotoSession?.errors.map((index) => [index, true]) ?? []);
+  const photoDisabledMessage = !photoPlaceId ? "Confirm this place to view photos" : !canLoadPhotos ? "Photos are unavailable" : undefined;
   const plannedCount = result?.schedule.days.reduce((sum, entry) => sum + entry.visits.length, 0) ?? 0;
+
+  function cancelPhotoRequests(keepKey?: string) {
+    for (const [requestKey, controller] of photoRequests.current) {
+      if (keepKey && requestKey.startsWith(`${keepKey}:`)) continue;
+      controller.abort(); photoRequests.current.delete(requestKey);
+    }
+  }
+
+  function setPhotoSessionValue(next: PhotoSession | null) {
+    photoSessionRef.current = next;
+    setPhotoSession(next);
+  }
+
+  async function requestPhoto(key: string, placeId: string, index: number, retry = false) {
+    if (!canLoadPhotos || activePhotoKeyRef.current !== key) return;
+    let session = photoSessionRef.current;
+    if (session?.key !== key) {
+      session = { key, frames: {}, loading: [], errors: [] };
+      setPhotoSessionValue(session);
+    }
+    if (session.total !== undefined && index >= session.total) return;
+    if (retry && Object.hasOwn(session.frames, index)) {
+      const frames = { ...session.frames };
+      delete frames[index];
+      session = { ...session, frames };
+      setPhotoSessionValue(session);
+    }
+    if (!retry && session.frames[index] !== undefined) return;
+    if (session.errors.includes(index) && !retry) return;
+    const requestKey = `${key}:${index}`;
+    if (photoRequests.current.has(requestKey)) return;
+
+    const controller = new AbortController();
+    photoRequests.current.set(requestKey, controller);
+    session = { ...session, loading: [...new Set([...session.loading, index])], errors: session.errors.filter((entry) => entry !== index) };
+    setPhotoSessionValue(session);
+    try {
+      const response = placePhotoResponseSchema.parse(await requestJson("/api/place-photos", { placeId, index, operationId: crypto.randomUUID() }, "POST", controller.signal));
+      if (response.placeId !== placeId || response.index !== index) throw new Error("The photo response did not match this place.");
+      if (activePhotoKeyRef.current !== key || controller.signal.aborted) return;
+      const current = photoSessionRef.current;
+      if (current?.key !== key) return;
+      setPhotoSessionValue({ ...current, total: response.total, frames: { ...current.frames, [index]: response.photo }, loading: current.loading.filter((entry) => entry !== index) });
+    } catch {
+      if (activePhotoKeyRef.current !== key || controller.signal.aborted) return;
+      const current = photoSessionRef.current;
+      if (current?.key === key) setPhotoSessionValue({ ...current, loading: current.loading.filter((entry) => entry !== index), errors: [...new Set([...current.errors, index])] });
+    } finally {
+      if (photoRequests.current.get(requestKey) === controller) photoRequests.current.delete(requestKey);
+    }
+  }
+
+  function selectLocation(id: string | null) {
+    if (!id) {
+      activePhotoKeyRef.current = null; cancelPhotoRequests(); setPhotoSessionValue(null); setSelected(null); return;
+    }
+    const sourcePlaces = tab === "itinerary" ? recoveryPlaces : places;
+    const sourceTrip = tab === "itinerary" ? itineraryTrip : trip;
+    const place = sourcePlaces[id];
+    const placeId = id === "hotel" ? place?.id ?? sourceTrip.hotelPlaceId : place?.id ?? sourceTrip.stops.find((stop) => stop.id === id)?.placeId;
+    const key = placeId ? `${trip.id}:${placeId}` : null;
+    if (activePhotoKeyRef.current !== key) {
+      activePhotoKeyRef.current = key;
+      cancelPhotoRequests(key ?? undefined);
+      const current = photoSessionRef.current;
+      if (current?.key !== key) setPhotoSessionValue(key ? { key, frames: {}, loading: [], errors: [] } : null);
+    }
+    setSelected(id);
+    if (placeId && key && canLoadPhotos) void requestPhoto(key, placeId, 0);
+  }
+
+  useEffect(() => {
+    activePhotoKeyRef.current = photoKey;
+    cancelPhotoRequests(photoKey ?? undefined);
+    if (photoSessionRef.current?.key !== photoKey) setPhotoSessionValue(null);
+  }, [photoKey]);
   const duplicatePairs = duplicateStopPairs(trip.stops);
+  const stopAlternatives = alternativeGroups(trip);
   const duplicatePair = duplicatePairs.find(({ first, second }) => !duplicateReview?.ignored.includes(`${first.id}:${second.id}`));
   function mergeDuplicates() {
     if (!duplicatePair || ![duplicatePair.first.id, duplicatePair.second.id].includes(duplicateReview?.keepId ?? "")) return;
@@ -147,6 +250,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
 
   function switchCity(cityId: string) {
     if (busy || cityId === trip.id) return;
+    activePhotoKeyRef.current = null; cancelPhotoRequests(); setPhotoSessionValue(null);
     cityViews.current[trip.id] = { places, result, plannedFor };
     const cached = cityViews.current[cityId];
     editVersion.current += 1; setActiveCity(cityId); setPlaces(cached?.places ?? {}); setResult(cached?.result ?? null); setPlannedFor(cached?.plannedFor ?? "");
@@ -154,6 +258,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
 
   function openJourney(next: Journey, savedRevision = 0, saved = false) {
+    activePhotoKeyRef.current = null; cancelPhotoRequests(); setPhotoSessionValue(null);
     editVersion.current += 1; cityViews.current = {};
     setJourney(next); setActiveCity(next.cities[0].id); setRevision(savedRevision); setSavedFor(saved ? JSON.stringify(next) : "");
     setResult(null); setPlaces({}); setPlannedFor(""); setSelected(null); setDay(0); setTab("places"); setView("list"); setAdding(""); setLiveDay(undefined); setLiveRoute(undefined); setRecoveryOpen(false);
@@ -324,7 +429,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
                 if (trip.dayGroups?.some((group) => group.allowedDays.some((allowed) => allowed >= days))) { setError("A day-trip group includes later days. Adjust its eligible days explicitly first."); return; }
                 edit({ days }); setDay(Math.min(day, days - 1));
               }}>{Array.from({ length: 7 }, (_, index) => <option key={index} value={index + 1}>{index + 1} {index === 0 ? "day" : "days"}</option>)}</select></label></div>
-              <div className="form-grid"><label className="field">Day starts<input type="time" value={trip.dailyStart} onChange={(event) => edit({ dailyStart: event.target.value })} /></label><label className="field">Day ends<input type="time" value={trip.dailyEnd} onChange={(event) => edit({ dailyEnd: event.target.value })} /></label></div>
+              <div className="form-grid"><label className="field">Day starts<input type="time" value={trip.dailyStart} onChange={(event) => edit({ dailyStart: event.target.value })} /></label><label className="field">Sightseeing ends<input type="time" value={trip.dailyEnd} onChange={(event) => edit({ dailyEnd: event.target.value })} /></label></div>
+              <p className="quiet">The last visit ends by this time; getting back to the hotel may take up to {hotelReturnAllowance / 60} hours longer.</p>
               <label className="field">City timezone<input value={trip.timeZone} maxLength={100} placeholder="Europe/Paris" onChange={(event) => edit({ timeZone: event.target.value })} /></label>
               <label className="checkbox"><input type="checkbox" checked={trip.returnToHotel} onChange={(event) => edit({ returnToHotel: event.target.checked })} />Return to hotel each day</label>
             </div>
@@ -351,11 +457,13 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
             {duplicatePairs.length > 0 && <button className="button secondary small" onClick={() => setDuplicateReview({ ignored: [], keepId: null, error: "" })}><Search size={15} />Review duplicates ({duplicatePairs.length})</button>}
             {!trip.stops.length && <div className="empty-stops"><span className="empty-icon"><MapPin size={24} strokeWidth={1.4} /></span><h2>No places yet</h2><button className="button secondary" onClick={() => setImportOpen(true)}><FileInput size={16} />Import itinerary</button></div>}
             <div className="stop-list">{trip.stops.map((stop, index) => <article key={stop.id} className={`stop-item ${selected === stop.id ? "selected" : ""}`}>
-              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span><span className="stop-statuses">{stop.fixedTime && <span className="booking-status" role="img" aria-label="Booked appointment" title="Fixed booking date and time"><LockKeyhole size={16} className="booking-icon" /></span>}<span className="location-status" role="img" aria-label={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"} title={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"}>{stop.placeId ? <Check size={16} className="confirmed-icon" /> : <MapPinOff size={16} className="unconfirmed-icon" />}</span></span><ChevronDown size={14} /></button>
+              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => selectLocation(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span><span className="stop-statuses">{stop.fixedTime && <span className="booking-status" role="img" aria-label="Booked appointment" title="Fixed booking date and time"><LockKeyhole size={16} className="booking-icon" /></span>}<span className="location-status" role="img" aria-label={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"} title={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"}>{stop.placeId ? <Check size={16} className="confirmed-icon" /> : <MapPinOff size={16} className="unconfirmed-icon" />}</span></span><ChevronDown size={14} /></button>
               {selected === stop.id && <div className="stop-details">
+                <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, index); }} onRetry={(index) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, index, true); }} />
                 <label className="field">Place name<input value={stop.name} maxLength={200} onChange={(event) => { editStop(stop.id, { name: event.target.value, placeId: null, location: undefined }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }} /></label>
                 <button className="text-button" disabled={Boolean(busy)} onClick={() => openSearch(stop.id, stop.name)}>{stop.placeId ? <Check size={14} /> : <Search size={14} />}{stop.placeId ? "Place confirmed · change" : "Confirm place on map"}</button>
                 <div className="form-grid"><label className="field">Visit minutes<input type="number" min={5} max={480} step={5} value={stop.duration} onChange={(event) => editStop(stop.id, { duration: Number(event.target.value) })} /></label><label className="field">Assigned day<select value={stop.day ?? ""} onChange={(event) => editStop(stop.id, { day: event.target.value === "" ? null : Number(event.target.value), ...(event.target.value === "" ? { fixedTime: null } : {}) })}><option value="">Flexible</option>{Array.from({ length: trip.days }, (_, dayIndex) => <option key={dayIndex} value={dayIndex}>Day {dayIndex + 1}</option>)}</select></label></div>
+                <VisitTimingFields trip={trip} stop={stop} place={places[stop.id]} groups={stopAlternatives} onChange={(patch) => editStop(stop.id, patch)} />
                 <label className="checkbox"><input type="checkbox" checked={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: "10:00", day: stop.day ?? day, optional: false } : { fixedTime: null })} /><LockKeyhole size={13} />Fixed booking</label>
                 {stop.fixedTime && <div className="form-grid"><label className="field">Booked time<input type="time" value={stop.fixedTime} onChange={(event) => editStop(stop.id, { fixedTime: event.target.value || null })} /></label><label className="field">Arrival buffer (min)<input type="number" min={0} max={120} value={stop.buffer} onChange={(event) => editStop(stop.id, { buffer: Number(event.target.value) })} /></label></div>}
                 <label className="field">Transport<select value={stop.mode} onChange={(event) => editStop(stop.id, { mode: event.target.value as Stop["mode"] })}><option value="AUTO">Walking or public transit</option><option value="WALK">Walking only</option><option value="TRANSIT">Public transit</option></select></label>
@@ -376,7 +484,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
               {currentDay?.visits.map((visit, index) => {
                 const stop = itineraryTrip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => setSelected(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span></span>{stop.fixedTime && <LockKeyhole size={15} />}</button></div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span></span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}</div>;
               })}
               {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={recoveryPlaces} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>Back to {itineraryTrip.hotel}</strong><span>{formatMinute(itineraryTrip, day, (currentDay.visits.at(-1)?.end ?? (checkedDay || savedRecovery ? recoveryMinute(itineraryTrip, day, checkedDay?.departureAt ?? savedRecovery!.departureAt) : minuteAt(itineraryTrip, day, itineraryTrip.dailyStart))) + currentDay.returnLeg.minutes)}</span></div></div></>}
               {!currentDay?.visits.length && <p className="notice">No sights assigned to this day.</p>}
@@ -386,7 +494,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
           </div>}
         </section>
 
-        <section className="map-panel" aria-label="City map"><TripMap trip={tab === "itinerary" ? itineraryTrip : trip} places={tab === "itinerary" ? recoveryPlaces : places} schedule={mapSchedule} currentLocation={tab === "itinerary" ? mapLocation : undefined} selectedRoute={tab === "itinerary" ? checkedRoute?.edge : undefined} day={day} selected={selected} onSelect={setSelected} /><div className="map-heading"><span className="map-heading-dot" /><span>{trip.city || "Your city"}</span><span className="map-heading-divider" />{tab === "places" ? "All places" : `Day ${day + 1}`}</div>{tab === "itinerary" && (checkedRoute || mapSchedule) && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
+        <section className="map-panel" aria-label="City map"><TripMap trip={tab === "itinerary" ? itineraryTrip : trip} places={photoPlaces} schedule={mapSchedule} markerOrder={markerOrder} currentLocation={tab === "itinerary" ? mapLocation : undefined} selectedRoute={tab === "itinerary" ? checkedRoute?.edge : undefined} day={day} selected={selected} onSelect={selectLocation} photoTotal={activePhotoSession?.total} photoFrames={photoFrames} photoLoading={photoLoading} photoErrors={photoErrors} photoDisabledMessage={photoDisabledMessage} onPhotoRequest={(placeId, index) => { if (photoKey) void requestPhoto(photoKey, placeId, index); }} onPhotoRetry={(placeId, index) => { if (photoKey) void requestPhoto(photoKey, placeId, index, true); }} /><div className="map-heading"><span className="map-heading-dot" /><span>{trip.city || "Your city"}</span><span className="map-heading-divider" />{tab === "places" ? "All places" : `Day ${day + 1}`}</div>{tab === "itinerary" && (checkedRoute || mapSchedule) && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
       </div>
     </main>
 

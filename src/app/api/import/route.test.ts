@@ -73,7 +73,7 @@ describe("multi-source import API", () => {
     const [url, options] = mocks.fetch.mock.calls[0];
     expect(String(url)).toMatch(/^https:\/\/generativelanguage\.googleapis\.com\//);
     expect(JSON.parse(options.body).contents[0].parts).toContainEqual({ fileData: { fileUri: "https://www.youtube.com/watch?v=abcdefghijk", mimeType: "video/mp4" } });
-    expect(await response.json()).toEqual({ places: [{ ...candidate, date: null, time: null, duration: null, sourceUrl: "https://www.youtube.com/watch?v=abcdefghijk" }] });
+    expect(await response.json()).toEqual({ places: [{ ...candidate, date: null, time: null, duration: null, plannedTime: null, sourceUrl: "https://www.youtube.com/watch?v=abcdefghijk" }] });
     expect(mocks.reserveUsage).toHaveBeenCalledWith("owner@example.com", 3, expect.any(String));
   });
   it("keeps web itinerary bookings and adds their source link", async () => {

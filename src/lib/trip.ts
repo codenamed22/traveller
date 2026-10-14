@@ -13,6 +13,10 @@ export const planningPreferencesSchema = z.object({
 }).strict();
 export type PlanningPreferences = z.infer<typeof planningPreferencesSchema>;
 const defaultPlanningPreferences = planningPreferencesSchema.parse({});
+export const visitSlotSchema = z.enum(["breakfast", "morning", "lunch", "afternoon", "dinner", "evening", "any"]);
+export type VisitSlot = z.infer<typeof visitSlotSchema>;
+export const visitKindSchema = z.enum(["meal", "snack", "coffee", "sight", "walk", "activity", "nightlife"]);
+export type VisitKind = z.infer<typeof visitKindSchema>;
 export const sourceUrlSchema = z.url().max(3000).refine((value) => {
   try {
     const url = new URL(value);
@@ -34,6 +38,17 @@ export const stopSchema = z.object({
   mode: modeSchema,
   source: z.string().max(1000),
   sourceUrl: sourceUrlSchema.optional(),
+  kind: visitKindSchema.optional(),
+  slot: visitSlotSchema.optional(),
+  plannedTime: timeSchema.optional(),
+  alternativeGroup: z.string().trim().min(1).max(64).nullable().optional(),
+  preferredTimeWindow: z.object({
+    start: timeSchema,
+    end: timeSchema,
+    sources: z.array(sourceUrlSchema).min(1).max(5),
+  }).strict().superRefine((window, context) => {
+    if (window.end <= window.start) context.addIssue({ code: "custom", message: "A preferred time window must end after it starts.", path: ["end"] });
+  }).optional(),
 }).strict().superRefine((stop, context) => {
   if (stop.fixedTime && stop.day === null) {
     context.addIssue({ code: "custom", message: "Assign a day to a fixed booking.", path: ["day"] });
@@ -127,7 +142,9 @@ export function assumedGroupEdge(trip: Trip, day: number, from: string, to: stri
   return { day, from, to, mode: "TRANSIT", minutes: group.assumedTravelMinutes!, meters: 0, assumed: true };
 }
 export type TravelMode = "WALK" | "TRANSIT";
-export type Place = { id: string; name: string; address: string; location: { lat: number; lng: number }; timeZone?: string };
+export type OpeningPoint = { day: number; hour: number; minute: number };
+export type OpeningPeriod = { open: OpeningPoint; close?: OpeningPoint };
+export type Place = { id: string; name: string; address: string; location: { lat: number; lng: number }; timeZone?: string; primaryType?: string; types?: string[]; hours?: OpeningPeriod[] };
 
 export type DayTripSuggestion = { name: string; stopIds: string[]; distanceKm: number; from: "hotel" | "places" };
 
@@ -199,10 +216,14 @@ export const scheduleSchema = z.object({
   generatedAt: z.iso.datetime({ offset: true }),
   optimization: z.object({ weightedDurationLoss: z.number().min(0), durationOptimal: z.boolean(), optionalOptimal: z.boolean(), travelOptimal: z.boolean() }).strict().optional(),
 }).strict();
+const openingPointSchema = z.object({ day: z.number().int().min(0).max(6), hour: z.number().int().min(0).max(24), minute: z.number().int().min(0).max(59) }).strict();
 export const placeSchema = z.object({
   id: z.string().max(300), name: z.string().max(500), address: z.string().max(2000),
   location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict(),
   timeZone: z.string().max(100).optional(),
+  primaryType: z.string().max(100).optional(),
+  types: z.array(z.string().max(100)).max(50).optional(),
+  hours: z.array(z.object({ open: openingPointSchema, close: openingPointSchema.optional() }).strict()).max(50).optional(),
 }).strict();
 export const savedPlanSchema = z.object({
   days: z.array(z.object({ day: z.number().int().min(0).max(6), stopIds: z.array(z.uuid()).max(maxStopsPerCity) }).strict()).max(7),
@@ -222,6 +243,16 @@ export type SavedPlan = z.infer<typeof savedPlanSchema>;
 export type PlanResult = { status?: "verified"; schedule: Schedule; places: Record<string, Place>; verified: boolean };
 export const planningFailureCodeSchema = z.enum(["hard-input-conflict", "sampled-model-conflict", "missing-data", "search-incomplete", "provider-error", "budget-exhausted", "verification-failed"]);
 export type PlanningFailureCode = z.infer<typeof planningFailureCodeSchema>;
+// A one-click change that resolves a planning failure for one visit; never touches bookings.
+export const planningFixSchema = z.object({ stopId: z.string(), stopName: z.string(), issue: z.string(), action: z.enum(["optimize-day", "make-optional"]) });
+export type PlanningFix = z.infer<typeof planningFixSchema>;
+
+export function applyPlanningFixes(trip: Trip, fixes: PlanningFix[]): Trip {
+  return { ...trip, stops: trip.stops.map((stop) => {
+    const fix = stop.fixedTime ? undefined : fixes.find((candidate) => candidate.stopId === stop.id);
+    return fix?.action === "optimize-day" ? { ...stop, day: null } : fix?.action === "make-optional" ? { ...stop, optional: true } : stop;
+  }) };
+}
 export const provisionalPlanSchema = z.object({
   status: z.literal("provisional"),
   verified: z.literal(false),
@@ -317,6 +348,12 @@ export function tripDate(trip: Trip, day: number) {
 
 export function instantAt(trip: Trip, day: number, time: string) {
   return Temporal.ZonedDateTime.from(`${tripDate(trip, day)}T${time}[${trip.timeZone}]`, { disambiguation: "reject" }).toInstant();
+}
+
+// "Sightseeing ends" bounds the last visit; the trip back to the hotel may follow, up to this many minutes later.
+export const hotelReturnAllowance = 120;
+export function returnDeadline(trip: Trip, day: number) {
+  return minuteAt(trip, day, trip.dailyEnd) + hotelReturnAllowance;
 }
 
 export function minuteAt(trip: Trip, day: number, time: string) {
