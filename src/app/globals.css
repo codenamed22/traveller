@@ -74,6 +74,9 @@ input[type="date"], input[type="time"] { color-scheme: light; }
 .day-tabs button[aria-pressed="true"] { border-bottom-color: var(--green); color: var(--green); }
 .day-tabs button span { font-size: 13px; font-weight: 500; }
 .day-tabs button small { font-size: 11px; color: var(--muted); }
+.day-tabs button.add-day { min-width: 0; color: var(--muted); }
+.day-tabs button.add-day span { display: inline-flex; align-items: center; gap: 5px; }
+.day-tabs button.add-day:hover:not(:disabled) { color: var(--green); }
 .toolbar-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .quiet { color: var(--muted); font-size: 12px; }
 .workspace { display: grid; grid-template-columns: minmax(355px, 430px) minmax(0, 1fr); height: calc(100dvh - 338px); min-height: 570px; }
@@ -377,6 +380,9 @@ blockquote { margin: 0; padding: 7px 11px; border-left: 2px solid #d6dece; backg
 	.day-tabs button { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; padding: 9px 11px; min-width: 67px; }
 	.day-tabs button:first-child { padding-left: 3px; }
 	.day-tabs button span { font-size: 12px; }
+	.day-tabs button.add-day { min-width: 0; }
+	/* An empty second line, like the date under each day, keeps "Add day" level with "Day N". */
+	.day-tabs button.add-day::after { content: "\00a0"; font-size: 10px; }
 	.day-tabs button small { font-size: 10px; }
 	.mobile-tabs { display: flex; margin: 0; }
 	.mobile-tabs button { padding: 7px; gap: 4px; font-size: 11px; }
@@ -555,3 +561,10 @@ body.trip-mode-open { overflow: hidden; }
 	body.assistant-open { overflow: hidden; }
 	.assistant-tab { top: 38%; }
 }
+
+/* Import review: arrival and departure found in the itinerary */
+.review-transfers { display: grid; gap: 10px; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.review-transfer { display: grid; gap: 4px; }
+.review-transfer .checkbox { align-items: center; }
+.review-transfer .checkbox span { overflow-wrap: anywhere; }
+.review-transfer p, .review-transfer blockquote { margin: 0 0 0 26px; }

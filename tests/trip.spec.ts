@@ -1592,3 +1592,35 @@ test("trip mode opens today's day full screen, records progress and closes with 
   const backup = JSON.parse(await readFile(output, "utf8"));
   expect(backup.journey.execution[trip.id]["2026-10-13"].completed).toEqual([{ stopId: coffee.id, start: 555, end: 600 }]);
 });
+
+test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New trip", exact: true }).click();
+  const setup = page.getByRole("dialog", { name: "New trip" });
+  await setup.getByLabel("Departure date").fill("2026-12-24");
+  for (const city of ["Amsterdam", "Brussels", "Paris"]) await setup.getByRole("button", { name: city, exact: true }).click();
+  await setup.getByLabel("Days in city 1").fill("4");
+  await setup.getByLabel("Days in city 2").fill("3");
+  await expect(setup.getByLabel("Arrival in city 2")).toHaveValue("2026-12-28");
+  await expect(setup.getByLabel("Arrival in city 3")).toHaveValue("2026-12-31");
+  await setup.getByRole("button", { name: "Create trip" }).click();
+  await page.locator(".city-tabs").getByRole("button", { name: /Brussels/ }).click();
+  const tabs = page.locator(".day-tabs");
+  await expect(tabs.getByRole("button", { name: /^Day/ })).toHaveCount(3);
+  // Leaving Brussels on the morning Paris starts.
+  await tabs.getByRole("button", { name: "Add a day" }).click();
+  await expect(tabs.getByRole("button", { name: /Day 4/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(tabs.getByRole("button", { name: /Day 4/ })).toContainText("Dec 31");
+  await expect(page.getByRole("combobox", { name: "Days", exact: true })).toHaveValue("4");
+  await expect(page.getByText("Day 4 is Dec 31, the day you move to Paris.")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("add-day.png") });
+  await tabs.getByRole("button", { name: "Add a day" }).click();
+  await expect(page.getByText("Paris starts Dec 31, so Brussels can't end later. Move Paris later first.")).toBeVisible();
+  await expect(tabs.getByRole("button", { name: /^Day/ })).toHaveCount(4);
+  await expect(page.getByRole("combobox", { name: "Days", exact: true })).toHaveValue("4");
+  // The last city can grow to the 7-day limit.
+  await page.locator(".city-tabs").getByRole("button", { name: /Paris/ }).click();
+  while (await tabs.getByRole("button", { name: /^Day/ }).count() < 7) await tabs.getByRole("button", { name: "Add a day" }).click();
+  await expect(tabs.getByRole("button", { name: "Add a day" })).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

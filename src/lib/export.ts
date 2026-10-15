@@ -22,14 +22,19 @@ function mapsUrl(place: Place | undefined, fallback: string) {
   return url.toString();
 }
 
-function travel(edge: TravelEdge, places: Record<string, Place>): ExportTravel {
+// Google gives timetable times as UTC instants ("2026-12-29T11:58:00Z"); travellers read the city's clock (12:58).
+function localClock(trip: Trip, instant: string) {
+  try { return Temporal.Instant.from(instant).toZonedDateTimeISO(trip.timeZone).toPlainTime().toString({ smallestUnit: "minute" }); } catch { return null; }
+}
+
+function travel(trip: Trip, edge: TravelEdge, places: Record<string, Place>): ExportTravel {
   const url = new URL("https://www.google.com/maps/dir/");
   const [origin, destination] = [places[edge.from], places[edge.to]];
   url.searchParams.set("api", "1"); url.searchParams.set("origin", origin?.name ?? edge.from); url.searchParams.set("destination", destination?.name ?? edge.to);
   if (origin?.id) url.searchParams.set("origin_place_id", origin.id);
   if (destination?.id) url.searchParams.set("destination_place_id", destination.id);
   url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
-  const lines = (edge.steps ?? []).filter((step) => step.line).map((step) => `${step.line}${step.from && step.to ? ` ${step.from} → ${step.to}` : ""}${step.departure ? ` (${step.departure})` : ""}`);
+  const lines = (edge.steps ?? []).filter((step) => step.line).map((step) => `${step.line}${step.from && step.to ? ` ${step.from} → ${step.to}` : ""}${step.departure && localClock(trip, step.departure) ? ` (${localClock(trip, step.departure)})` : ""}`);
   return { mode: edge.mode === "WALK" ? "Walk" : "Transit", minutes: Math.round(edge.minutes), km: Math.round(edge.meters / 100) / 10, lines, ...(edge.fare ? { fare: edge.fare } : {}), directionsUrl: url.toString(), estimated: Boolean(edge.assumed || edge.timetableDate) };
 }
 
@@ -87,7 +92,7 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
             stopId: visit.stopId, start: formatMinute(trip, day.day, visit.start), end: formatMinute(trip, day.day, visit.end),
             startInstant: instantForMinute(trip, day.day, visit.start).toString(), endInstant: instantForMinute(trip, day.day, visit.end).toString(),
             minutes: Math.round(visit.end - visit.start), name: name(visit.stopId), address: places[visit.stopId]?.address ?? "",
-            booked: Boolean(stop?.fixedTime), optional: Boolean(stop?.optional), travel: travel(visit.leg, places), mapsUrl: mapsUrl(places[visit.stopId], name(visit.stopId)),
+            booked: Boolean(stop?.fixedTime), optional: Boolean(stop?.optional), travel: travel(trip, visit.leg, places), mapsUrl: mapsUrl(places[visit.stopId], name(visit.stopId)),
             note: exportNote(stop?.source ?? ""), ...(stop?.sourceUrl ? { sourceUrl: stop.sourceUrl } : {}),
             ...(alternatives(visit.stopId).length ? { alternativeTo: alternatives(visit.stopId) } : {}),
           };
@@ -104,8 +109,8 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
           leave: formatMinute(trip, day.day, first.start - first.leg.minutes - (firstStop?.fixedTime ? firstStop.buffer : 0)),
           // A direct departure day ends at the airport or station rather than the hotel.
           ...(day.returnLeg ? endpointKey(trip, day.day, "hotel", "to") === "departure"
-            ? { back: { time: formatMinute(trip, day.day, last.end + day.returnLeg.minutes), travel: travel(day.returnLeg, { ...places, hotel: places.departure ?? places.hotel }), to: trip.departure!.place || places.departure?.name || "the station", address: places.departure?.address ?? "" } }
-            : { back: { time: formatMinute(trip, day.day, last.end + day.returnLeg.minutes), travel: travel(day.returnLeg, places) } } : {}),
+            ? { back: { time: formatMinute(trip, day.day, last.end + day.returnLeg.minutes), travel: travel(trip, day.returnLeg, { ...places, hotel: places.departure ?? places.hotel }), to: trip.departure!.place || places.departure?.name || "the station", address: places.departure?.address ?? "" } }
+            : { back: { time: formatMinute(trip, day.day, last.end + day.returnLeg.minutes), travel: travel(trip, day.returnLeg, places) } } : {}),
         };
       });
       const planned = new Set(snapshot.schedule.days.flatMap((day) => day.visits.map((visit) => visit.stopId)));

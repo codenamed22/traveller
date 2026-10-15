@@ -193,8 +193,9 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
     if (delta < -7 * 86_400_000 || delta > 100 * 86_400_000) return null;
   }
   const request = async (date?: string) => {
+    // Without a language Google picks one from where the request comes from; directions came back in German.
     const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", includeDetails ? "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare" : "routes.duration,routes.distanceMeters", {
-      origin: { placeId: places[from].id }, destination: { placeId: places[endpointKey(trip, day, to, "to")].id }, travelMode: mode,
+      origin: { placeId: places[from].id }, destination: { placeId: places[endpointKey(trip, day, to, "to")].id }, travelMode: mode, languageCode: "en",
       ...(mode === "TRANSIT" ? { departureTime: departureInstant(trip, day, departure, date).toString() } : {}),
       ...(mode === "TRANSIT" && planningPreferences(trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(trip).transitPreference } } : {}),
     }, budget.requestSignal());
@@ -238,7 +239,7 @@ export async function freshRouteOptions(request: RecoveryRequest, from: string, 
   const rows = await Promise.all(modes.map(async (mode) => {
     budget.consume("routes", 1);
     const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare", {
-      origin: recoveryWaypoint(request, from), destination: recoveryWaypoint(request, to, "to"), travelMode: mode, computeAlternativeRoutes: true,
+      origin: recoveryWaypoint(request, from), destination: recoveryWaypoint(request, to, "to"), travelMode: mode, languageCode: "en", computeAlternativeRoutes: true,
       ...(mode === "TRANSIT" ? { departureTime: instantForMinute(request.trip, request.day, departure).toString(), ...(planningPreferences(request.trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(request.trip).transitPreference } } : {}) } : {}),
     }, budget.requestSignal());
     return routeResponse.parse(body).routes.map((route): TravelEdge => ({

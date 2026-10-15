@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import loadHighs from "highs";
 import { allowsTravelEdge, allowsVisitPair, bookingConflicts, dayEnd, dayStart, directDeparture, endpointKey, formatMinute, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, tripDate, tripForDay, tripSchema, type Place, type PlanningFailureCode, type PlanningFix, type Schedule, type SqueezeIn, type TravelEdge, type Trip } from "./trip";
 import { splitVisits, validateSchedule, type ScheduleBoundary } from "./schedule-validation";
-import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, openingIntervals, relaxAlternatives, timeTarget, type AlternativeGroup, type CapCategory } from "./visit-slots";
+import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, openingIntervals, relaxAlternatives, timeTarget, visitTiming, type AlternativeGroup, type CapCategory } from "./visit-slots";
 
 export { bookingConflicts } from "./trip";
 
@@ -43,6 +43,11 @@ const capPenalty = 200_000;
 // A second member of a "this or that" group is worth this many travel minutes per priority point: kept when nearby,
 // dropped when it would need a detour. The first member is always required by the group row.
 const alternativeBonus = 45;
+// Except food and drink: "Wide Awake or MOK" means one coffee, so a second café or restaurant is never worth keeping.
+function extraAlternativeBonus(trip: Pick<Trip, "stops">, stop: Trip["stops"][number], place?: Place) {
+  const kind = visitTiming(trip, stop, place).kind;
+  return kind === "coffee" || kind === "meal" || kind === "snack" ? 0 : alternativeBonus * stop.priority;
+}
 // Each kilometre on the road costs this many travel minutes in the objective (never in timing). Sampled transit
 // minutes swing with the departure time; distance does not, so near-ties go to the compact route instead of a zig-zag.
 const distanceWeight = 1.5;
@@ -112,7 +117,7 @@ function timingWarnings(trip: Trip, schedule: Schedule, groups: AlternativeGroup
   for (const group of groups) {
     const kept = group.stopIds.filter((id) => visited.has(id));
     const dropped = group.stopIds.filter((id) => !visited.has(id));
-    if (kept.length && dropped.length) warnings.push(`Kept ${kept.map(name).join(", ")} and left out ${dropped.map(name).join(", ")}: they were listed as alternatives and did not all fit.`);
+    if (kept.length && dropped.length) warnings.push(`Kept ${kept.map(name).join(", ")} and left out ${dropped.map(name).join(", ")}: they were listed as alternatives${dropped.every((id) => !extraAlternativeBonus(trip, trip.stops.find((stop) => stop.id === id)!, places?.[id])) ? "" : " and did not all fit"}.`);
   }
   for (const day of schedule.days) {
     const label = `Day ${day.day + 1}`;
@@ -590,7 +595,8 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
   }
   const groups = trip.dayGroups ?? [];
   const bonusGroups = alternatives.filter((group) => group.required);
-  const bonus = trip.stops.map((stop) => !stop.fixedTime && bonusGroups.some((group) => group.stopIds.includes(stop.id)) ? alternativeBonus * stop.priority : 0);
+  const extra = trip.stops.map((stop) => !stop.fixedTime && bonusGroups.some((group) => group.stopIds.includes(stop.id)));
+  const bonus = trip.stops.map((stop, index) => extra[index] ? extraAlternativeBonus(trip, stop, places?.[stop.id]) : 0);
   const startVisits = new Map(start?.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, visit] as const)) ?? []);
   let best: { schedule: Schedule; value: number; cost: number } | undefined;
   for (let variant = 0; variant < (start ? 1 : trip.days * 2) && performance.now() < deadline; variant++) {
@@ -745,7 +751,7 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
     const schedule: Schedule = { days: days as Schedule["days"], omitted: trip.stops.filter((_, index) => !included.has(index)).map((stop) => stop.id), warnings: [], generatedAt: new Date().toISOString() };
     if (validateSchedule(trip, schedule, boundary).length) continue;
     // Prefer more optional value, then the lowest travel-and-timing cost.
-    const value = [...included].reduce((total, index) => total + (trip.stops[index].optional && !bonus[index] ? trip.stops[index].priority : 0), 0);
+    const value = [...included].reduce((total, index) => total + (trip.stops[index].optional && !extra[index] ? trip.stops[index].priority : 0), 0);
     const cost = schedule.days.reduce((total, day) => total + routeMinutes(day), 0) - [...included].reduce((total, index) => total + bonus[index], 0);
     if (!best || value > best.value || (value === best.value && cost < best.cost - 0.01)) best = { schedule, value, cost };
 
@@ -780,7 +786,7 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
           }
           // Drop an extra alternative when its detour costs more than it is worth and another member stays planned.
           for (const index of [...orders[day]]) {
-            if (!bonus[index]) continue;
+            if (!extra[index]) continue;
             const others = bonusGroups.filter((group) => group.stopIds.includes(trip.stops[index].id)).every((group) => orders.flat().some((other) => other !== index && group.stopIds.includes(trip.stops[other].id)));
             const remaining = orders[day].filter((other) => other !== index);
             const value = others ? cost(day, remaining) : Infinity;
@@ -833,7 +839,7 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
       const gap = new Map<string, number>();
       for (const edge of edges.values()) gap.set(`${edge.from}|${edge.to}`, Math.min(gap.get(`${edge.from}|${edge.to}`) ?? Infinity, edge.minutes));
       const near = (from: number, to: number) => Math.min(gap.get(`${trip.stops[from].id}|${trip.stops[to].id}`) ?? Infinity, gap.get(`${trip.stops[to].id}|${trip.stops[from].id}`) ?? Infinity);
-      const optionalValue = () => orders.flat().reduce((total, index) => total + (trip.stops[index].optional && !bonus[index] ? trip.stops[index].priority : 0), 0);
+      const optionalValue = () => orders.flat().reduce((total, index) => total + (trip.stops[index].optional && !extra[index] ? trip.stops[index].priority : 0), 0);
       const total = () => orders.reduce((sum, order, day) => sum + dayCost(day, order), 0) - orders.flat().reduce((sum, index) => sum + bonus[index], 0);
       const groupsKept = () => bonusGroups.every((group) => orders.flat().some((index) => group.stopIds.includes(trip.stops[index].id)));
       let seed = 2_147_483_647 % (trip.stops.length * 7919 + 1) || 1;
@@ -848,7 +854,7 @@ function constructionHint(trip: Trip, travel: TravelEdge[], deadline: number, bo
         const day = balanced ? orders.findIndex((order) => order.includes(center)) : undefined;
         const removed = [center, ...placed.filter((index) => index !== center && (day === undefined || orders[day].includes(index))).sort((left, right) => near(center, left) - near(center, right)).slice(0, 1 + Math.floor(random() * 3))];
         orders = orders.map((order) => order.filter((index) => !removed.includes(index)));
-        const required = removed.filter((index) => !trip.stops[index].optional && !bonus[index]);
+        const required = removed.filter((index) => !trip.stops[index].optional && !extra[index]);
         const restored = insert(required, true, day) && bonusGroups.filter((group) => !orders.flat().some((index) => group.stopIds.includes(trip.stops[index].id))).every((group) => insert(removed.filter((index) => group.stopIds.includes(trip.stops[index].id)), true, day, true));
         if (restored && groupsKept()) {
           insert(removed.filter((index) => !orders.flat().includes(index)).sort(() => random() - 0.5), false, day);
@@ -1069,7 +1075,7 @@ export async function solveTrip(input: Trip, sampled: TravelEdge[], seconds = 5,
         const hours = stop.fixedTime ? null : openingIntervals(trip, day, places?.[stop.id]);
         const allowed = stopAllowedOnDay(trip, stop, day) && hours?.length !== 0;
         const extra = !stop.fixedTime && alternatives.some((group) => group.required && group.stopIds.includes(stop.id));
-        const assigned = addVariable(0, allowed ? 1 : 0, extra ? -alternativeBonus * stop.priority : !coupled && stop.optional ? -100_000 * stop.priority : 0, true);
+        const assigned = addVariable(0, allowed ? 1 : 0, extra ? -extraAlternativeBonus(trip, stop, places?.[stop.id]) : !coupled && stop.optional ? -100_000 * stop.priority : 0, true);
         if (stop.optional && !extra) optionalUtility.push([assigned, -stop.priority]);
         dayAssignments.push(assigned);
         assignments.set(stop.id, [...(assignments.get(stop.id) ?? []), assigned]);

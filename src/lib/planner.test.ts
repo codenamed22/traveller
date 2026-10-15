@@ -124,14 +124,23 @@ describe("schedule optimizer", () => {
     const moved = await solveTrip({ ...trip, stops: trip.stops.map((stop) => stop.id === taco.id ? { ...stop, day: null } : stop) }, routes(trip, 40), 2, { places });
     expect(moved.days[1].visits.map((visit) => visit.stopId)).toEqual([taco.id]);
   });
-  it("keeps both alternatives when they fit and drops one when they do not", async () => {
+  it("keeps both sight alternatives when they fit, but only one of two cafés, and one when time is tight", async () => {
+    const view = "Viewpoint: Kerry Park or Gas Works Park.";
+    const sights = [{ ...newStop("Kerry Park"), source: view, kind: "sight" as const }, { ...newStop("Gas Works Park"), source: view, kind: "sight" as const }];
+    const viewpoints = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "18:00", stops: sights };
+    const bothSights = await solveTrip(viewpoints, routes(viewpoints), 2);
+    expect(validateSchedule(viewpoints, bothSights)).toEqual([]);
+    expect(bothSights.omitted).toEqual([]);
+
     const note = "Coffee: Filter coffee at Five Ways or Rum Baba (€6).";
     const fiveWays = { ...newStop("Five Ways"), source: note };
     const rumBaba = { ...newStop("Rum Baba"), source: note };
     const trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "18:00", stops: [fiveWays, rumBaba] };
-    const both = await solveTrip(trip, routes(trip), 2);
-    expect(validateSchedule(trip, both)).toEqual([]);
-    expect(both.omitted).toEqual([]);
+    // "Five Ways or Rum Baba" is one coffee, even with time for both.
+    const oneCoffee = await solveTrip(trip, routes(trip, 5), 2);
+    expect(validateSchedule(trip, oneCoffee)).toEqual([]);
+    expect(oneCoffee.omitted).toHaveLength(1);
+    expect(oneCoffee.warnings.join(" ")).toMatch(/listed as alternatives\./);
 
     const tight = { ...trip, dailyEnd: "10:20" };
     const one = await solveTrip(tight, routes(tight), 2);
@@ -197,9 +206,9 @@ describe("schedule optimizer", () => {
     expect(schedule.days.reduce((total, day) => total + day.visits.reduce((sum, visit) => sum + visit.leg.minutes, day.returnLeg?.minutes ?? 0), 0)).toBeLessThan(555);
   }, 30_000);
   it("drops a second alternative that needs a detour but keeps one that is next door", async () => {
-    const note = "Coffee: Filter coffee at Five Ways or Rum Baba (€6).";
-    const fiveWays = { ...newStop("Five Ways"), source: note };
-    const rumBaba = { ...newStop("Rum Baba"), source: note };
+    const note = "Viewpoint: Five Ways or Rum Baba.";
+    const fiveWays = { ...newStop("Five Ways"), source: note, kind: "sight" as const };
+    const rumBaba = { ...newStop("Rum Baba"), source: note, kind: "sight" as const };
     const trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "18:00", stops: [fiveWays, rumBaba] };
     const far = routes(trip).map((edge) => edge.from === rumBaba.id || edge.to === rumBaba.id ? { ...edge, minutes: 60 } : edge);
     const detour = await solveTrip(trip, far, 2);

@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { newStop, sourceUrlSchema, stopSchema, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
+import { maxStopsPerCity, newStop, sourceUrlSchema, stopSchema, timeSchema, transferSchema, transportModeSchema, tripDate, visitKindSchema, visitSlotSchema, type DayGroup, type Stop, type Transfer, type Trip } from "./trip";
 import { duplicateNames } from "./duplicates";
 
 export const extractionProviderSchema = z.object({ provider: z.enum(["gemini", "openrouter"]), model: z.string().min(1).max(200) }).strict();
@@ -18,10 +18,68 @@ export const candidateSchema = z.object({
   slot: visitSlotSchema.nullish(),
   plannedTime: timeSchema.nullish(),
   alternativeGroup: z.string().trim().min(1).max(40).nullish(),
+  // The town visited on a day trip from the city, for places outside it.
+  dayTrip: z.string().trim().min(1).max(100).nullish(),
 }).strict();
-export const extractionSchema = z.object({ places: z.array(candidateSchema).max(25) }).strict();
-export const importResultSchema = z.object({ places: z.array(candidateSchema.extend({ sourceUrl: sourceUrlSchema.optional() })).max(25) }).strict();
+// How the itinerary says you reach the city and leave it: the train, flight or coach with its local time, the station or
+// airport and the booking number.
+export const transferCandidateSchema = z.object({
+  mode: transportModeSchema,
+  date: z.iso.date().nullable(),
+  time: timeSchema,
+  place: z.string().max(200),
+  reference: z.string().max(100).nullable(),
+  source: z.string().max(1000),
+}).strict();
+export type TransferCandidate = z.infer<typeof transferCandidateSchema>;
+const transfersShape = { arrival: transferCandidateSchema.nullish(), departure: transferCandidateSchema.nullish() };
+// One import can fill a whole city.
+export const maxImportPlaces = maxStopsPerCity;
+// What the model is asked to return. The place count is capped after extraction instead: Gemini rejects this schema as
+// "an invalid argument" once the array also carries maxItems.
+// Each place carries one time and whether it is booked: small models reliably fill one time field, but not a choice
+// between a booking time and a planned time.
+export const extractedPlaceSchema = candidateSchema.omit({ plannedTime: true }).extend({ booked: z.boolean() });
+export const extractionSchema = z.object({ places: z.array(extractedPlaceSchema), ...transfersShape }).strict();
+
+// An itinerary's times are where it slots each place; only a booked one becomes a fixed booking, and one of several
+// alternatives never does.
+export function extractedCandidate({ booked, time, dayTrip, ...place }: z.infer<typeof extractedPlaceSchema>, city: string): ImportCandidate {
+  const booking = booked && Boolean(time) && !place.alternativeGroup;
+  const home = city.split(",")[0].trim().toLowerCase();
+  const town = dayTrip?.trim() && dayTrip.trim().toLowerCase() !== home ? dayTrip.trim() : null;
+  return { ...place, time: booking ? time : null, plannedTime: booking ? null : time, dayTrip: town };
+}
+export const importResultSchema = z.object({ places: z.array(candidateSchema.extend({ sourceUrl: sourceUrlSchema.optional() })).max(maxImportPlaces), ...transfersShape,
+  // Places found beyond the per-import limit, which the traveller imports separately.
+  leftOut: z.number().int().min(1).optional(),
+}).strict();
 export type ImportCandidate = z.infer<typeof importResultSchema>["places"][number];
+export type ImportResult = z.infer<typeof importResultSchema>;
+
+const transferLabel = (transfer: Pick<Transfer, "mode" | "time" | "place" | "reference">) =>
+  [transfer.reference || { FLIGHT: "Flight", TRAIN: "Train", BUS: "Coach", CAR: "Car", OTHER: "Transfer" }[transfer.mode], transfer.time, transfer.place].filter(Boolean).join(" · ");
+
+// What an extracted arrival or departure would set on this city. It only fits the city's first day (arrival) or last day
+// (departure); a different date usually means the city's dates need changing first, so it is not offered.
+export function transferProposal(trip: Trip, kind: "arrival" | "departure", candidate: TransferCandidate) {
+  const expected = tripDate(trip, kind === "arrival" ? 0 : trip.days - 1);
+  const current = trip[kind];
+  const place = candidate.place.trim();
+  // Keep a station already confirmed on the map when the itinerary names the same one.
+  const confirmed = current?.placeId && current.place.trim().toLowerCase() === place.toLowerCase() ? current.placeId : undefined;
+  const transfer: Transfer = transferSchema.parse({
+    mode: candidate.mode, time: candidate.time, place,
+    ...(candidate.reference?.trim() ? { reference: candidate.reference.trim() } : {}), ...(confirmed ? { placeId: confirmed } : {}),
+  });
+  const label = transferLabel(transfer);
+  const day = (date: string) => Temporal.PlainDate.from(date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  if (candidate.date && candidate.date !== expected) {
+    return { transfer, label, blocked: `${kind === "arrival" ? "Arrives" : "Leaves"} ${day(candidate.date)}, but ${trip.city || "this city"} ${kind === "arrival" ? "starts" : "ends"} ${day(expected)}. Change the city's dates to use it.` };
+  }
+  const same = current && current.mode === transfer.mode && current.time === transfer.time && current.place.trim() === transfer.place && (current.reference ?? "") === (transfer.reference ?? "");
+  return { transfer, label, same: Boolean(same), replaces: current && !same ? transferLabel(current) : undefined };
+}
 
 export function youtubeUrl(value: string): string | null {
   const url = new URL(value);
@@ -105,7 +163,7 @@ export function mergeDuplicateDetails(entries: { place: ImportCandidate; include
 }
 
 export function manualCandidates(text: string): ImportCandidate[] {
-  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 25).map((name) => ({ name: name.replace(/^[-*]\s+/, "").slice(0, 200), date: null, time: null, duration: null, source: name.slice(0, 1000), warning: "Confirm any dates or booked times manually." }));
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, maxImportPlaces).map((name) => ({ name: name.replace(/^[-*]\s+/, "").slice(0, 200), date: null, time: null, duration: null, source: name.slice(0, 1000), warning: "Confirm any dates or booked times manually." }));
 }
 
 export function candidatesToStops(candidates: ImportCandidate[], trip: Trip, options: { ideas?: boolean } = {}): Stop[] {
@@ -136,4 +194,45 @@ export function mapsQuery(url: URL): string | null {
   if (query) return query;
   if (destination) return [url.searchParams.get("origin"), ...((url.searchParams.get("waypoints") ?? "").split("|")), destination].filter(Boolean).join("\n");
   throw new Error("This Google Maps link does not expose place names. Paste the place names instead.");
+}
+export type ImportedDayTrip = { name: string; indexes: number[]; day: number | null; blocked?: string };
+
+// Places the itinerary visits outside the city, grouped by town, to become day trips: one outing each, visited back to
+// back on its day. Members dated on different days can't share one outing.
+export function importDayTrips(candidates: ImportCandidate[], trip: Trip): ImportedDayTrip[] {
+  const trips = new Map<string, ImportedDayTrip>();
+  candidates.forEach((candidate, index) => {
+    if (!candidate.dayTrip) return;
+    const key = candidate.dayTrip.toLowerCase();
+    const entry = trips.get(key) ?? { name: candidate.dayTrip, indexes: [], day: null };
+    entry.indexes.push(index);
+    trips.set(key, entry);
+  });
+  return [...trips.values()].map((entry) => {
+    const days = [...new Set(entry.indexes.flatMap((index) => candidates[index].date ? [Temporal.PlainDate.from(trip.startDate).until(Temporal.PlainDate.from(candidates[index].date!)).days] : []))];
+    if (days.length > 1) return { ...entry, blocked: `${entry.name} places fall on different days. Set up this day trip in Plan my days instead.` };
+    return { ...entry, day: days.length === 1 && days[0] >= 0 && days[0] < trip.days ? days[0] : null };
+  });
+}
+
+export function dayTripGroup(entry: ImportedDayTrip, stopIds: string[], trip: Trip): DayGroup {
+  return { id: crypto.randomUUID(), name: entry.name.slice(0, 100), stopIds, allowedDays: entry.day === null ? Array.from({ length: trip.days }, (_, day) => day) : [entry.day], exclusive: false };
+}
+
+const clock = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+const minutesOf = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+
+// The hours an itinerary keeps, from its first scheduled start to its last scheduled end, when they reach beyond the
+// city's sightseeing day. Rounded out to the quarter hour.
+export function itineraryHours(candidates: ImportCandidate[], trip: Trip): { dailyStart: string; dailyEnd: string } | null {
+  const spans = candidates.flatMap((candidate) => {
+    const start = candidate.time ?? candidate.plannedTime;
+    return start ? [[minutesOf(start), minutesOf(start) + (candidate.duration ?? 45)]] : [];
+  });
+  if (!spans.length) return null;
+  const earliest = Math.floor(Math.min(...spans.map(([start]) => start)) / 15) * 15;
+  const latest = Math.min(23 * 60 + 45, Math.ceil(Math.max(...spans.map(([, end]) => end)) / 15) * 15);
+  const dailyStart = clock(Math.min(earliest, minutesOf(trip.dailyStart)));
+  const dailyEnd = clock(Math.max(latest, minutesOf(trip.dailyEnd)));
+  return dailyStart === trip.dailyStart && dailyEnd === trip.dailyEnd ? null : { dailyStart, dailyEnd };
 }

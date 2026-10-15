@@ -10,7 +10,7 @@ function journey(): { journey: Journey; trip: Trip } {
   const cruise = { ...newStop("Light Festival Cruise"), placeId: "g-cruise", day: 0, fixedTime: "18:15", duration: 75, buffer: 15 };
   const sango = { ...newStop("Sango Coffee"), placeId: "g-sango", duration: 45, source: 'Coffee: pour-over, "best" in town <3 & cheap; €6', sourceUrl: "https://example.com/sango" };
   const trip: Trip = { ...newTrip(), title: "Amsterdam", city: "Amsterdam", hotel: "Motel One", hotelPlaceId: "g-hotel", startDate: "2026-12-24", days: 2, timeZone: "Europe/Amsterdam", dailyStart: "09:00", dailyEnd: "21:00", returnToHotel: true, stops: [cruise, sango] };
-  const leg = (from: string, to: string, minutes: number, transit = false): TravelEdge => ({ day: 0, from, to, mode: transit ? "TRANSIT" : "WALK", minutes, meters: 1200, ...(transit ? { steps: [{ instruction: "Tram", mode: "TRANSIT", line: "Tram 5", from: "Centraal", to: "Rokin", departure: "16:02" }] } : {}) });
+  const leg = (from: string, to: string, minutes: number, transit = false): TravelEdge => ({ day: 0, from, to, mode: transit ? "TRANSIT" : "WALK", minutes, meters: 1200, ...(transit ? { steps: [{ instruction: "Tram", mode: "TRANSIT", line: "Tram 5", from: "Centraal", to: "Rokin", departure: "2026-12-24T15:02:00Z" }] } : {}) });
   const start = (time: string) => minuteAt(trip, 0, time);
   const schedule: Schedule = { generatedAt: "2026-10-14T06:00:00Z", warnings: [], omitted: [], days: [
     { day: 0, date: "2026-12-24", visits: [
@@ -35,6 +35,7 @@ describe("itinerary export", () => {
     expect(amsterdam.days[0]).toMatchObject({ label: "Day 1 · Thu 24 Dec", leave: "15:40", back: { time: "19:55" } });
     expect(amsterdam.days[0].visits.map((visit) => [visit.start, visit.end, visit.name, visit.booked])).toEqual([["16:00", "16:45", "Sango Coffee", false], ["18:15", "19:30", "Light Festival Cruise", true]]);
     expect(amsterdam.days[0].visits[0].travel).toMatchObject({ mode: "Transit", minutes: 20, lines: ["Tram 5 Centraal → Rokin (16:02)"] });
+    // Google gives timetable times in UTC; the export shows the city's clock.
     expect(amsterdam.days[0].visits[0].mapsUrl).toContain("query_place_id=g-sango");
     expect(brussels).toMatchObject({ planned: false, days: [], notScheduled: [{ name: "Grand Place" }] });
     const edited = { ...data, cities: [{ ...trip, dailyEnd: "20:00" }, data.cities[1]] };

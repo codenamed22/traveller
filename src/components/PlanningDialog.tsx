@@ -177,7 +177,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
         <div className="planning-section timing-research">
           <h3>Timing guidance <span>{researchIds.length}/5 selected</span></h3>
           {!canResearch && <p className="notice">Visit research is unavailable. Check your sign-in and connections.</p>}
-          <label className="checkbox consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />Send selected place names, original notes and links to Gemini and Google Search. Paid usage and provider retention policies apply.</label>
+          <label className="checkbox consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />Send selected place names, original notes and links to the agent to look up. Charges and retention policies apply.</label>
           <button className="button secondary" disabled={!consent || !researchIds.length} onClick={() => void research()}><Search size={15} />Research timing windows</button>
           {timing && <><p className="quiet">{timing.recommendations.length} grounded suggestions. Apply a flexible range before route planning; bookings always take precedence.</p><details className="research-evidence"><summary>Google Search evidence</summary><p>{timing.research}</p><ul>{timing.sources.map((source, index) => <li key={index}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></details>{timing.searchEntryPoint && <iframe title="Google Search suggestions" className="search-attribution" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={timing.searchEntryPoint} />}</>}
         </div>

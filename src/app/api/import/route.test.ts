@@ -8,7 +8,9 @@ vi.mock("@/auth", () => ({ auth: vi.fn(), allowedEmail: vi.fn(), authConfigured:
 vi.mock("@/lib/server", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/server")>(), requireOwner: mocks.requireOwner, reserveUsage: mocks.reserveUsage }));
 vi.mock("@/lib/safe-fetch", () => ({ fetchPublicText: mocks.fetchPublicText }));
 
-const candidate = { name: "Louvre Museum", date: "2026-10-13", time: "10:30", duration: 90, source: "02:15 - Louvre Museum", warning: "" };
+// What the model returns for a place, and what the API returns for it.
+const extracted = { name: "Louvre Museum", date: "2026-10-13", time: "10:30", duration: 90, source: "02:15 - Louvre Museum", warning: "", booked: true };
+const candidate = { name: "Louvre Museum", date: "2026-10-13", time: "10:30", duration: 90, source: "02:15 - Louvre Museum", warning: "", plannedTime: null, dayTrip: null };
 
 function request(patch: Record<string, unknown> = {}) {
   return new Request("http://localhost/api/import", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({
@@ -28,7 +30,7 @@ beforeEach(() => {
   mocks.reserveUsage.mockResolvedValue(undefined);
   mocks.fetchPublicText.mockResolvedValue("Tuesday 10:30 Louvre Museum, booked for 90 minutes");
   mocks.fetch.mockImplementation(async () => Response.json({
-    candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ places: [candidate] }) }] }, finishReason: "STOP" }],
+    candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ places: [extracted] }) }] }, finishReason: "STOP" }],
     usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 40, totalTokenCount: 90 },
   }));
 });
@@ -39,7 +41,7 @@ describe("multi-source import API", () => {
   it("serializes text and images to OpenRouter only with matching provider consent", async () => {
     vi.stubEnv("OPENROUTER_API_KEY", "test-only-key");
     vi.stubEnv("OPENROUTER_MODEL", "google/gemini-2.5-flash");
-    mocks.fetch.mockResolvedValue(Response.json({ id: "test", object: "chat.completion", created: 1, model: "google/gemini-2.5-flash", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({ places: [candidate] }) }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+    mocks.fetch.mockResolvedValue(Response.json({ id: "test", object: "chat.completion", created: 1, model: "google/gemini-2.5-flash", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({ places: [extracted] }) }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
     const response = await POST(request({ url: undefined, text: "Museum", images: [{ data: "AAAA", mediaType: "image/png" }], provider: { provider: "openrouter", model: "google/gemini-2.5-flash" } }));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ places: [candidate] });
@@ -47,6 +49,60 @@ describe("multi-source import API", () => {
     expect(String(url)).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(JSON.parse(options.body).model).toBe("google/gemini-2.5-flash");
     expect(JSON.parse(options.body).messages[1].content).toContainEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
+  });
+  it("returns arrival and departure from an itinerary, but not from a video", async () => {
+    const departure = { mode: "TRAIN", date: "2026-10-14", time: "10:14", place: "Gare du Nord", reference: "Eurostar 9422", source: "10:14 Eurostar to London" };
+    mocks.fetch.mockImplementation(async () => Response.json({
+      candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ places: [extracted], arrival: null, departure }) }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 40, totalTokenCount: 90 },
+    }));
+    const response = await POST(request({ url: "https://example.com/itinerary" }));
+    expect(await response.json()).toEqual({ places: [{ ...candidate, sourceUrl: "https://example.com/itinerary" }], departure });
+    expect(JSON.stringify(JSON.parse(mocks.fetch.mock.calls[0][1].body))).toContain("never a check-in, boarding or platform time");
+    expect(Object.keys(await (await POST(request())).json())).toEqual(["places"]);
+  });
+  it("turns itinerary times into planned times and tags day-trip towns", async () => {
+    const places = [
+      { ...extracted, name: "Rozenhoedkaai", time: "09:15", booked: false, dayTrip: "Bruges" },
+      { ...extracted, name: "Wide Awake", time: "14:30", booked: true, alternativeGroup: "coffee", dayTrip: null },
+      { ...extracted, name: "Grand-Place", time: "18:00", booked: false, dayTrip: "Paris" },
+    ];
+    mocks.fetch.mockImplementation(async () => Response.json({
+      candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ places }) }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 40, totalTokenCount: 90 },
+    }));
+    const body = await (await POST(request({ url: "https://example.com/itinerary" }))).json();
+    expect(body.places.map(({ name, time, plannedTime, dayTrip }: Record<string, unknown>) => ({ name, time, plannedTime, dayTrip }))).toEqual([
+      { name: "Rozenhoedkaai", time: null, plannedTime: "09:15", dayTrip: "Bruges" },
+      // An alternative is never a booking.
+      { name: "Wide Awake", time: null, plannedTime: "14:30", dayTrip: null },
+      // The supplied city itself is not a day trip.
+      { name: "Grand-Place", time: null, plannedTime: "18:00", dayTrip: null },
+    ]);
+  });
+  it("returns up to a city's 60 places and says how many were left out", async () => {
+    const places = Array.from({ length: 63 }, (_, index) => ({ ...extracted, name: `Place ${index + 1}` }));
+    mocks.fetch.mockImplementation(async () => Response.json({
+      candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ places }) }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 40, totalTokenCount: 90 },
+    }));
+    const body = await (await POST(request({ url: "https://example.com/itinerary" }))).json();
+    expect(body.places).toHaveLength(60);
+    expect(body.places.at(-1).name).toBe("Place 60");
+    expect(body.leftOut).toBe(3);
+    const sent = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    // Gemini rejects the full schema when the place list also has maxItems.
+    expect(JSON.stringify(sent)).not.toContain("maxItems");
+    expect(sent.generationConfig.maxOutputTokens).toBe(10_000);
+  });
+  it("asks for shorter sections when the reply is cut off", async () => {
+    mocks.fetch.mockImplementation(async () => Response.json({
+      candidates: [{ content: { role: "model", parts: [{ text: '{"places":[{"name":"Louvre' }] }, finishReason: "MAX_TOKENS" }],
+      usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 10_000, totalTokenCount: 10_050 },
+    }));
+    const response = await POST(request({ url: "https://example.com/itinerary" }));
+    expect(response.status).toBe(422);
+    expect((await response.json()).error).toContain("Import it in shorter sections");
   });
   it.each([{ provider: "openrouter", model: "other" }, { provider: "gemini", model: "old-model" }])("rejects mismatched provider consent before any side effects: %j", async (provider) => {
     expect((await POST(request({ url: "https://example.com/itinerary", provider }))).status).toBe(409);

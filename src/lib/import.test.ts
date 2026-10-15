@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { candidatesToStops, duplicateCandidateIndexes, importResultSchema, manualCandidates, mapsQuery, mergeDuplicateDetails, youtubeUrl } from "./import";
+import { candidatesToStops, dayTripGroup, duplicateCandidateIndexes, extractedCandidate, importDayTrips, importResultSchema, itineraryHours, manualCandidates, mapsQuery, mergeDuplicateDetails, transferProposal, youtubeUrl, type ImportCandidate, type TransferCandidate } from "./import";
 import { newStop, newTrip, stopSchema } from "./trip";
 import { duplicateStopPairs, mergeDuplicateStops, mergeReviewedDuplicate } from "./duplicates";
 
@@ -182,5 +182,63 @@ describe("itinerary import", () => {
     expect(importResultSchema.safeParse({ places: [{ ...candidate, sourceUrl: "javascript:alert(1)" }] }).success).toBe(false);
     expect(importResultSchema.safeParse({ places: [{ ...candidate, sourceUrl: "not a URL" }] }).success).toBe(false);
     expect(stopSchema.safeParse(newStop("Old draft without a source URL")).success).toBe(true);
+  });
+});
+describe("arrival and departure import", () => {
+  const brussels = { ...newTrip(), city: "Brussels", startDate: "2026-12-28", days: 4, timeZone: "Europe/Brussels" };
+  const eurostar: TransferCandidate = { mode: "TRAIN", date: "2026-12-31", time: "10:14", place: "Brussels-Midi", reference: " Eurostar 9422 ", source: "10:14 – 11:35: Travel via Eurostar to Paris Gare du Nord." };
+
+  it("offers a departure on the city's last day", () => {
+    expect(transferProposal(brussels, "departure", eurostar)).toEqual({ transfer: { mode: "TRAIN", time: "10:14", place: "Brussels-Midi", reference: "Eurostar 9422" }, label: "Eurostar 9422 · 10:14 · Brussels-Midi", same: false, replaces: undefined });
+    const arrival = transferProposal(brussels, "arrival", { ...eurostar, date: null, time: "13:06", reference: null });
+    expect(arrival.label).toBe("Train · 13:06 · Brussels-Midi");
+    expect(arrival.blocked).toBeUndefined();
+  });
+
+  it("blocks a date outside the city's stay", () => {
+    expect(transferProposal(brussels, "arrival", eurostar).blocked).toBe("Arrives Thu 31 Dec, but Brussels starts Mon 28 Dec. Change the city's dates to use it.");
+    expect(transferProposal(brussels, "departure", { ...eurostar, date: "2027-01-01" }).blocked).toContain("but Brussels ends Thu 31 Dec");
+  });
+
+  it("notices an identical transfer and names the one it replaces, keeping a confirmed station", () => {
+    const set = { ...brussels, departure: { mode: "TRAIN" as const, time: "10:14", place: "Brussels-Midi", reference: "Eurostar 9422", placeId: "g-midi" } };
+    expect(transferProposal(set, "departure", eurostar).same).toBe(true);
+    const later = transferProposal(set, "departure", { ...eurostar, time: "12:14", reference: "Eurostar 9430" });
+    expect(later).toMatchObject({ same: false, replaces: "Eurostar 9422 · 10:14 · Brussels-Midi", transfer: { placeId: "g-midi" } });
+    expect(transferProposal(set, "departure", { ...eurostar, place: "Brussels-Central" }).transfer.placeId).toBeUndefined();
+  });
+});
+
+describe("itinerary day trips and hours", () => {
+  const brussels = { ...newTrip(), city: "Brussels, Belgium", startDate: "2026-12-28", days: 4, timeZone: "Europe/Brussels", dailyStart: "09:00", dailyEnd: "18:00" };
+  const place = (name: string, date: string | null, plannedTime: string | null, duration: number, dayTrip: string | null = null): ImportCandidate => ({ name, date, time: null, plannedTime, duration, source: name, warning: "", dayTrip });
+
+  it("keeps a booked time as a booking and anything else as a planned time", () => {
+    const base = { name: "Atomium", date: "2026-12-30", time: "11:00", duration: 60, source: "", warning: "" };
+    expect(extractedCandidate({ ...base, booked: true }, brussels.city)).toMatchObject({ time: "11:00", plannedTime: null, dayTrip: null });
+    expect(extractedCandidate({ ...base, booked: false, dayTrip: " Bruges " }, brussels.city)).toMatchObject({ time: null, plannedTime: "11:00", dayTrip: "Bruges" });
+    expect(extractedCandidate({ ...base, booked: true, alternativeGroup: "a" }, brussels.city)).toMatchObject({ time: null, plannedTime: "11:00" });
+    expect(extractedCandidate({ ...base, booked: false, dayTrip: "brussels" }, brussels.city).dayTrip).toBeNull();
+  });
+
+  it("groups the places in each town into one day trip on its day", () => {
+    const places = [place("Grand-Place", "2026-12-28", "18:00", 30), place("Rozenhoedkaai", "2026-12-29", "09:15", 15, "Bruges"), place("Markt", "2026-12-29", "09:30", 60, "Bruges"), place("Gravensteen", "2026-12-29", "13:25", 30, "Ghent"), place("Leuven", null, null, 60, "Leuven"), place("Antwerp Zoo", "2026-12-29", null, 60, "Antwerp"), place("MAS", "2026-12-30", null, 60, "antwerp")];
+    const trips = importDayTrips(places, brussels);
+    expect(trips.map(({ name, indexes, day, blocked }) => ({ name, indexes, day, blocked }))).toEqual([
+      { name: "Bruges", indexes: [1, 2], day: 1, blocked: undefined },
+      { name: "Ghent", indexes: [3], day: 1, blocked: undefined },
+      { name: "Leuven", indexes: [4], day: null, blocked: undefined },
+      { name: "Antwerp", indexes: [5, 6], day: null, blocked: "Antwerp places fall on different days. Set up this day trip in Plan my days instead." },
+    ]);
+    expect(dayTripGroup(trips[0], ["a", "b"], brussels)).toMatchObject({ name: "Bruges", stopIds: ["a", "b"], allowedDays: [1], exclusive: false });
+    expect(dayTripGroup(trips[2], ["c"], brussels).allowedDays).toEqual([0, 1, 2, 3]);
+  });
+
+  it("widens the city's hours to the itinerary's, only when it reaches beyond them", () => {
+    const places = [place("Flea market", "2026-12-30", "08:30", 60), place("NONA", "2026-12-28", "18:45", 75), place("Alibaba", "2026-12-29", "20:00", 45), place("Unscheduled", null, null, 45)];
+    expect(itineraryHours(places, brussels)).toEqual({ dailyStart: "08:30", dailyEnd: "20:45" });
+    expect(itineraryHours([place("Museum", null, "10:00", 120)], brussels)).toBeNull();
+    expect(itineraryHours([place("Late show", null, "23:10", 90)], brussels)).toEqual({ dailyStart: "09:00", dailyEnd: "23:45" });
+    expect(itineraryHours([place("Unscheduled", null, null, 45)], brussels)).toBeNull();
   });
 });
