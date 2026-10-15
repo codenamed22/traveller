@@ -25,7 +25,8 @@ export function cityPreset(value: string) {
   return popularCities.find((city) => city.name.toLowerCase() === name || `${city.name}, ${city.country}`.toLowerCase() === name);
 }
 
-const cityTripSchema = tripSchema.safeExtend({ hotel: z.string().trim().max(200) });
+// A city in a trip may not have its hotel yet; planning asks for one.
+export const cityTripSchema = tripSchema.safeExtend({ hotel: z.string().trim().max(200) });
 export const journeySchema = z.object({
   id: z.uuid(), title: z.string().trim().min(1).max(150),
   cities: z.array(cityTripSchema).min(1).max(10),

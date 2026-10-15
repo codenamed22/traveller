@@ -48,7 +48,47 @@ describe("assistant operations", () => {
     expect(result.journey.cities[0].stops[2]).toMatchObject({ day: 0, optional: false });
   });
 
-  it("follows the editor's booking rules", () => {
+  it("writes and clears the traveller's own note without making the itinerary out of date", () => {
+    const { journey: base, coffee, amsterdam } = fixture();
+    // Start from the city exactly as it was planned.
+    const journey = { ...base, cities: [base.plans[amsterdam.id].snapshot!.trip, base.cities[1]] };
+    const noted = apply(journey, [{ type: "update_stop", stopId: coffee.id, note: "Winter Glow light trail ended in 2025; find a replacement." }]);
+    expect(noted.errors).toEqual([]);
+    expect(noted.changes).toEqual(["Sango Coffee: note: “Winter Glow light trail ended in 2025; find a replacement.”"]);
+    expect(noted.staleCities).toEqual([]);
+    expect(assistantContext(noted.journey, { cityId: amsterdam.id, day: 0 }, christmasEve).cities[0].places[0]).toMatchObject({ note: "Winter Glow light trail ended in 2025; find a replacement." });
+    const cleared = apply(noted.journey, [{ type: "update_stop", stopId: coffee.id, note: "" }]);
+    expect(cleared.changes).toEqual(["Sango Coffee: note removed"]);
+    expect(cleared.journey.cities[0].stops[0]).not.toHaveProperty("note");
+    expect(apply(journey, [{ type: "add_stop", cityId: amsterdam.id, name: "Toki", note: "Ask for the filter of the day" }]).journey.cities[0].stops.at(-1)).toMatchObject({ note: "Ask for the filter of the day" });
+  });
+
+  it("adds places to a city that has no hotel yet, as the editor allows", () => {
+    const { journey, brussels } = fixture();
+    const unhoused = { ...journey, cities: [journey.cities[0], { ...brussels, hotel: "" }] };
+    const result = apply(unhoused, [{ type: "add_stop", cityId: brussels.id, name: "Maison Dandoy" }]);
+    expect(result.errors).toEqual([]);
+    expect(result.journey.cities[1].stops.map((stop) => stop.name)).toEqual(["Grand Place", "Maison Dandoy"]);
+  });
+
+  it("moves a whole day trip when one of its places moves, and swaps a day's places in one proposal", () => {
+    const { journey, brussels } = fixture();
+    const disney = { ...newStop("Disneyland Paris"), day: 2 };
+    const parade = { ...newStop("Main Street parade"), day: 2 };
+    const clove = { ...newStop("Clove"), day: 1 };
+    const paris: Trip = { ...brussels, city: "Paris", days: 4, stops: [clove, disney, parade], dayGroups: [{ id: crypto.randomUUID(), name: "Marne-la-Vallée", stopIds: [disney.id, parade.id], allowedDays: [2], exclusive: false }] };
+    const trips = { ...journey, cities: [journey.cities[0], paris] };
+    // Moving only the place would leave its day trip on a day it can't use.
+    const result = apply(trips, [{ type: "update_stop", stopId: disney.id, day: 2 }, { type: "update_stop", stopId: clove.id, day: 3 }]);
+    expect(result.errors).toEqual([]);
+    expect(result.changes).toEqual(["Disneyland Paris: Day 3 → Day 2 · Marne-la-Vallée day trip moves with it", "Clove: Day 2 → Day 3"]);
+    const moved = result.journey.cities[1];
+    expect(moved.stops.map((stop) => [stop.name, stop.day])).toEqual([["Clove", 2], ["Disneyland Paris", 1], ["Main Street parade", 1]]);
+    expect(moved.dayGroups![0].allowedDays).toEqual([1]);
+    expect(assistantContext(result.journey, { cityId: paris.id, day: 0 }, christmasEve).cities[1].places[1]).toMatchObject({ dayTrip: "Marne-la-Vallée" });
+  });
+
+    it("follows the editor's booking rules", () => {
     const { journey, museum, cake, amsterdam } = fixture();
     expect(apply(journey, [{ type: "update_stop", stopId: cake.id, booked: "15:00" }]).errors).toEqual(["Rum Baba: a booking needs a day."]);
     expect(apply(journey, [{ type: "update_stop", stopId: cake.id, booked: "15:00", day: 1 }]).errors).toEqual(["Rum Baba: a booking can't be optional."]);
@@ -62,11 +102,11 @@ describe("assistant operations", () => {
     expect(apply(journey, [{ type: "update_stop", stopId: museum.id, day: 3 }]).errors).toEqual(["Amsterdam has only 2 days."]);
   });
 
-  it("warns about a booking that no longer fits the day", () => {
+  it("says when a booking stretches its day past the usual end", () => {
     const { journey, museum } = fixture();
     const result = apply(journey, [{ type: "update_stop", stopId: museum.id, booked: "20:30" }]);
     expect(result.errors).toEqual([]);
-    expect(result.warnings.some((warning) => warning.includes("ends after the day ends"))).toBe(true);
+    expect(result.warnings).toContain("Day 1: Rijksmuseum (20:30, 120 min) runs past 21:00, so that day ends at 22:30.");
   });
 
   it("clears a confirmed map location when a place is renamed", () => {

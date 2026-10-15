@@ -236,7 +236,7 @@ describe("itinerary day trips and hours", () => {
 
   it("widens the city's hours to the itinerary's, only when it reaches beyond them", () => {
     const places = [place("Flea market", "2026-12-30", "08:30", 60), place("NONA", "2026-12-28", "18:45", 75), place("Alibaba", "2026-12-29", "20:00", 45), place("Unscheduled", null, null, 45)];
-    expect(itineraryHours(places, brussels)).toEqual({ dailyStart: "08:30", dailyEnd: "20:45" });
+    expect(itineraryHours(places, brussels)).toEqual({ dailyStart: "08:30", dailyEnd: "21:15" });
     expect(itineraryHours([place("Museum", null, "10:00", 120)], brussels)).toBeNull();
     expect(itineraryHours([place("Late show", null, "23:10", 90)], brussels)).toEqual({ dailyStart: "09:00", dailyEnd: "23:45" });
     expect(itineraryHours([place("Unscheduled", null, null, 45)], brussels)).toBeNull();

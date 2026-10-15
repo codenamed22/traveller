@@ -1,6 +1,6 @@
 import { bookingConflicts, PlanningError, planningEngine } from "./planner";
 import { dayEnd, dayStart, minuteAt, planningPreferences, type Place, type Stop, type Trip } from "./trip";
-import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, openingIntervals, type CapCategory } from "./visit-slots";
+import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, visitHours, type CapCategory } from "./visit-slots";
 
 export async function assignDays(input: Trip, locations: Record<string, Place["location"]>, places: Record<string, Place> = {}): Promise<Trip> {
   const conflicts = bookingConflicts(input);
@@ -36,7 +36,7 @@ export async function assignDays(input: Trip, locations: Record<string, Place["l
     }
     for (const stop of input.stops.filter((stop) => !stop.fixedTime)) {
       windows.forEach((window, index) => {
-        if ((stop.day !== null && stop.day !== window.day) || stop.duration > window.minutes || openingIntervals(input, window.day, places[stop.id])?.length === 0) return;
+        if ((stop.day !== null && stop.day !== window.day) || stop.duration > window.minutes || visitHours(input, window.day, stop, places[stop.id])?.length === 0) return;
         const point = locations[stop.id];
         const center = centers[window.day];
         const distance = Math.hypot((point.lng - center.lng) * Math.cos(center.lat * Math.PI / 180), point.lat - center.lat) * 111;

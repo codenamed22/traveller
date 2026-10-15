@@ -4,7 +4,7 @@ import { instantAt, minuteAt, newStop, newTrip, planningPreferences, type Trip }
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, getPlacePhoto, planWithGoogle, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, planWithGoogle, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -109,6 +109,68 @@ describe("time-of-day planning with Google place details", () => {
     expect(result.schedule.warnings.join(" ")).toContain("regular opening hours were applied");
   });
 
+  it("searches near the trip, and flags places Google lists as closed when searching and planning", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("places:searchText")) {
+        bodies.push(JSON.parse(init!.body as string));
+        return Response.json({ places: [{ id: "flandre", displayName: { text: "Wide Awake Coffee Brew Bar" }, location: { latitude: 50.85, longitude: 4.34 }, businessStatus: "CLOSED_PERMANENTLY" }, { id: "st-cat", displayName: { text: "Wide Awake Coffee" }, location: { latitude: 50.85, longitude: 4.35 }, businessStatus: "OPERATIONAL" }] });
+      }
+      if (url.includes("places.googleapis.com")) {
+        const id = url.split("/").at(-1)!;
+        return Response.json({ id, displayName: { text: id }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" }, ...(id === "gone-cafe" ? { businessStatus: "CLOSED_PERMANENTLY" } : {}) });
+      }
+      const body = JSON.parse(init!.body as string);
+      if (url.includes("computeRouteMatrix")) return Response.json(body.destinations.map((_: unknown, destinationIndex: number) => ({ destinationIndex, condition: "ROUTE_EXISTS", duration: "600s", distanceMeters: 800 })));
+      return Response.json({ routes: [{ duration: "600s", distanceMeters: 800 }] });
+    }));
+    const found = await searchPlaces("Wide Awake Coffee", { lat: 50.84, lng: 4.38 });
+    expect(bodies[0]).toMatchObject({ textQuery: "Wide Awake Coffee", locationBias: { circle: { center: { latitude: 50.84, longitude: 4.38 }, radius: 50_000 } } });
+    expect(found.map((place) => place.closed)).toEqual(["permanently", undefined]);
+    await searchPlaces("Wide Awake Coffee Brussels");
+    expect(bodies[1]).not.toHaveProperty("locationBias");
+    const trip = { ...fixture(), dailyStart: "09:00", dailyEnd: "20:00", stops: [{ ...newStop("Old café"), placeId: "gone-cafe" }] };
+    const result = await planWithGoogle(trip);
+    expect(result.places[trip.stops[0].id].closed).toBe("permanently");
+    expect(result.schedule.warnings).toContain("Old café is marked permanently closed on Google Maps. Check it, or find the place on the map again.");
+  });
+
+  it("names the place whose map link Google rejects instead of blaming the API setup", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const id = url.split("/").at(-1)!;
+      if (id === "mistyped-place") return Response.json({ error: { code: 400, status: "INVALID_ARGUMENT", message: "The provided Place ID: mistyped-place is not valid.\n" } }, { status: 400 });
+      return Response.json({ id, displayName: { text: id }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" } });
+    }));
+    const trip = { ...fixture(), stops: [{ ...newStop("BOUCHE - Specialty Coffee"), placeId: "mistyped-place" }] };
+    await expect(planWithGoogle(trip)).rejects.toMatchObject({ status: 422, message: "BOUCHE - Specialty Coffee has a map link Google no longer recognises. Open it, find it on the map again, then plan." });
+    // A well-formed id for a place Google no longer has is the same problem.
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/gone-place") ? Response.json({ error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } }, { status: 404 })
+      : Response.json({ id: url.split("/").at(-1), displayName: { text: "Hotel" }, location: { latitude: 48.86, longitude: 2.33 }, timeZone: { id: "Europe/Paris" } })));
+    await expect(planWithGoogle({ ...fixture(), stops: [{ ...newStop("Closed café"), placeId: "gone-place" }] })).rejects.toMatchObject({ status: 422, message: expect.stringMatching(/^Closed café has a map link/) });
+  });
+
+  it("explains Google failures by their cause, pointing at the key only when the key is the problem", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const failing = (status: number, error: Record<string, unknown>) => vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error }, { status })));
+    const message = async () => (await planWithGoogle(fixture()).then(() => new Error("planned"), (error: Error) => error)).message;
+    failing(403, { status: "PERMISSION_DENIED", details: [{ reason: "SERVICE_DISABLED" }] });
+    expect(await message()).toBe("A Google Maps API this needs is turned off for the key's project. Enable Places API (New) and Routes API in Google Cloud.");
+    failing(403, { status: "PERMISSION_DENIED", details: [{ reason: "API_KEY_HTTP_REFERRER_BLOCKED" }] });
+    expect(await message()).toMatch(/key's restrictions block this request/);
+    failing(400, { status: "INVALID_ARGUMENT", details: [{ reason: "API_KEY_INVALID" }] });
+    expect(await message()).toBe("The Google Maps key isn't valid. Check GOOGLE_MAPS_API_KEY.");
+    failing(503, { status: "UNAVAILABLE" });
+    expect(await message()).toBe("Google Maps is having trouble right now. Try again in a minute.");
+    failing(400, { status: "INVALID_ARGUMENT", message: "Invalid waypoint." });
+    expect(await message()).not.toMatch(/key|API/);
+    failing(429, { status: "RESOURCE_EXHAUSTED" });
+    expect(await message()).toBe("Google Maps quota reached. Try again later.");
+  });
+
   it("returns opening-hour fixes as an error, not a provisional outline, for trips with day groups", async () => {
     vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
@@ -131,6 +193,25 @@ describe("time-of-day planning with Google place details", () => {
     expect(failure).toBeInstanceOf(PlanningFailure);
     expect((failure as PlanningFailure).provisional).toBeUndefined();
     expect((failure as PlanningFailure).fixes).toEqual([expect.objectContaining({ stopId: bistro.id, action: "optimize-day" })]);
+  });
+});
+
+describe("search estimates", () => {
+  it("connects a day-trip town with the city by two real legs, not the city formula", () => {
+    const town = { ...newStop("Markt Square"), placeId: "markt" };
+    const dinner = { ...newStop("Alibaba"), placeId: "alibaba" };
+    const trip: Trip = { ...fixture(), startDate: Temporal.Now.plainDateISO().add({ days: 10 }).toString(), stops: [town, dinner], planning: { ...planningPreferences(fixture()), mode: "AUTO" } };
+    const place = (id: string, lat: number, lng: number) => ({ id, name: id, address: "", location: { lat, lng } });
+    const places = { hotel: place("hotel", 50.85, 4.35), [town.id]: place("markt", 51.21, 3.22), [dinner.id]: place("alibaba", 50.848, 4.352) };
+    const real = [
+      { day: 0, from: town.id, to: "hotel", mode: "TRANSIT" as const, minutes: 99, meters: 90_000 },
+      { day: 0, from: "hotel", to: dinner.id, mode: "TRANSIT" as const, minutes: 13, meters: 1_500 },
+    ];
+    const sampled = new Set(real.map((edge) => `${edge.from}|${edge.to}|${edge.mode}`));
+    const edges = withEstimates(trip, places, { has: (_day, from, to, mode) => sampled.has(`${from}|${to}|${mode}`) }, real, { neighbours: 4, walkOnlyKm: 2.5 });
+    expect(edges.find((edge) => edge.from === town.id && edge.to === dinner.id && edge.mode === "TRANSIT")).toMatchObject({ minutes: 112, estimated: true });
+    // Nearby pairs in the walking-only pass stay walking.
+    expect(edges.some((edge) => edge.from === "hotel" && edge.to === dinner.id && edge.mode === "TRANSIT" && edge.estimated)).toBe(false);
   });
 });
 

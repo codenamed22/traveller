@@ -38,6 +38,8 @@ export const stopSchema = z.object({
   mode: modeSchema,
   source: z.string().max(1000),
   sourceUrl: sourceUrlSchema.optional(),
+  // The traveller's own note. Unlike `source`, the planner never reads it.
+  note: z.string().max(500).optional(),
   kind: visitKindSchema.optional(),
   slot: visitSlotSchema.optional(),
   plannedTime: timeSchema.optional(),
@@ -79,6 +81,18 @@ export function groupAllowedDays(trip: { days: number; stops: z.infer<typeof sto
   return group.allowedDays.filter((day) => day < trip.days
     && required.every((stop) => stop.day === null || stop.day === day)
     && (!group.exclusive || !trip.stops.some((stop) => !stop.optional && !group.stopIds.includes(stop.id) && stop.day === day)));
+}
+
+// Why a group has no day left, naming the visits in the way.
+export function groupConflict(trip: { days: number; stops: z.infer<typeof stopSchema>[] }, group: DayGroup): string {
+  const label = (day: number) => `Day ${day + 1}`;
+  const allowed = group.allowedDays.filter((day) => day < trip.days);
+  const pinned = trip.stops.filter((stop) => group.stopIds.includes(stop.id) && !stop.optional && stop.day !== null);
+  const days = [...new Set(pinned.map((stop) => stop.day!))];
+  if (days.length > 1) return `${group.name} can't go on one day: ${pinned.map((stop) => `${stop.name} is set to ${label(stop.day!)}`).join(", ")}. Put them on the same day, or let the planner pick.`;
+  const outside = pinned.find((stop) => !allowed.includes(stop.day!));
+  if (outside) return `${group.name} can't go on any day: ${outside.name} is set to ${label(outside.day!)}, but ${group.name} is only allowed on ${allowed.length ? allowed.map(label).join(", ") : "no day in this stay"}. Change one of them in Plan my days.`;
+  return `${group.name} can't go on any day: it needs a day to itself, and every day it's allowed on already has other places. Move them, or allow another day in Plan my days.`;
 }
 
 // How you reach a city on its first day and leave it on its last day. Allowances default by mode (see transferDefaults).
@@ -141,7 +155,7 @@ export const tripSchema = z.object({
       || new Set(group.allowedDays).size !== group.allowedDays.length || group.allowedDays.some((day) => day >= trip.days)
       || group.stopIds.some((id) => members.has(id) || !trip.stops.some((stop) => stop.id === id));
     if (invalid) context.addIssue({ code: "custom", message: `${group.name}: groups need unique, existing visits and valid days; visits cannot belong to multiple groups.`, path: ["dayGroups", index] });
-    if (!groupAllowedDays(trip, group).length) context.addIssue({ code: "custom", message: `${group.name}: no allowed day remains with the retained day assignments and exclusive-day requirement.`, path: ["dayGroups", index, "allowedDays"] });
+    if (!groupAllowedDays(trip, group).length) context.addIssue({ code: "custom", message: groupConflict(trip, group), path: ["dayGroups", index, "allowedDays"] });
     groupIds.add(group.id);
     group.stopIds.forEach((id) => members.add(id));
   }
@@ -167,7 +181,8 @@ export function assumedGroupEdge(trip: Trip, day: number, from: string, to: stri
 export type TravelMode = "WALK" | "TRANSIT";
 export type OpeningPoint = { day: number; hour: number; minute: number };
 export type OpeningPeriod = { open: OpeningPoint; close?: OpeningPoint };
-export type Place = { id: string; name: string; address: string; location: { lat: number; lng: number }; timeZone?: string; primaryType?: string; types?: string[]; hours?: OpeningPeriod[] };
+// `closed` is Google's word that the business has shut, for good or for now.
+export type Place = { id: string; name: string; address: string; location: { lat: number; lng: number }; timeZone?: string; primaryType?: string; types?: string[]; hours?: OpeningPeriod[]; closed?: "permanently" | "temporarily" };
 
 export type DayTripSuggestion = { name: string; stopIds: string[]; distanceKm: number; from: "hotel" | "places" };
 
@@ -214,7 +229,7 @@ export type Visit = { stopId: string; start: number; end: number; leg: TravelEdg
 export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge };
 // Where a place left out of the plan could still go: between two visits (or at the start or end of a day), with the
 // least extra travel, and how much later the following visits would start. Times are estimates from the plan's routes.
-export type SqueezeIn = { stopId: string; day: number; after?: string; before?: string; start: number; end: number; extraMinutes: number; delayMinutes?: number; overCap?: { category: "breakfast" | "lunch" | "dinner" | "coffee"; count: number } };
+export type SqueezeIn = { stopId: string; day: number; after?: string; before?: string; start: number; end: number; extraMinutes: number; delayMinutes?: number; overCap?: { category: "breakfast" | "lunch" | "dinner" | "meal" | "coffee"; count: number }; nearMeal?: { stopId: string; minutes: number; after: boolean } };
 export type Schedule = { days: DayPlan[]; omitted: string[]; squeezeIns?: SqueezeIn[]; warnings: string[]; generatedAt: string; optimization?: { weightedDurationLoss: number; durationOptimal: boolean; optionalOptimal: boolean; travelOptimal: boolean } };
 const routeFieldsSchema = z.object({
   day: z.number().int().min(0).max(6), from: z.string().min(1).max(300), to: z.string().min(1).max(300),
@@ -242,7 +257,9 @@ export const scheduleSchema = z.object({
   squeezeIns: z.array(z.object({
     stopId: z.uuid(), day: z.number().int().min(0).max(6), after: z.uuid().optional(), before: z.uuid().optional(),
     start: z.number().min(0).max(2880), end: z.number().min(0).max(2880), extraMinutes: z.number().min(0).max(2880), delayMinutes: z.number().int().min(1).max(2880).optional(),
-    overCap: z.object({ category: z.enum(["breakfast", "lunch", "dinner", "coffee"]), count: z.number().int().min(2).max(maxStopsPerCity) }).strict().optional(),
+    overCap: z.object({ category: z.enum(["breakfast", "lunch", "dinner", "meal", "coffee"]), count: z.number().int().min(2).max(maxStopsPerCity) }).strict().optional(),
+    // The closest other meal that day, when it would be less than the meal gap away.
+    nearMeal: z.object({ stopId: z.uuid(), minutes: z.number().int().min(0).max(2880), after: z.boolean() }).strict().optional(),
   }).strict()).max(maxStopsPerCity).optional(),
   generatedAt: z.iso.datetime({ offset: true }),
   optimization: z.object({ weightedDurationLoss: z.number().min(0), durationOptimal: z.boolean(), optionalOptimal: z.boolean(), travelOptimal: z.boolean() }).strict().optional(),
@@ -255,6 +272,7 @@ export const placeSchema = z.object({
   primaryType: z.string().max(100).optional(),
   types: z.array(z.string().max(100)).max(50).optional(),
   hours: z.array(z.object({ open: openingPointSchema, close: openingPointSchema.optional() }).strict()).max(50).optional(),
+  closed: z.enum(["permanently", "temporarily"]).optional(),
 }).strict();
 export const savedPlanSchema = z.object({
   days: z.array(z.object({ day: z.number().int().min(0).max(6), stopIds: z.array(z.uuid()).max(maxStopsPerCity) }).strict()).max(7),
@@ -275,13 +293,14 @@ export type PlanResult = { status?: "verified"; schedule: Schedule; places: Reco
 export const planningFailureCodeSchema = z.enum(["hard-input-conflict", "sampled-model-conflict", "missing-data", "search-incomplete", "provider-error", "budget-exhausted", "verification-failed"]);
 export type PlanningFailureCode = z.infer<typeof planningFailureCodeSchema>;
 // A one-click change that resolves a planning failure for one visit; never touches bookings.
-export const planningFixSchema = z.object({ stopId: z.string(), stopName: z.string(), issue: z.string(), action: z.enum(["optimize-day", "make-optional", "flexible-optional"]) });
+// "rebook" moves a booking to `time`, the nearest time the routes allow.
+export const planningFixSchema = z.object({ stopId: z.string(), stopName: z.string(), issue: z.string(), action: z.enum(["optimize-day", "make-optional", "flexible-optional", "rebook"]), time: timeSchema.optional() });
 export type PlanningFix = z.infer<typeof planningFixSchema>;
 
 export function applyPlanningFixes(trip: Trip, fixes: PlanningFix[]): Trip {
   return { ...trip, stops: trip.stops.map((stop) => {
-    const fix = stop.fixedTime ? undefined : fixes.find((candidate) => candidate.stopId === stop.id);
-    return fix?.action === "optimize-day" ? { ...stop, day: null } : fix?.action === "make-optional" ? { ...stop, optional: true } : fix?.action === "flexible-optional" ? { ...stop, day: null, optional: true } : stop;
+    const fix = fixes.find((candidate) => candidate.stopId === stop.id && Boolean(stop.fixedTime) === (candidate.action === "rebook"));
+    return fix?.action === "rebook" ? (fix.time ? { ...stop, fixedTime: fix.time } : stop) : fix?.action === "optimize-day" ? { ...stop, day: null } : fix?.action === "make-optional" ? { ...stop, optional: true } : fix?.action === "flexible-optional" ? { ...stop, day: null, optional: true } : stop;
   }) };
 }
 export const provisionalPlanSchema = z.object({
@@ -310,8 +329,15 @@ export function durationChoices(duration: number, rule: DurationRule): number[] 
   return [...new Set([duration, Math.max(5, Math.ceil(duration * 0.9)), ...(rule === "eatery20" ? [Math.max(5, Math.ceil(duration * 0.8))] : [])])];
 }
 
+// What a plan depends on, for telling whether a city changed since it was planned. Notes are left out: writing one
+// doesn't make the itinerary out of date.
+export function planningKey(trip: Trip | undefined) {
+  return trip ? JSON.stringify({ ...trip, stops: trip.stops.map(({ note, ...stop }) => (void note, stop)) }) : "";
+}
+
 export function applyScheduleDurations(trip: Trip, schedule: Schedule): Trip {
-  const durations = new Map(schedule.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, visit.end - visit.start] as const)));
+  // Visit times can carry fractions of a minute (from a computed sunset, for instance), so lengths are compared whole.
+  const durations = new Map(schedule.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, Math.round(visit.end - visit.start)] as const)));
   return { ...trip, stops: trip.stops.map((stop) => {
     const duration = durations.get(stop.id) ?? stop.duration;
     if (!(stop.fixedTime ? [stop.duration] : stop.durationOptions ?? [stop.duration]).includes(duration)) throw new Error(`${stop.name}: the proposed duration was not approved.`);
@@ -440,15 +466,27 @@ export function dayStart(trip: Trip, day: number) {
   return arrival ? Math.max(base, arrival.ready) : base;
 }
 
+// When sightseeing ends on a day. A booking that runs past the usual end (a midnight countdown) stretches its own day
+// to the booking's end; the other days keep the usual hours.
+export function sightseeingEnd(trip: Trip, day: number) {
+  return Math.max(minuteAt(trip, day, trip.dailyEnd), ...trip.stops.filter((stop) => stop.day === day && stop.fixedTime).map((stop) => minuteAt(trip, day, stop.fixedTime!) + stop.duration));
+}
+
+// Bookings that stretch their day past the usual end, said plainly so a late night is never a surprise.
+export function lateBookings(trip: Trip) {
+  return trip.stops.filter((stop) => stop.day !== null && stop.fixedTime && minuteAt(trip, stop.day, stop.fixedTime) + stop.duration > minuteAt(trip, stop.day, trip.dailyEnd))
+    .map((stop) => `Day ${stop.day! + 1}: ${stop.name} (${stop.fixedTime}, ${stop.duration} min) runs past ${trip.dailyEnd}, so that day ends at ${formatMinute(trip, stop.day!, minuteAt(trip, stop.day!, stop.fixedTime!) + stop.duration)}.`);
+}
+
 export function dayEnd(trip: Trip, day: number) {
   const departure = departureTimes(trip);
-  const end = minuteAt(trip, day, trip.dailyEnd);
+  const end = sightseeingEnd(trip, day);
   return Math.max(dayStart(trip, day), departure?.day === day ? Math.min(end, departure.end) : end);
 }
 
 export function returnDeadline(trip: Trip, day: number) {
   const departure = departureTimes(trip);
-  const usual = Math.max(dayStart(trip, day), minuteAt(trip, day, trip.dailyEnd)) + hotelReturnAllowance;
+  const usual = Math.max(dayStart(trip, day), sightseeingEnd(trip, day)) + hotelReturnAllowance;
   return departure?.day === day ? Math.max(dayStart(trip, day), Math.min(usual, departure.end)) : usual;
 }
 
@@ -520,7 +558,8 @@ export function squeezeInNote(trip: Trip, squeeze: SqueezeIn) {
   const travel = squeeze.extraMinutes >= 1 ? `adding about ${Math.round(squeeze.extraMinutes)} min of travel` : "with no extra travel";
   const delay = squeeze.delayMinutes ? `, with later visits up to ${squeeze.delayMinutes} min later` : "";
   const cap = squeeze.overCap ? `; it would be the ${ordinal(squeeze.overCap.count)} ${squeeze.overCap.category === "coffee" ? "coffee" : squeeze.overCap.category} that day` : "";
-  return `Day ${squeeze.day + 1} (${date})${where ? ` ${where}` : ""}, about ${formatMinute(trip, squeeze.day, squeeze.start)}–${formatMinute(trip, squeeze.day, squeeze.end)}, ${travel}${delay}${cap}`;
+  const meal = squeeze.nearMeal ? `; only ${squeeze.nearMeal.minutes} min ${squeeze.nearMeal.after ? "after" : "before"} ${name(squeeze.nearMeal.stopId)}` : "";
+  return `Day ${squeeze.day + 1} (${date})${where ? ` ${where}` : ""}, about ${formatMinute(trip, squeeze.day, squeeze.start)}–${formatMinute(trip, squeeze.day, squeeze.end)}, ${travel}${delay}${cap}${meal}`;
 }
 
 export function persistedPlan(schedule: Schedule, trip?: Trip, places: Record<string, Place> = {}): SavedPlan {

@@ -2,7 +2,7 @@ import { convertToModelMessages, createUIMessageStreamResponse, isStepCount, str
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { applyOperations, assistantContext, proposalSchema } from "@/lib/assistant-ops";
+import { applyOperations, assistantContext, checkedPlaces, proposalSchema, type KnownPlace } from "@/lib/assistant-ops";
 import { searchPlaces } from "@/lib/google-maps";
 import { assistantService } from "@/lib/import-providers";
 import { journeySchema } from "@/lib/journey";
@@ -24,8 +24,9 @@ const instructions = `You are the trip assistant inside Traveller, a trip-planni
 - Use only ids that appear in the trip data. Day numbers are 1-based within each city (Day 1 is that city's first day); a null day means flexible, so the planner picks the day.
 - To change anything, call propose_changes. Nothing changes until the traveller taps Apply on the card it shows, so never say you made or marked a change, even for done or skipped; say you've suggested it. Each operation is one flat object; set only the fields that change. If propose_changes returns errors, fix the operations and try again once, or explain what is in the way.
 - After calling a tool, always finish with a short sentence for the traveller.
-- Keep proposals small (at most 8 operations) and do only what was asked. Never remove, move or rebook a booking unless asked.
-- Places already in the trip data have ids; never look them up. To add a new place, call find_place first and pass its placeId and location so it is on the map. If nothing matches, add it by name and say it needs confirming on the map. Never invent addresses, opening hours, prices or booking times.
+- Keep proposals small (at most 15 operations) and do only what was asked. Moving a place marked dayTrip moves that whole day trip to the new day. Never remove, move or rebook a booking unless asked.
+- When the traveller shares a planning problem, suggest the smallest change that fixes it, in one proposal: a booking time, the day's start or end, a visit length, or a flexible place moved to a lighter day. Rebooking to fix it is fine. Keep every place: never remove one or make it optional unless the traveller agrees, and say which change you chose and why.
+- Places already in the trip data have ids; never look them up. To add a new place, call find_place first and pass its placeId and location so it is on the map. If nothing matches, add it by name and say it needs confirming on the map. Skip a result marked closed and say so. Never invent addresses, opening hours, prices or booking times.
 - Changing places, days, hours or bookings puts that city's itinerary out of date; say the traveller can tap Replan on the card. You cannot plan routes or check live travel times yourself.
 - Answer questions (what's next, when to leave, how long a walk is, what could still fit) from the itinerary and couldFit entries, in the city's local time. Say so when an itinerary is out of date or missing.
 - Done and skipped apply only to today's planned visits (mark_progress). If the traveller is running late, suggest skipping or shortening a visit with propose_changes, or the Adjust today button in Trip mode for a fresh timed plan.`;
@@ -44,16 +45,26 @@ export async function POST(request: Request) {
     const service = assistantService();
     if (!service) throw new HttpError(503, "The trip assistant is not configured.");
     if (input.provider.model !== service.model) throw new HttpError(409, "The assistant model changed. Reload and review consent before trying again.");
+    // The editor can hold a trip that doesn't check out yet (it isn't saved then either); say what to fix.
+    const checked = journeySchema.safeParse(input.journey);
+    const rule = checked.error?.issues.find((issue) => issue.code === "custom");
+    if (rule) throw new HttpError(422, `Fix this in the trip first, then ask again: ${rule.message}`);
     const journey = journeySchema.parse(input.journey);
     const now = Temporal.Now.instant();
     let lookups = 0;
+    // Places the assistant has really seen, to check the ids it copies into add_stop.
+    const known: KnownPlace[] = journey.cities.flatMap((city) => [
+      ...(city.hotelPlaceId && city.hotelLocation ? [{ placeId: city.hotelPlaceId, location: city.hotelLocation }] : []),
+      ...city.stops.flatMap((stop) => stop.placeId && stop.location ? [{ placeId: stop.placeId, location: stop.location }] : []),
+    ]);
     const tools = {
       propose_changes: tool({
         description: "Suggest small changes to the trip. They are checked against the current trip and shown to the traveller as a card to apply; nothing changes until they tap Apply.",
         inputSchema: proposalSchema,
         execute: async (proposal) => {
-          const result = applyOperations(journey, proposal.operations, now);
-          return { ...proposal, ok: !result.errors.length, changes: result.changes, warnings: result.warnings, errors: result.errors };
+          const operations = checkedPlaces(proposal.operations, known);
+          const result = applyOperations(journey, operations, now);
+          return { ...proposal, operations, ok: !result.errors.length, changes: result.changes, warnings: result.warnings, errors: result.errors };
         },
       }),
       find_place: tool({
@@ -65,8 +76,9 @@ export async function POST(request: Request) {
           if (!process.env.GOOGLE_MAPS_API_KEY) return { error: "Place search is unavailable." };
           if (++lookups > lookupsPerMessage) return { error: "No more lookups for this message. Add the place by name instead." };
           try { await reserveUsage(owner, 1); } catch (error) { return { error: error instanceof HttpError ? error.message : "Place search is unavailable." }; }
-          const places = await searchPlaces(`${query}, ${city.city}`.slice(0, 350));
-          return { places: places.slice(0, 3).map((place) => ({ placeId: place.id, name: place.name, address: place.address, location: place.location })) };
+          const places = await searchPlaces(`${query}, ${city.city}`.slice(0, 350), city.hotelLocation);
+          known.push(...places.slice(0, 3).map((place) => ({ placeId: place.id, location: place.location })));
+          return { places: places.slice(0, 3).map((place) => ({ placeId: place.id, name: place.name, address: place.address, location: place.location, ...(place.closed ? { closed: place.closed } : {}) })) };
         },
       }),
     };
@@ -76,6 +88,12 @@ export async function POST(request: Request) {
       messages = await validateUIMessages({ messages: input.messages.map(finishedParts), tools });
       history = await convertToModelMessages(messages.slice(-24), { tools });
     } catch { throw new HttpError(400, "The conversation could not be read. Start a new chat."); }
+    // Lookups from earlier messages in this chat count too.
+    for (const message of messages) for (const part of message.parts) {
+      if (part.type !== "tool-find_place" || part.state !== "output-available") continue;
+      const found = z.object({ places: z.array(z.object({ placeId: z.string().min(1).max(300), location: z.object({ lat: z.number(), lng: z.number() }) })) }).safeParse(part.output);
+      if (found.success) known.push(...found.data.places.map(({ placeId, location }) => ({ placeId, location })));
+    }
     const last = messages.at(-1);
     const text = last?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n").trim() ?? "";
     if (last?.role !== "user" || !text) throw new HttpError(400, "Send a message first.");

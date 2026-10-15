@@ -23,14 +23,14 @@ import { asJourney, cityPreset, journeySchema, popularCities, restoreJourney, ty
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 import { alternativeGroups } from "@/lib/visit-slots";
-import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, maxStopsPerCity, newStop, newTrip, persistedPlan, planningFixSchema, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
+import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, maxStopsPerCity, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
 import { TripMode } from "./TripMode";
 import { tripModeDays } from "@/lib/trip-mode";
 import { applyOperations, type Operation } from "@/lib/assistant-ops";
-import { Assistant, type ApplyOutcome } from "./Assistant";
+import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
 
 // "Paris, France" reads as "Paris" inside a sentence.
 const cityName = (city: string, fallback: string) => city.split(",")[0].trim() || fallback;
@@ -97,6 +97,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const replanAfterTrip = useRef<string | null>(null);
   // Assistant changes that can still be undone: the trip before, and the trip they produced.
   const assistantUndo = useRef(new globalThis.Map<string, { before: Journey; after: string }>());
+  const assistant = useRef<AssistantHandle>(null);
   const [shared, setShared] = useState<Record<string, boolean>>(() => Object.fromEntries([...(initialSaved ? [initialSaved] : []), ...(initialList ?? [])].map((entry) => [entry.data.id, Boolean(entry.shared)])));
   const [search, setSearch] = useState<{ id: string; query: string } | null>(null);
   const [matches, setMatches] = useState<Place[]>([]);
@@ -110,6 +111,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const cityViews = useRef<Record<string, { places: Record<string, Place>; result: PlanResult | null; plannedFor: string }>>({});
   const snapshot = JSON.stringify(journey);
   const canUseServices = Boolean(config.email && config.database);
+  // Autosave skips a trip that doesn't check out; say why, or edits quietly stop being saved.
+  const saveBlocker = canUseServices && snapshot !== savedFor ? journeySchema.safeParse(journey).error?.issues[0]?.message : undefined;
   const canPlan = canUseServices && config.routes;
   const saving = useRef(false);
   useEffect(() => { const timer = setInterval(() => setNow(Temporal.Now.instant()), 60_000); return () => clearInterval(timer); }, []);
@@ -137,7 +140,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const date = tripDate(trip, day);
   const execution = journey.execution?.[trip.id]?.[date];
   const savedRecovery = execution?.remaining?.snapshot;
-  const stale = savedRecovery ? JSON.stringify(savedRecovery.trip) !== JSON.stringify(trip) : Boolean(result && (plannedFor || JSON.stringify(savedPlan?.snapshot?.trip)) !== JSON.stringify(trip));
+  const stale = savedRecovery ? planningKey(savedRecovery.trip) !== planningKey(trip) : Boolean(result && (plannedFor || planningKey(savedPlan?.snapshot?.trip)) !== planningKey(trip));
   const dayStopIds = savedPlan?.days.find((entry) => entry.day === day)?.stopIds ?? baselineDay?.visits.map((visit) => visit.stopId) ?? execution?.baselineStopIds;
   const progress = execution ?? newDayProgress(trip, day, dayStopIds ?? []);
   function formatActual(minute: number) {
@@ -351,7 +354,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     await perform("Finding places", async () => {
       if (!canUseServices || !config.routes) throw new Error("Place search is unavailable. Check your sign-in and connections.");
       if (!query.trim()) throw new Error("Enter a hotel name or address.");
-      setMatches((await requestJson("/api/places", { query })).places); setHasSearched(true);
+      const near = places.hotel?.location ?? trip.hotelLocation ?? trip.stops.find((stop) => stop.location)?.location;
+      setMatches((await requestJson("/api/places", { query, ...(near ? { near } : {}) })).places); setHasSearched(true);
     });
   }
 
@@ -412,7 +416,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const order = response.schedule.days.map(({ day, visits }) => ({ day, stopIds: visits.map((visit) => visit.stopId) })).sort((left, right) => left.day - right.day);
       if (JSON.stringify(order) !== JSON.stringify([...savedPlan.days].sort((left, right) => left.day - right.day)) || JSON.stringify(response.schedule.omitted) !== JSON.stringify(savedPlan.omitted)) throw new Error("Refresh changed saved days, order or omissions. Your saved plan was kept.");
       persistedPlan(response.schedule, validated, response.places);
-      setRefreshPreview({ result: response, trip: validated, tripKey: JSON.stringify(trip), planKey: JSON.stringify(savedPlan) });
+      setRefreshPreview({ result: response, trip: validated, tripKey: planningKey(trip), planKey: JSON.stringify(savedPlan) });
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Travel-time refresh failed. Your saved plan was kept.");
     } finally {
@@ -450,6 +454,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     if (tripMode) { replanAfterTrip.current = cityId; setTripExit((count) => count + 1); } else openReplan(cityId);
   }
 
+  // A planning failure goes to the assistant as the traveller's own message, once the dialog is out of the way.
+  function askAssistant(problem: string) {
+    setPlanningOpen(false);
+    assistant.current?.ask(`Plan my days failed for ${trip.city}: ${problem.slice(0, 1700)}\nSuggest the smallest changes that fix this.`);
+  }
+
   function loadSaved(entry: SavedTrip) {
     if (!confirmDiscard()) return;
     openJourney(journeySchema.parse(asJourney(entry.data, entry.plan)), entry.revision, true);
@@ -475,10 +485,11 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
 
     <main className="planner-main">
       <section className="trip-heading">
-        <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : ""}`}>{snapshot === savedFor ? "Saved" : "Unsaved draft"}</span></div></div>
+        <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : saveBlocker ? "blocked" : ""}`} title={saveBlocker}>{snapshot === savedFor ? "Saved" : saveBlocker ? "Not saved" : "Unsaved draft"}</span></div></div>
         <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} />{canUseServices && <ShareTrip tripId={journey.id} shared={Boolean(shared[journey.id])} disabled={Boolean(busy) || revision === 0} onChange={(value) => setShared((current) => ({ ...current, [journey.id]: value }))} />}<button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
       </section>
 
+      {saveBlocker && <div className="banner warning" role="status"><span>Not saved: {saveBlocker}</span></div>}
       {(error || notice) && <div className={`banner ${error ? "error" : "success"}`} role={error ? "alert" : "status"}><span>{error || notice}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => { setError(""); setNotice(""); }}><X size={16} /></button></div>}
 
       <div className="journey-cities"><div className="city-tabs" aria-label="Trip cities">{journey.cities.map((city) => <button key={city.id} disabled={Boolean(busy)} aria-pressed={trip.id === city.id} onClick={() => switchCity(city.id)}><MapPin size={15} /><span><strong>{city.city || "First city"}</strong><small>{city.startDate} to {tripDate(city, city.days - 1)}</small></span></button>)}</div><div className="row"><button className="text-button" disabled={Boolean(busy) || journey.cities.length >= 10} onClick={() => setSetup(journey.cities.length === 1 && !trip.city.trim() ? "new" : "add")}><Plus size={15} />Add cities</button>{journey.cities.length > 1 && <button className="icon-button danger" title="Remove current city" aria-label="Remove current city" disabled={Boolean(busy)} onClick={() => {
@@ -547,6 +558,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
                 {stop.fixedTime && <div className="form-grid"><label className="field">Booked time<input type="time" value={stop.fixedTime} onChange={(event) => editStop(stop.id, { fixedTime: event.target.value || null })} /></label><label className="field">Arrival buffer (min)<input type="number" min={0} max={120} value={stop.buffer} onChange={(event) => editStop(stop.id, { buffer: Number(event.target.value) })} /></label></div>}
                 <label className="field">Transport<select value={stop.mode} onChange={(event) => editStop(stop.id, { mode: event.target.value as Stop["mode"] })}><option value="AUTO">Walking or public transit</option><option value="WALK">Walking only</option><option value="TRANSIT">Public transit</option></select></label>
                 <label className="checkbox"><input type="checkbox" checked={stop.optional} disabled={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional if the day is full</label>
+                <label className="field">Notes<textarea rows={2} maxLength={500} placeholder="Anything to remember about this place" value={stop.note ?? ""} onChange={(event) => editStop(stop.id, { note: event.target.value || undefined })} /></label>
                 {stop.source && <blockquote>{stop.source}</blockquote>}
                 {stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}
                 <div className="stop-detail-actions"><div className="row">{[-1, 1].map((direction) => <button key={direction} className="icon-button" aria-label={direction < 0 ? "Move place up" : "Move place down"} title={direction < 0 ? "Move up" : "Move down"} disabled={index + direction < 0 || index + direction >= trip.stops.length} onClick={() => { const next = [...trip.stops]; [next[index], next[index + direction]] = [next[index + direction], next[index]]; edit({ stops: next }); }}>{direction < 0 ? <ArrowUp size={15} /> : <ArrowDown size={15} />}</button>)}</div><button className="text-button danger" onClick={() => { edit({ stops: trip.stops.filter((entry) => entry.id !== stop.id) }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }}><Trash2 size={14} />Remove</button></div>
@@ -565,7 +577,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
                 const stop = itineraryTrip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
                 const alternatives = stop.alternativeGroup ? currentDay.visits.filter((other) => other.stopId !== stop.id && itineraryTrip.stops.find((entry) => entry.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => itineraryTrip.stops.find((entry) => entry.id === other.stopId)!.name) : [];
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}</div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}{trip.stops.find((entry) => entry.id === stop.id)?.note && <span className="stop-note">{trip.stops.find((entry) => entry.id === stop.id)!.note}</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}</div>;
               })}
               {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={recoveryPlaces} endpointToDeparture={endpointKey(itineraryTrip, day, "hotel", "to") === "departure"} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{endpointKey(itineraryTrip, day, "hotel", "to") === "departure" ? `At ${itineraryTrip.departure!.place || "the station"}` : `Back to ${itineraryTrip.hotel}`}</strong><span>{formatMinute(itineraryTrip, day, (currentDay.visits.at(-1)?.end ?? (checkedDay || savedRecovery ? recoveryMinute(itineraryTrip, day, checkedDay?.departureAt ?? savedRecovery!.departureAt) : dayStart(itineraryTrip, day))) + currentDay.returnLeg.minutes)}</span></div></div></>}
               {day === itineraryTrip.days - 1 && itineraryTrip.departure && <TransferLine trip={itineraryTrip} kind="departure" />}
@@ -591,23 +603,23 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
         <div className="route-notices">{refreshPreview.result.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<span>Route information: Google Maps</span></div>
       </div>}
       <div className="dialog-actions"><button className="button secondary" onClick={() => { refreshAbort.current?.abort(); setRefreshOpen(false); setRefreshPreview(null); }}>Keep saved itinerary</button>
-        {refreshPreview && <button className="button primary" disabled={Boolean(busy) || refreshPreview.tripKey !== JSON.stringify(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan)} onClick={() => {
-          if (refreshPreview.tripKey !== JSON.stringify(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan) || validateSchedule(trip, refreshPreview.result.schedule).length) { setError("The trip changed. Refresh again before accepting new timings."); return; }
+        {refreshPreview && <button className="button primary" disabled={Boolean(busy) || refreshPreview.tripKey !== planningKey(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan)} onClick={() => {
+          if (refreshPreview.tripKey !== planningKey(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan) || validateSchedule(trip, refreshPreview.result.schedule).length) { setError("The trip changed. Refresh again before accepting new timings."); return; }
           const accepted = persistedPlan(refreshPreview.result.schedule, trip, refreshPreview.result.places);
           setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: accepted } }));
-          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(JSON.stringify(trip));
+          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(planningKey(trip));
           setRefreshOpen(false); setRefreshPreview(null); setError(""); setNotice("Travel times updated.");
         }}><Check size={16} />Use refreshed times</button>}
         {!busy && !refreshPreview && <button className="button secondary" onClick={() => { setRefreshOpen(false); setPlanningOpen(true); }}><Route size={16} />Replan itinerary</button>}
       </div>
     </Dialog>}
-    {planningOpen && <PlanningDialog trip={trip} places={places} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onPreview={generate} onCheck={(candidate) => requestJson("/api/plan", { trip: { ...candidate, dayGroups: undefined }, mode: "check", operationId: crypto.randomUUID() })} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
+    {planningOpen && <PlanningDialog trip={trip} places={places} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onAskAssistant={canUseServices && config.assistant ? askAssistant : undefined} onPreview={generate} onCheck={(candidate) => requestJson("/api/plan", { trip: { ...candidate, dayGroups: undefined }, mode: "check", operationId: crypto.randomUUID() })} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
       journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
       if (response && (!response.verified || validateSchedule(candidate, response.schedule).length)) throw new Error("Only a verified itinerary that respects the current preferences can be accepted.");
       const acceptedPlan = response ? persistedPlan(response.schedule, candidate, response.places) : undefined;
       editVersion.current += 1; setTrip(candidate);
       if (response) {
-        setResult(response); setPlaces(response.places); setPlannedFor(JSON.stringify(candidate)); setTab("itinerary"); setDay(0);
+        setResult(response); setPlaces(response.places); setPlannedFor(planningKey(candidate)); setTab("itinerary"); setDay(0);
         setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: acceptedPlan! } }));
       }
       setPlanningOpen(false); setError(""); setNotice(response ? "Itinerary updated. Check venue hours and ticket conditions before departure." : "Planning preferences updated.");
@@ -625,7 +637,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const hours = changes.dailyStart ? `Days now run ${changes.dailyStart}–${changes.dailyEnd}.` : "";
       setNotice([stops.length ? `${stops.length} ${stops.length === 1 ? "place" : "places"} added. Confirm each place on the map before planning.` : travel ? "" : "Approved duplicate updates applied.", travel, trips, hours].filter(Boolean).join(" "));
     }} />}
-    {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : search.id === "departure" || search.id === "arrival" ? "Find your airport or station" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. Try the hotel address or a more specific name.</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small></span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
+    {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : search.id === "departure" || search.id === "arrival" ? "Find your airport or station" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. {search.id === "hotel" ? "Try the hotel's address or a more specific name." : "Add the street or neighbourhood, or a more specific name."}</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small>{place.closed && <small className="place-closed">{place.closed === "permanently" ? "Permanently closed" : "Temporarily closed"}</small>}</span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
     {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Trip storage", ready: config.database }, { label: "Google Maps", ready: config.maps }, { label: "Place search and routes", ready: config.routes }, { label: "AI import", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Enabled" : "Not set up"}</span></div>)}</div><p className="notice">Do not include passwords or API keys in trips or uploaded documents.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Restricted access · Usage limits apply</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}
     {savedTrips && <Dialog title="My trips" onClose={() => setSavedTrips(null)}><div className="saved-trips">{savedTrips.length ? savedTrips.map((entry) => <div key={entry.data.id}><button className="saved-trip" disabled={Boolean(busy)} onClick={() => loadSaved(entry)}><span className="saved-trip-icon"><MapPin size={22} /></span><span><strong>{entry.data.title}</strong><small>{asJourney(entry.data).cities.map((city) => city.city).join(" / ")} · {asJourney(entry.data).cities[0].startDate}</small></span><ArrowUpRight size={17} /></button><button className="icon-button danger" title={`Delete ${entry.data.title}`} aria-label={`Delete ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => { if (window.confirm(`Delete ${entry.data.title}?`)) void perform("Deleting trip", async () => { await requestJson(`/api/trips/${entry.data.id}`, undefined, "DELETE"); setSavedTrips((current) => current!.filter((item) => item.data.id !== entry.data.id)); if (journey.id === entry.data.id) { setRevision(0); setSavedFor(""); } }); }}><Trash2 size={17} /></button></div>) : <p className="notice">No saved trips yet.</p>}</div><div className="dialog-actions"><button className="button primary" disabled={Boolean(busy)} onClick={() => { setSavedTrips(null); setSetup("new"); }}><Plus size={16} />New trip</button></div></Dialog>}
     {setup && <NewTripDialog adding={setup === "add"} available={setup === "add" ? 10 - journey.cities.length : 10} startDate={setup === "add" ? tripDate(journey.cities.at(-1)!, journey.cities.at(-1)!.days) : newTrip().startDate} onClose={() => setSetup(null)} onCreate={(next) => {
@@ -646,7 +658,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => {
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => {
       setTripMode(false);
       const pending = replanAfterTrip.current;
       replanAfterTrip.current = null;
@@ -655,6 +667,6 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       if (cityId !== trip.id) switchCity(cityId);
       setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
     }} />}
-    {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} />}
+    {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

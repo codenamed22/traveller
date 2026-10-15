@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { journeySchema, type Journey } from "./journey";
-import { bookingConflicts, changeStartDate, formatMinute, maxStopsPerCity, newStop, squeezeInNote, timeSchema, tripDate, tripSchema, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
+import { cityTripSchema, journeySchema, type Journey } from "./journey";
+import { bookingConflicts, changeStartDate, lateBookings, formatMinute, maxStopsPerCity, newStop, planningKey, squeezeInNote, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
 import { dayLabel, markDone, markSkipped, minuteNow, tripModeDays } from "./trip-mode";
 
 // Small trip edits the assistant can propose. Nothing is applied until the traveller approves the proposal card, and the
@@ -28,6 +28,7 @@ export const operationSchema = z.object({
   travel: z.enum(["auto", "walk", "transit"]).optional().describe("How to get there"),
   slot: visitSlotSchema.nullable().optional().describe("Time of day it suits; null clears it"),
   kind: visitKindSchema.optional(),
+  note: z.string().trim().max(500).optional().describe("add_stop or update_stop: the traveller's own note on the place, replacing any earlier one; empty removes it"),
   dailyStart: timeSchema.optional(), dailyEnd: timeSchema.optional(), returnToHotel: z.boolean().optional(),
   days: z.number().int().min(1).max(7).optional().describe("update_city: length of the stay"), startDate: z.iso.date().optional().describe("update_city: first day, YYYY-MM-DD"),
   transfer: z.enum(["arrival", "departure"]).optional(), time: timeSchema.optional().describe("update_transfer: arrival or departure time"),
@@ -38,12 +39,30 @@ export type Operation = z.infer<typeof operationSchema>;
 
 export const proposalSchema = z.object({
   summary: z.string().trim().min(1).max(200).describe("One short line for the card title, e.g. 'Fit Rum Baba into Day 3'"),
-  operations: z.array(operationSchema).min(1).max(8),
+  operations: z.array(operationSchema).min(1).max(15),
 });
 export type Proposal = z.infer<typeof proposalSchema>;
 // What propose_changes returns, and what the browser draws the card from.
 export const proposalOutputSchema = proposalSchema.extend({ ok: z.boolean(), changes: z.array(z.string()), warnings: z.array(z.string()), errors: z.array(z.string()) });
 export type ProposalOutput = z.infer<typeof proposalOutputSchema>;
+
+export type KnownPlace = { placeId: string; location: { lat: number; lng: number } };
+
+// The model copies place ids by hand and can get a character wrong, which Google only rejects later, at planning. A new
+// place keeps its map link only when the assistant has seen it (in the trip, or in a find_place result): the same id,
+// or failing that the same spot within about 30 m. Otherwise it is added by name, to confirm on the map.
+export function checkedPlaces(operations: Operation[], known: KnownPlace[]): Operation[] {
+  return operations.map((operation) => {
+    if (operation.type !== "add_stop" || !operation.place) return operation;
+    const { placeId, location: spot } = operation.place;
+    const match = known.find((place) => place.placeId === placeId)
+      ?? known.find((place) => Math.abs(place.location.lat - spot.lat) < 0.0003 && Math.abs(place.location.lng - spot.lng) < 0.0003);
+    if (match) return { ...operation, place: { placeId: match.placeId, location: match.location } };
+    const { place: _unchecked, ...rest } = operation;
+    void _unchecked;
+    return rest;
+  });
+}
 
 export type ApplyResult = { journey: Journey; changes: string[]; warnings: string[]; staleCities: string[]; errors: string[] };
 
@@ -91,6 +110,7 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
         if (operation.travel) stop.mode = modes[operation.travel];
         if (operation.slot && !stop.fixedTime) stop.slot = operation.slot;
         if (operation.kind) stop.kind = operation.kind;
+        if (operation.note) stop.note = operation.note;
         if (stop.fixedTime && assigned === null) throw new Error(`${stop.name}: a booking needs a day.`);
         if (stop.fixedTime && stop.optional) throw new Error(`${stop.name}: a booking can't be optional.`);
         trip.stops.push(stop); touched.add(trip.id);
@@ -109,6 +129,13 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
           // Choosing Flexible clears the booked time, as in the editor.
           if (next.day === null && stop.fixedTime && operation.booked === undefined) { next.fixedTime = null; parts.push(`booking ${stop.fixedTime} removed`); }
           if (next.day !== stop.day) parts.push(`${dayText(stop.day)} → ${dayText(next.day)}`);
+          // A place in a day trip takes the whole day trip with it: its other places and the day it's allowed on.
+          const group = trip.dayGroups?.find((candidate) => candidate.stopIds.includes(stop.id));
+          if (group && next.day !== null && !group.allowedDays.includes(next.day)) {
+            group.allowedDays = [next.day];
+            for (const member of trip.stops) if (member.id !== stop.id && group.stopIds.includes(member.id) && member.day !== null) member.day = next.day;
+            parts.push(`${group.name} day trip moves with it`);
+          }
         }
         if (operation.booked !== undefined && operation.booked !== stop.fixedTime) {
           next.fixedTime = operation.booked;
@@ -123,6 +150,10 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
           parts.push(operation.slot === null ? "no time of day" : operation.slot);
         }
         if (operation.kind !== undefined && operation.kind !== stop.kind) { next.kind = operation.kind; parts.push(operation.kind); }
+        if (operation.note !== undefined && operation.note !== (stop.note ?? "")) {
+          if (operation.note) next.note = operation.note; else delete next.note;
+          parts.push(operation.note ? `note: “${operation.note}”` : "note removed");
+        }
         // Shortening choices start at the planned duration and never apply to bookings, so a change resets them.
         if (next.duration !== stop.duration || next.fixedTime !== stop.fixedTime) delete next.durationOptions;
         if (next.fixedTime && next.day === null) throw new Error(`${next.name}: a booking needs a day.`);
@@ -192,17 +223,19 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
   if (errors.length) return { journey, changes: [], warnings: [], staleCities: [], errors };
 
   for (const trip of cities.filter((candidate) => touched.has(candidate.id))) {
-    const parsed = tripSchema.safeParse(trip);
+    const parsed = cityTripSchema.safeParse(trip);
     if (!parsed.success) return { journey, changes: [], warnings: [], staleCities: [], errors: [`${trip.city}: ${parsed.error.issues[0]?.message ?? "invalid change."}`] };
     const before = journey.cities.find((candidate) => candidate.id === trip.id)!;
     const known = new Set(bookingConflicts(before));
     for (const conflict of bookingConflicts(trip)) if (!known.has(conflict)) warnings.push(conflict);
+    const late = new Set(lateBookings(before));
+    for (const notice of lateBookings(trip)) if (!late.has(notice)) warnings.push(notice);
   }
   // Validated, but returned as built: parsing reorders keys, and itineraries go stale by comparing JSON.
   const next: Journey = { ...journey, cities, ...(Object.keys(execution).length ? { execution } : {}) };
   const parsed = journeySchema.safeParse(next);
   if (!parsed.success) return { journey, changes: [], warnings: [], staleCities: [], errors: [parsed.error.issues[0]?.message ?? "That change isn't possible."] };
-  const staleCities = cities.filter((trip) => touched.has(trip.id) && journey.plans[trip.id]?.snapshot && JSON.stringify(journey.plans[trip.id].snapshot!.trip) !== JSON.stringify(trip)).map((trip) => trip.id);
+  const staleCities = cities.filter((trip) => touched.has(trip.id) && journey.plans[trip.id]?.snapshot && planningKey(journey.plans[trip.id].snapshot!.trip) !== planningKey(trip)).map((trip) => trip.id);
   for (const cityId of staleCities) warnings.push(`${cities.find((trip) => trip.id === cityId)!.city}'s itinerary will need replanning.`);
   return { journey: next, changes, warnings, staleCities, errors: [] };
 }
@@ -236,10 +269,11 @@ export function assistantContext(journey: Journey, view: { cityId?: string; day?
         places: trip.stops.map((stop) => ({
           id: stop.id, name: stop.name, day: stop.day === null ? "flexible" : stop.day + 1, booked: stop.fixedTime ?? undefined, minutes: stop.duration,
           optional: stop.optional || undefined, slot: stop.slot, kind: stop.kind, travel: stop.mode === "AUTO" ? undefined : stop.mode.toLowerCase(), onMap: Boolean(stop.placeId && stop.location),
-          source: stop.source ? stop.source.slice(0, 160) : undefined,
+          source: stop.source ? stop.source.slice(0, 160) : undefined, note: stop.note || undefined,
+          dayTrip: trip.dayGroups?.find((group) => group.stopIds.includes(stop.id))?.name,
         })),
         itinerary: snapshot ? {
-          outOfDate: JSON.stringify(snapshot.trip) !== JSON.stringify(trip) || undefined,
+          outOfDate: planningKey(snapshot.trip) !== planningKey(trip) || undefined,
           days: snapshot.schedule.days.map((planned) => ({
             day: planned.day + 1, date: planned.date,
             visits: planned.visits.map((visit) => `${clock(snapshot.trip, planned.day, visit.start)}–${clock(snapshot.trip, planned.day, visit.end)} ${name(visit.stopId)} (${Math.round(visit.leg.minutes)} min ${visit.leg.mode === "WALK" ? "walk" : "transit"} before)`),

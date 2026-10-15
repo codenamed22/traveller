@@ -1,4 +1,4 @@
-import { act, createElement } from "react";
+import { act, createElement, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseHTML } from "linkedom";
@@ -6,7 +6,7 @@ import type { UIMessage } from "ai";
 import type { ProposalOutput } from "@/lib/assistant-ops";
 import type { Journey } from "@/lib/journey";
 import { newStop, newTrip } from "@/lib/trip";
-import { Assistant, AssistantMessages, type CardState } from "./Assistant";
+import { Assistant, AssistantMessages, type AssistantHandle, type CardState } from "./Assistant";
 
 let root: Root;
 let container: HTMLElement;
@@ -107,6 +107,21 @@ describe("trip assistant panel", () => {
     expect(Object.keys(body).sort()).toEqual(["consent", "journey", "messages", "operationId", "provider", "view"]);
     expect(container.textContent).toContain("Your next stop is Rum Baba.");
     expect(button("New chat")).toBeTruthy();
+  });
+
+  it("opens and sends a message handed to it, such as a planning failure, once consent is given", async () => {
+    const fetch = vi.fn(async () => new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" } }));
+    vi.stubGlobal("fetch", fetch);
+    const handle = createRef<AssistantHandle>();
+    await renderAssistant({ ref: handle });
+    await act(async () => handle.current!.ask("Plan my days failed for Amsterdam: Day 2 is full."));
+    expect(container.querySelector(".assistant-panel")?.className).toContain("open");
+    expect(container.textContent).toContain("Before you chat");
+    expect(fetch).not.toHaveBeenCalled();
+    await click(button("I agree, start chatting"));
+    await settle();
+    const body = JSON.parse(String((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body));
+    expect(body.messages.at(-1).parts).toEqual([{ type: "text", text: "Plan my days failed for Amsterdam: Day 2 is full." }]);
   });
 
   it("says so when a reply ends with nothing to show", async () => {

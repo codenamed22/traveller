@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, newDayProgress, recoveryMinute, type DayProgress } from "./day-recovery";
 import type { Journey } from "./journey";
-import { tripDate, type DayPlan, type Place, type SavedPlan, type Stop, type TravelEdge, type Trip, type Visit } from "./trip";
+import { planningKey, tripDate, type DayPlan, type Place, type SavedPlan, type Stop, type TravelEdge, type Trip, type Visit } from "./trip";
 
 // One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
 // snapshot, or today's replan); `cityTrip` is the city as it is now, which keys and validates day progress like the planner.
@@ -21,7 +21,7 @@ export function tripModeDays(cities: Trip[], plans: Record<string, SavedPlan>, e
     const snapshot = plans[city.id]?.snapshot;
     if (!snapshot) return [];
     const today = cityToday(city, now);
-    const stale = JSON.stringify(snapshot.trip) !== JSON.stringify(city);
+    const stale = planningKey(snapshot.trip) !== planningKey(city);
     return snapshot.schedule.days.map((planned) => {
       let date: string;
       try { date = tripDate(city, planned.day); } catch { date = planned.date; }

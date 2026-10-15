@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUpRight, Check, Footprints, LoaderCircle, LockKeyhole, Plus, Route, Search, Settings2, TrainFront, Trash2 } from "lucide-react";
+import { ArrowUpRight, Check, Footprints, LoaderCircle, LockKeyhole, Plus, Route, Search, Settings2, Sparkles, TrainFront, Trash2 } from "lucide-react";
 import { ZodError } from "zod";
 import { Dialog } from "./Dialog";
 import { ConflictResolution, ProvisionalOutline } from "./ConflictResolution";
 import { VisitTimingFields } from "./VisitTiming";
-import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningFix, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
+import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, groupAllowedDays, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningFix, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
 import { validateSchedule } from "@/lib/schedule-validation";
 import { timingResultSchema, type TimingResult } from "@/lib/timing";
 import { alternativeGroups } from "@/lib/visit-slots";
@@ -20,9 +20,11 @@ type Props = {
   onApply: (trip: Trip, result?: PlanResult) => void;
   onResearch: (places: { id: string; name: string; source: string; sourceUrl?: string }[]) => Promise<TimingResult>;
   places?: Record<string, Place>;
+  // Hands a planning failure to the trip assistant, which suggests changes to apply.
+  onAskAssistant?: (problem: string) => void;
 };
 
-export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview, onCheck, onApply, onResearch, places = {} }: Props) {
+export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview, onCheck, onApply, onResearch, onAskAssistant, places = {} }: Props) {
   const [resolving, setResolving] = useState(false);
   const [draft, setDraft] = useState<Trip>(() => ({ ...trip, planning: { ...planningPreferences(trip) } }));
   const [bookedTimes, setBookedTimes] = useState<Record<string, string>>(() => Object.fromEntries(trip.stops.filter((stop) => stop.fixedTime).map((stop) => [stop.id, stop.fixedTime!])));
@@ -60,6 +62,19 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   function edit(patch: Partial<Trip>) { setDraft((current) => ({ ...current, ...patch })); setPreview(null); setError(""); setFixes([]); }
   function editPreferences(patch: Partial<PlanningPreferences>) { edit({ planning: { ...preferences, ...patch } }); }
   function editGroup(id: string, patch: Partial<DayGroup>) { edit({ dayGroups: draft.dayGroups?.map((group) => group.id === id ? { ...group, ...patch } : group) }); }
+  // Places the group's eligible days can't override: each one set to a day (often from the itinerary) holds the whole
+  // outing to that day. Booked places stay where they are.
+  function pinnedDays(group: DayGroup) {
+    const eligible = group.allowedDays.filter((day) => day < draft.days);
+    const usable = groupAllowedDays(draft, group);
+    const pinned = draft.stops.filter((stop) => group.stopIds.includes(stop.id) && stop.day !== null && !stop.fixedTime);
+    if (!pinned.length || usable.length >= eligible.length) return null;
+    return { pinned, days: [...new Set(pinned.map((stop) => stop.day! + 1))].sort((left, right) => left - right) };
+  }
+  function releaseGroup(group: DayGroup) {
+    const pinned = new Set(pinnedDays(group)?.pinned.map((stop) => stop.id));
+    edit({ stops: draft.stops.map((stop) => pinned.has(stop.id) ? { ...stop, day: null } : stop) });
+  }
   function editStop(id: string, patch: Partial<Stop>) {
     edit({ stops: draft.stops.map((stop) => stop.id === id ? { ...stop, ...patch, ...(patch.duration !== undefined || patch.fixedTime ? { durationOptions: undefined } : {}) } : stop) });
     if (patch.fixedTime) {
@@ -98,6 +113,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
   function applyFixes() {
     const next = applyPlanningFixes(draft, fixes);
     setDraft(next); setPreview(null);
+    setBookedTimes((current) => ({ ...current, ...Object.fromEntries(next.stops.filter((stop) => stop.fixedTime).map((stop) => [stop.id, stop.fixedTime!])) }));
     void optimize(next);
   }
 
@@ -113,10 +129,11 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
     <div className="segmented planning-stages"><button disabled={Boolean(busy)} aria-pressed={stage === "preferences"} onClick={() => setStage("preferences")}><Settings2 size={15} />Preferences</button><button disabled={!preview || Boolean(busy)} aria-pressed={stage === "preview"} onClick={() => setStage("preview")}><Route size={15} />Suggested plan</button></div>
     {error && (fixes.length ? <div className="notice error planning-fixes" role="alert">
       <strong>{fixes.length === 1 ? "One visit can't be scheduled as set" : `${fixes.length} visits can't be scheduled as set`}</strong>
-      <ul>{fixes.map((fix) => <li key={fix.stopId}><strong>{fix.stopName}</strong>: {fix.issue} <span className="planning-fix-action">Suggested: {fix.action === "optimize-day" ? "set Day to Optimize" : fix.action === "flexible-optional" ? "set Day to Optimize and mark Optional" : "mark Optional"}</span></li>)}</ul>
+      <ul>{fixes.map((fix) => <li key={fix.stopId}><strong>{fix.stopName}</strong>: {fix.issue} <span className="planning-fix-action">Suggested: {fix.action === "rebook" ? fix.time ? `book it at ${fix.time}` : "change the booking" : fix.action === "optimize-day" ? "set Day to Optimize" : fix.action === "flexible-optional" ? "set Day to Optimize and mark Optional" : "mark Optional"}</span></li>)}</ul>
       <button className="button primary" disabled={Boolean(busy) || !confirmed || !!conflicts.length || !validated.success} onClick={applyFixes}><Check size={15} />Apply all suggestions and plan again</button>
       <details><summary>Details</summary><p>{error}</p></details>
     </div> : <p className="notice error" role="alert">{error}</p>)}
+    {error && onAskAssistant && <button className="button secondary planning-ask" disabled={Boolean(busy)} onClick={() => onAskAssistant(error)}><Sparkles size={15} />Ask the assistant to fix this</button>}
     {error && !!dayTripSuggestions.length && <p className="notice warning">Consider grouping distant visits as a day trip.</p>}
     {busy && <p className="planning-progress" role="status"><LoaderCircle size={16} className="spin" />{busy === "planning" ? "Planning your days..." : "Checking visit durations..."}</p>}
     {stage === "preferences" ? <>
@@ -144,6 +161,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
             <div className="planning-visit-options"><label className="checkbox"><input type="checkbox" aria-label={`Exclusive day for ${group.name}`} checked={group.exclusive} onChange={(event) => editGroup(group.id, { exclusive: event.target.checked })} />Exclusive day</label></div>
             <label className="field">Assumed travel each way (min), only if Google has no route<input type="number" min={5} max={240} placeholder="Not set" aria-label={`Assumed travel minutes for ${group.name}`} value={group.assumedTravelMinutes ?? ""} onChange={(event) => editGroup(group.id, { assumedTravelMinutes: event.target.value === "" ? undefined : Number(event.target.value) })} /></label>
             <fieldset className="planning-inputs"><legend>Eligible days</legend><div className="planning-visit-options">{Array.from({ length: draft.days }, (_, day) => <label className="checkbox" key={day}><input type="checkbox" aria-label={`Day ${day + 1} allowed for ${group.name}`} checked={group.allowedDays.includes(day)} onChange={(event) => editGroup(group.id, { allowedDays: event.target.checked ? [...group.allowedDays, day].sort((left, right) => left - right) : group.allowedDays.filter((allowed) => allowed !== day) })} />Day {day + 1}</label>)}</div></fieldset>
+            {(() => { const held = pinnedDays(group); return held && <p className="notice" role="status">{held.pinned.length === 1 ? `${held.pinned[0].name} is` : `${held.pinned.length} of its places are`} set to Day {held.days.join(" and Day ")}, so {group.name || "this day trip"} can only go on {held.days.length === 1 ? `Day ${held.days[0]}` : "one of those days"}. <button className="text-button" type="button" onClick={() => releaseGroup(group)}>Let the planner pick the day</button></p>; })()}
             <details className="research-evidence" open><summary>Visits ({group.stopIds.length})</summary><div className="form-grid">{draft.stops.map((stop) => <label className="checkbox" key={stop.id}><input type="checkbox" aria-label={`Include ${stop.name} in ${group.name}`} checked={group.stopIds.includes(stop.id)} disabled={draft.dayGroups!.some((other) => other.id !== group.id && other.stopIds.includes(stop.id))} onChange={(event) => editGroup(group.id, { stopIds: event.target.checked ? [...group.stopIds, stop.id] : group.stopIds.filter((id) => id !== stop.id) })} /><span>{stop.name}{stop.day !== null && <small className="quiet"> / Day {stop.day + 1}{stop.fixedTime ? `, ${stop.fixedTime}` : ""}</small>}</span></label>)}</div></details>
           </div>)}
           <button className="button secondary" type="button" disabled={!draft.stops.some((stop) => !draft.dayGroups?.some((group) => group.stopIds.includes(stop.id)))} onClick={() => edit({ dayGroups: [...draft.dayGroups ?? [], { id: crypto.randomUUID(), name: "Day trip", stopIds: [], allowedDays: Array.from({ length: draft.days }, (_, day) => day), exclusive: true }] })}><Plus size={15} />Add day trip</button>

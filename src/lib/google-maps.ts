@@ -4,7 +4,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, assumedGroupEdge, dayEnd, dayStart, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
 import { HttpError } from "./server";
-import { blockedDayFixes, kmBetween, solveTrip, solveTripByDays, PlanningError, squeezeIns, travelEstimator, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
+import { blockedDayFixes, kmBetween, solveTrip, solveTripByDays, PlanningError, squeezeIns, travelEstimator, twoLegBound, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
 import { validateSchedule } from "./schedule-validation";
 import { assignDays } from "./days";
 import { solveTripWithOrTools } from "./ortools";
@@ -19,6 +19,7 @@ const placeResponse = z.object({
   id: z.string(), displayName: z.object({ text: z.string() }), formattedAddress: z.string().optional(), location: z.object({ latitude: z.number(), longitude: z.number() }), timeZone: z.object({ id: z.string() }).optional(),
   primaryType: z.string().max(100).optional(), types: z.array(z.string().max(100)).max(50).optional(),
   regularOpeningHours: z.object({ periods: z.array(z.object({ open: openingPointResponse, close: openingPointResponse.optional() })).max(50).default([]) }).optional(),
+  businessStatus: z.string().max(50).optional(),
 });
 const routeResponse = z.object({ routes: z.array(z.object({
   duration: z.string(), distanceMeters: z.number().default(0), polyline: z.object({ encodedPolyline: z.string() }).optional(),
@@ -61,18 +62,50 @@ export class RequestBudget {
   }
 }
 
+// Google rejects a place id that is mistyped or no longer exists; the caller names the place it belongs to.
+class InvalidPlaceIdError extends HttpError {
+  constructor(public placeId: string) { super(422, "A place's map link is no longer valid. Find it on the map again."); }
+}
+
+type GoogleErrorBody = { error?: { status?: string; message?: string; details?: { reason?: string }[] } } | null;
+
+// What to tell the traveller when Google refuses a request. Only a problem with the key points at the key's settings;
+// Google's own message stays in the server log.
+function googleFailure(status: number, detail: GoogleErrorBody): HttpError {
+  const code = detail?.error?.status ?? "";
+  const reason = detail?.error?.details?.find((entry) => entry.reason)?.reason ?? "";
+  if (status === 429 || code === "RESOURCE_EXHAUSTED") return new HttpError(429, "Google Maps quota reached. Try again later.");
+  if (reason === "API_KEY_INVALID") return new HttpError(502, "The Google Maps key isn't valid. Check GOOGLE_MAPS_API_KEY.");
+  if (reason === "SERVICE_DISABLED") return new HttpError(502, "A Google Maps API this needs is turned off for the key's project. Enable Places API (New) and Routes API in Google Cloud.");
+  if (reason === "BILLING_DISABLED") return new HttpError(502, "Billing is turned off for the Google Maps project. Turn it on in Google Cloud.");
+  if (reason.startsWith("API_KEY_")) return new HttpError(502, "The Google Maps key's restrictions block this request. Allow Places API (New) and Routes API, and this server, in the key's settings.");
+  if (status === 401 || status === 403 || code === "PERMISSION_DENIED") return new HttpError(502, "Google Maps refused the key for this request. Check that Places API (New) and Routes API are enabled and allowed for the key.");
+  if (status >= 500) return new HttpError(502, "Google Maps is having trouble right now. Try again in a minute.");
+  return new HttpError(502, "Google Maps couldn't process this request. Try again, and if it keeps happening, check the places and stations on the map.");
+}
+
 async function googleRequest(url: string, fields: string | undefined, body?: unknown, signal?: AbortSignal) {
   if (!process.env.GOOGLE_MAPS_API_KEY) throw new HttpError(503, "Route services are unavailable. Check your connections.");
-  const response = await fetch(url, {
-    method: body ? "POST" : "GET", cache: "no-store", signal: AbortSignal.any([AbortSignal.timeout(12_000), ...(signal ? [signal] : [])]),
-    headers: { "Content-Type": "application/json", "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY, ...(fields ? { "X-Goog-FieldMask": fields } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) {
-    const detail = await response.clone().json().catch(() => null) as { error?: { status?: string; message?: string; details?: { reason?: string }[] } } | null;
-    console.error("[google-maps]", response.status, detail?.error?.status, detail?.error?.details?.[0]?.reason, detail?.error?.message);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: body ? "POST" : "GET", cache: "no-store", signal: AbortSignal.any([AbortSignal.timeout(12_000), ...(signal ? [signal] : [])]),
+      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY, ...(fields ? { "X-Goog-FieldMask": fields } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") throw new HttpError(504, "Google Maps took too long to answer. Try again.");
+    throw error;
   }
-  if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, response.status === 429 ? "Google Maps quota reached. Try again later." : "Google Maps could not complete the request. Check the enabled APIs and key restrictions.");
+  if (!response.ok) {
+    const detail = await response.clone().json().catch(() => null) as GoogleErrorBody;
+    console.error("[google-maps]", response.status, detail?.error?.status, detail?.error?.details?.[0]?.reason, detail?.error?.message);
+    // A mistyped place id is rejected as invalid; a well-formed one for a place that is gone is not found.
+    const place = (response.status === 400 && detail?.error?.message?.match(/Place ID: (\S+) is not valid/))
+      || (response.status === 404 && url.match(/places\.googleapis\.com\/v1\/places\/([^/?:]+)$/));
+    if (place) throw new InvalidPlaceIdError(decodeURIComponent(place[1]));
+    throw googleFailure(response.status, detail);
+  }
   return response.json();
 }
 
@@ -82,16 +115,21 @@ function normalizePlace(value: z.infer<typeof placeResponse>): Place {
   return {
     id: value.id, name: value.displayName.text, address: value.formattedAddress ?? "", location: { lat: value.location.latitude, lng: value.location.longitude }, timeZone: value.timeZone?.id,
     ...(value.primaryType ? { primaryType: value.primaryType } : {}), ...(value.types?.length ? { types: value.types } : {}), ...(hours?.length ? { hours } : {}),
+    ...(value.businessStatus === "CLOSED_PERMANENTLY" ? { closed: "permanently" as const } : value.businessStatus === "CLOSED_TEMPORARILY" ? { closed: "temporarily" as const } : {}),
   };
 }
 
-export async function searchPlaces(query: string): Promise<Place[]> {
-  const body = await googleRequest("https://places.googleapis.com/v1/places:searchText", "places.id,places.displayName,places.formattedAddress,places.location", { textQuery: query, pageSize: 5 });
+// Google finds nothing for some bare names ("Wide Awake Coffee") unless told where to look, so a search near the trip
+// is biased towards it. A bias, not a limit: a place named with its own town is still found.
+export async function searchPlaces(query: string, near?: { lat: number; lng: number }): Promise<Place[]> {
+  const body = await googleRequest("https://places.googleapis.com/v1/places:searchText", "places.id,places.displayName,places.formattedAddress,places.location,places.businessStatus", {
+    textQuery: query, pageSize: 5, ...(near ? { locationBias: { circle: { center: { latitude: near.lat, longitude: near.lng }, radius: 50_000 } } } : {}),
+  });
   return z.object({ places: z.array(placeResponse).default([]) }).parse(body).places.map(normalizePlace);
 }
 
 export async function placeDetails(id: string, signal?: AbortSignal) {
-  const body = await googleRequest(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`, "id,displayName,formattedAddress,location,timeZone,primaryType,types,regularOpeningHours", undefined, signal);
+  const body = await googleRequest(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`, "id,displayName,formattedAddress,location,timeZone,primaryType,types,regularOpeningHours,businessStatus", undefined, signal);
   return normalizePlace(placeResponse.parse(body));
 }
 
@@ -501,11 +539,16 @@ async function sampleGroupAccess(trip: Trip, places: Record<string, Place>, budg
 }
 
 // Search-only travel estimates for nearby pairs Google was not asked about; actual-departure verification replaces every chosen leg.
-function withEstimates(trip: Trip, places: Record<string, Place>, samples: Pick<RouteSamples, "has">, edges: TravelEdge[], limits: { neighbours: number; walkOnlyKm?: number; cautious?: boolean } = { neighbours: 8 }) {
+// Beyond this a pair is a day trip from the city rather than a trip across it.
+const dayTripKm = 10;
+
+export function withEstimates(trip: Trip, places: Record<string, Place>, samples: Pick<RouteSamples, "has">, edges: TravelEdge[], limits: { neighbours: number; walkOnlyKm?: number; cautious?: boolean } = { neighbours: 8 }) {
   const km = (from: string, to: string, day = 0) => kmBetween(places[from].location, (places[endpointKey(trip, day, to, "to")] ?? places[to]).location);
   // Calibrated to how slow Google's sampled routes were for this trip, so estimates are not more optimistic than the
   // city's real travel.
   const estimate = travelEstimator(edges, (edge) => places[edge.from] && places[edge.to] ? km(edge.from, edge.to, edge.day) : undefined, limits.cautious);
+  // A day trip's way back is far quicker by train than the city formula: never slower than two real legs via a third place.
+  const via = twoLegBound(trip, edges);
   const estimates: TravelEdge[] = [];
   for (let day = 0; day < trip.days; day++) {
     const delta = instantAt(trip, day, trip.dailyStart).epochMilliseconds - Date.now();
@@ -518,9 +561,18 @@ function withEstimates(trip: Trip, places: Record<string, Place>, samples: Pick<
         const distance = km(from, to, day);
         for (const mode of travelModes(trip, trip.stops.find((stop) => stop.id === to))) {
           if (samples.has(day, from, to, mode) || (mode === "TRANSIT" && (!transitAvailable || limits.walkOnlyKm !== undefined))) continue;
-          const edge: TravelEdge = { day, from, to, mode, estimated: true, meters: Math.round(distance * 1300), minutes: estimate(mode, distance) };
+          const edge: TravelEdge = { day, from, to, mode, estimated: true, meters: Math.round(distance * 1300), minutes: mode === "TRANSIT" ? Math.min(estimate(mode, distance), via(day, from, to)) : estimate(mode, distance) };
           if (allowsTravelEdge(trip, edge)) estimates.push(edge);
         }
+      }
+      // The walking-only pass still connects a day trip with the city by two real legs via a third place, so an evening
+      // out of town can come back to any visit that day, not only the few places sampling happened to pair it with.
+      if (limits.walkOnlyKm === undefined || !transitAvailable) continue;
+      for (const to of nodes) {
+        if (to === from || km(from, to, day) <= dayTripKm || samples.has(day, from, to, "TRANSIT") || !allowsVisitPair(trip, from, to) || !travelModes(trip, trip.stops.find((stop) => stop.id === to)).includes("TRANSIT")) continue;
+        const minutes = via(day, from, to);
+        const edge: TravelEdge = { day, from, to, mode: "TRANSIT", estimated: true, meters: Math.round(km(from, to, day) * 1300), minutes };
+        if (Number.isFinite(minutes) && allowsTravelEdge(trip, edge)) estimates.push(edge);
       }
     }
   }
@@ -857,7 +909,11 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   if (!input.stops.length) throw new HttpError(400, "Add at least one place to visit.");
   const ids = ["hotel", ...input.stops.map((stop) => stop.id)];
   const places: Record<string, Place> = {};
-  const details = await mapConcurrent([input.hotelPlaceId, ...input.stops.map((stop) => stop.placeId!)], (id) => placeDetails(id, options.signal));
+  const details = await mapConcurrent([input.hotelPlaceId, ...input.stops.map((stop) => stop.placeId!)], (id) => placeDetails(id, options.signal)).catch((error) => {
+    if (!(error instanceof InvalidPlaceIdError)) throw error;
+    const name = error.placeId === input.hotelPlaceId ? input.hotel || "The hotel" : input.stops.find((stop) => stop.placeId === error.placeId)?.name;
+    throw name ? new HttpError(422, `${name} has a map link Google no longer recognises. Open it, find it on the map again, then plan.`) : error;
+  });
   ids.forEach((id, index) => { places[id] = details[index]; });
   if (directDeparture(input)) places.departure = await placeDetails(input.departure!.placeId!, options.signal);
   if (places.hotel.timeZone && places.hotel.timeZone !== input.timeZone) throw new HttpError(400, `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before planning.`);
@@ -1112,6 +1168,8 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
       const assumedLegs = schedule.days.flatMap((day) => [...day.visits.map((visit) => visit.leg), ...(day.returnLeg ? [day.returnLeg] : [])]).filter((leg) => leg.assumed).length;
       const proxyLegs = schedule.days.flatMap((day) => [...day.visits.map((visit) => visit.leg), ...(day.returnLeg ? [day.returnLeg] : [])]).filter((leg) => leg.timetableDate);
       if (proxyLegs.length) warnings.push(`${proxyLegs.length} transit leg${proxyLegs.length === 1 ? " uses" : "s use"} the same weekday's timetable (${[...new Set(proxyLegs.map((leg) => leg.timetableDate))].sort().join(", ")}), not confirmed service on your trip dates. Holiday changes may not be reflected. Refresh travel times closer to departure.`);
+      const closed = input.stops.filter((stop) => places[stop.id]?.closed);
+      for (const stop of closed) warnings.push(`${stop.name} is marked ${places[stop.id].closed} closed on Google Maps. Check it, or find the place on the map again.`);
       if (assumedLegs) warnings.push(`${assumedLegs} day-trip leg${assumedLegs === 1 ? " uses" : "s use"} your assumed travel time because Google returned no transit route for those dates. Check the train timetable and refresh the plan closer to the trip.`);
       schedule.warnings = [...new Set([...schedule.warnings, ...warnings])];
       // Development only: keep the last solved problem so a surprising itinerary can be replayed offline.
@@ -1119,7 +1177,9 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
       return { status: "verified" as const, schedule, places, verified: true as const };
     }
   }
-  throw failure("verification-failed", joint ? "No itinerary passed actual-departure verification within the repair budget. This does not prove the trip is impossible; no itinerary was changed." : "Transit timing changed enough to break the schedule. Add more time between bookings or assign fewer sights to each day.");
+  // Name what the last check found, so the traveller knows which visit or day to give more room.
+  const lastCheck = verificationIssues.at(-1) ? ` With actual departure times: ${verificationIssues.at(-1)}${/outside sightseeing hours/.test(verificationIssues.at(-1)!) ? ` Try a later Sightseeing ends than ${input.dailyEnd} or fewer visits that day.` : ""}` : "";
+  throw failure("verification-failed", joint ? `No itinerary passed actual-departure verification within the repair budget.${lastCheck} This does not prove the trip is impossible; no itinerary was changed.` : `Transit timing changed enough to break the schedule.${lastCheck} Add more time between bookings or assign fewer sights to each day.`);
   } catch (error) {
     if (error instanceof PlanningFailure && process.env.NODE_ENV === "development" && debugProblem) {
       await writeFile("/tmp/traveller-plan-debug.json", JSON.stringify({ ...debugProblem, places, stages, failure: error.message, verificationIssues })).catch(() => undefined);

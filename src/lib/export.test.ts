@@ -41,6 +41,12 @@ describe("itinerary export", () => {
     const edited = { ...data, cities: [{ ...trip, dailyEnd: "20:00" }, data.cities[1]] };
     expect(itineraryExport(edited).cities[0].outOfDate).toBe(true);
     expect(exportFilename(exported, "xlsx")).toBe("amsterdam-brussels.xlsx");
+    // A note written after planning appears without making the plan out of date.
+    const noted = { ...data, cities: [{ ...trip, stops: trip.stops.map((stop) => stop.name === "Sango Coffee" ? { ...stop, note: "Cash only <3" } : stop) }, data.cities[1]] };
+    const withNote = itineraryExport(noted);
+    expect(withNote.cities[0].outOfDate).toBe(false);
+    expect(withNote.cities[0].days[0].visits[0].yourNote).toBe("Cash only <3");
+    expect(itineraryHtml(withNote)).toContain("<strong>Note:</strong> Cash only &lt;3");
   });
 
   it("drops the original itinerary's clock times from notes", () => {

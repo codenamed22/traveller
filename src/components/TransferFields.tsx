@@ -68,13 +68,13 @@ export function TransferFields({ trip, kind, onChange, onFind }: { trip: Trip; k
   </fieldset>;
 }
 
-const icons = { FLIGHT: Plane, TRAIN: TrainFront, BUS: Bus, CAR: Car, OTHER: MapPin };
+export const transferIcons = { FLIGHT: Plane, TRAIN: TrainFront, BUS: Bus, CAR: Car, OTHER: MapPin };
 
 // The itinerary's arrival row on day 1 and departure row on the last day.
 export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
   const transfer = trip[kind];
   if (!transfer) return null;
-  const Icon = icons[transfer.mode];
+  const Icon = transferIcons[transfer.mode];
   const where = transfer.place || `the ${hub[transfer.mode]}`;
   const label = [transfer.reference, modes.find((mode) => mode.value === transfer.mode)?.label].filter(Boolean)[0];
   let detail = "";

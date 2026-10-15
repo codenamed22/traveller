@@ -222,12 +222,14 @@ export function dayTripGroup(entry: ImportedDayTrip, stopIds: string[], trip: Tr
 const clock = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 const minutesOf = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 
-// The hours an itinerary keeps, from its first scheduled start to its last scheduled end, when they reach beyond the
-// city's sightseeing day. Rounded out to the quarter hour.
+// The hours an itinerary keeps, from its first scheduled start to its last scheduled end plus some slack, when they
+// reach beyond the city's sightseeing day. Rounded out to the quarter hour. Without the slack the last visit ends exactly
+// at the end of the day, and any real leg a few minutes longer than estimated breaks the plan.
+const itinerarySlack = 30;
 export function itineraryHours(candidates: ImportCandidate[], trip: Trip): { dailyStart: string; dailyEnd: string } | null {
   const spans = candidates.flatMap((candidate) => {
     const start = candidate.time ?? candidate.plannedTime;
-    return start ? [[minutesOf(start), minutesOf(start) + (candidate.duration ?? 45)]] : [];
+    return start ? [[minutesOf(start), minutesOf(start) + (candidate.duration ?? 45) + itinerarySlack]] : [];
   });
   if (!spans.length) return null;
   const earliest = Math.floor(Math.min(...spans.map(([start]) => start)) / 15) * 15;

@@ -93,8 +93,25 @@ describe("trip assistant API", () => {
     expect(outputs[0]).toEqual({ places: [{ placeId: "g-toki", name: "Toki", address: "Binnen Dommersstraat 15", location: { lat: 52.38, lng: 4.89 } }] });
     expect(outputs[3]).toEqual({ error: "No more lookups for this message. Add the place by name instead." });
     expect(mocks.searchPlaces).toHaveBeenCalledTimes(3);
-    expect(mocks.searchPlaces).toHaveBeenCalledWith("Toki coffee, Amsterdam");
+    expect(mocks.searchPlaces).toHaveBeenCalledWith("Toki coffee, Amsterdam", amsterdam.hotelLocation);
     expect(mocks.reserveUsage.mock.calls.filter((call) => call[1] === 1)).toHaveLength(3);
+  });
+
+  it("repairs a place id the model mistyped from find_place, and drops one it never saw", async () => {
+    const bouche = { id: "ChIJeaHQeG_Fw0cRqnvYPuQe9Fo", name: "Bouche", address: "Rue Lesbroussart", location: { lat: 50.8416133, lng: 4.3596525 } };
+    mocks.searchPlaces.mockResolvedValue([bouche]);
+    mocks.fetch
+      .mockResolvedValueOnce(toolCall("find_place", { cityId: amsterdam.id, query: "Bouche" }))
+      .mockResolvedValueOnce(toolCall("propose_changes", { summary: "Add coffee", operations: [
+        { type: "add_stop", cityId: amsterdam.id, name: "Bouche", place: { placeId: "ChIJeaHQeG_Fw0cRqnvYPuc9Fo", location: bouche.location } },
+        { type: "add_stop", cityId: amsterdam.id, name: "Invented", place: { placeId: "ChIJmadeUp", location: { lat: 1, lng: 1 } } },
+      ] }, "call_2"))
+      .mockResolvedValueOnce(reply("Suggested."));
+    const chunks = await events(await POST(request()));
+    const output = chunks.filter((entry) => entry.type === "tool-output-available").at(-1)?.output;
+    expect(output.operations[0].place).toEqual({ placeId: bouche.id, location: bouche.location });
+    expect(output.operations[1].place).toBeUndefined();
+    expect(output.warnings).toContain("Confirm Invented on the map before planning.");
   });
 
   it("checks configuration, consent and model before spending anything", async () => {
@@ -127,6 +144,10 @@ describe("trip assistant API", () => {
 
   it("rejects an invalid trip, an empty or oversized message and a conversation ending with the assistant", async () => {
     expect((await POST(request({ journey: { ...journey, cities: [] } }))).status).toBe(400);
+    // A trip the editor holds but can't save says what to fix.
+    const conflicted = await POST(request({ journey: { ...journey, cities: [{ ...amsterdam, stops: amsterdam.stops.map((stop) => stop.id === cake.id ? { ...stop, day: 5 } : stop) }, ...journey.cities.slice(1)] } }));
+    expect(conflicted.status).toBe(422);
+    expect((await conflicted.json()).error).toBe("Fix this in the trip first, then ask again: Rum Baba is assigned outside this trip.");
     expect((await POST(request({ messages: [userMessage(" ")] }))).status).toBe(400);
     expect((await POST(request({ messages: [userMessage("x".repeat(2001))] }))).status).toBe(413);
     expect((await POST(request({ messages: [{ id: "a", role: "assistant", parts: [{ type: "text", text: "Hi" }] }] }))).status).toBe(400);

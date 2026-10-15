@@ -7,13 +7,14 @@ export type TimingSource = "set" | "research" | "itinerary" | "note" | "place";
 export type TimingContext = { places?: Record<string, Place> };
 export type VisitTiming = { kind?: VisitKind; kindSource?: TimingSource; slot?: VisitSlot; slotSource?: TimingSource; plannedTime?: string; plannedSource?: TimingSource };
 export type TimeTarget = { start: number; end: number; weight: number; label: string; source: TimingSource };
-export type CapCategory = "breakfast" | "lunch" | "dinner" | "coffee";
+export type CapCategory = "breakfast" | "lunch" | "dinner" | "meal" | "coffee";
 export type AlternativeGroup = { key: string; stopIds: string[]; required: boolean; inferred: boolean };
 
 export const slotLabels: Record<VisitSlot, string> = { breakfast: "Breakfast", morning: "Morning", lunch: "Lunch", afternoon: "Afternoon", dinner: "Dinner", evening: "Evening", any: "Any time" };
 export const kindLabels: Record<VisitKind, string> = { meal: "Meal", snack: "Snack", coffee: "Coffee", sight: "Sight", walk: "Walk", activity: "Activity", nightlife: "Nightlife" };
-export const timingSourceLabels: Record<TimingSource, string> = { set: "your choice", research: "timing research", itinerary: "original itinerary time", note: "from your note", place: "Google place type" };
-export const dailyCaps: Record<CapCategory, number> = { breakfast: 1, lunch: 1, dinner: 1, coffee: 2 };
+export const timingSourceLabels: Record<TimingSource, string> = { set: "your choice", research: "timing research", itinerary: "original itinerary time", note: "from the itinerary text", place: "Google place type" };
+// A meal not marked as breakfast, lunch or dinner is one of the day's two main meals.
+export const dailyCaps: Record<CapCategory, number> = { breakfast: 1, lunch: 1, dinner: 1, meal: 2, coffee: 2 };
 
 // Windows constrain the visit start. Weights are travel-minute equivalents per minute outside the window.
 const slotWindows: Record<Exclude<VisitSlot, "any" | "evening">, { start: string; end: string; weight: number }> = {
@@ -56,7 +57,7 @@ const kindRules: { pattern: RegExp; kind: VisitKind; slot?: VisitSlot }[] = [
   { pattern: /\b(tour|experience|cruise|show|class|workshop)\b/i, kind: "activity" },
 ];
 const slotRules: { pattern: RegExp; slot: VisitSlot }[] = [
-  { pattern: /\b(evening|night|after dark|sunset|light (?:trail|festival|show|walk|route)|illuminat\w*)\b/i, slot: "evening" },
+  { pattern: /\b(evening|night|after dark|sunset|light (?:trail|festival|show|walk|route|display|installation)s?|(?:christmas|festive|holiday) lights|illuminat\w*)\b/i, slot: "evening" },
   { pattern: /\bmorning\b/i, slot: "morning" },
   { pattern: /\bafternoon\b/i, slot: "afternoon" },
 ];
@@ -192,6 +193,14 @@ function plannedClashes(trip: Trip, stop: Stop, day: number, planned: number) {
   })());
 }
 
+// A light trail, illumination or night market is only worth it after dark; an itinerary that slots one in daylight was
+// arranging the day around something else, so the evening wins.
+function plannedInDaylight(trip: Trip, day: number, timing: VisitTiming, location?: { lat: number; lng: number }) {
+  if (timing.slot !== "evening" || !timing.plannedTime) return false;
+  const sunset = sunsetMinute(trip, day, location) ?? minuteOrWall(trip, day, "17:30");
+  return minuteOrWall(trip, day, timing.plannedTime) < sunset;
+}
+
 export function timeTarget(trip: Trip, stop: Stop, day: number, context: TimingContext = {}): TimeTarget | null {
   if (stop.fixedTime) return null;
   if (stop.preferredTimeWindow) {
@@ -203,7 +212,7 @@ export function timeTarget(trip: Trip, stop: Stop, day: number, context: TimingC
   const timing = visitTiming(trip, stop, place);
   const outdoor = timing.kind === "walk";
   if (stop.slot) { const target = slotTarget(trip, day, stop.slot, "set", location); return outdoor && target && stop.slot !== "evening" ? withDaylight(trip, stop, day, target, location) : target; }
-  if (timing.plannedTime) {
+  if (timing.plannedTime && !plannedInDaylight(trip, day, timing, location)) {
     const planned = minuteOrWall(trip, day, timing.plannedTime);
     if (!plannedClashes(trip, stop, day, planned)) return { start: planned - plannedTolerance, end: planned + plannedTolerance, weight: plannedWeight, label: `Original plan ${timing.plannedTime}`, source: "itinerary" };
   }
@@ -221,17 +230,57 @@ export function describeTiming(trip: Trip, stop: Stop, place?: Place): { label: 
   const describe = (slot: VisitSlot, source: TimingSource) => slot === "any" ? { label: "Any time", source } : slot === "evening" ? { label: "Evening, after sunset", source } : { label: `${slotLabels[slot]} ${slotWindows[slot].start}–${slotWindows[slot].end}`, source };
   if (stop.slot) return describe(stop.slot, "set");
   const timing = visitTiming(trip, stop, place);
-  if (timing.plannedTime) return { label: `Original plan ${timing.plannedTime}`, source: "itinerary" };
+  if (timing.plannedTime && !plannedInDaylight(trip, 0, timing, place?.location ?? stop.location ?? trip.hotelLocation)) return { label: `Original plan ${timing.plannedTime}`, source: "itinerary" };
   if (timing.slot) return describe(timing.slot, timing.slotSource!);
   const window = timing.kind ? kindWindows[timing.kind] : undefined;
   if (window) return { label: `${window.label} ${window.start}–${window.end}`, source: timing.kindSource! };
   return timing.kind === "walk" ? { label: "Daylight hours", source: timing.kindSource! } : null;
 }
 
+// Light trails, light displays, illuminations and night markets are pointless in daylight, so they start after sunset as
+// firmly as a museum keeps its opening hours. Choosing another Time of day for the place lifts this.
+const afterDarkPattern = /\b(after dark|light (?:trail|festival|show|walk|route|display|installation)s?|(?:christmas|festive|holiday) lights|illuminat\w*|night markets?)\b/i;
+export function afterDark(stop: Pick<Stop, "name" | "source" | "slot" | "fixedTime">) {
+  return !stop.fixedTime && (!stop.slot || stop.slot === "evening") && afterDarkPattern.test(`${stop.name}\n${stop.source}`);
+}
+
+// When a flexible visit can happen on a trip day: its regular opening hours, from sunset for after-dark places.
+// null means no restriction is known.
+export function visitHours(trip: Trip, day: number, stop: Stop, place?: Place): [number, number][] | null {
+  const hours = openingIntervals(trip, day, place);
+  if (!afterDark(stop)) return hours;
+  const exact = sunsetMinute(trip, day, place?.location ?? stop.location ?? trip.hotelLocation);
+  if (exact === null) return hours;
+  // A whole minute, so visit times and lengths stay whole too.
+  const sunset = Math.ceil(exact);
+  return (hours ?? [[0, 2880]]).flatMap(([open, close]): [number, number][] => Math.max(open, sunset) < close ? [[Math.max(open, sunset), close]] : []);
+}
+
+// Meals on one day are kept this far apart, from the end of one to the start of the next, so you are hungry again.
+export const mealGapMinutes = 120;
+
+export function isMeal(trip: Pick<Trip, "stops">, stop: Stop, place?: Place) {
+  return visitTiming(trip, stop, place).kind === "meal";
+}
+
+export type MealGap = { first: string; second: string; gap: number; shortfall: number };
+
+// Consecutive meals in one day's visits that sit closer than the gap. Two bookings are left alone: neither can move.
+export function mealGaps(trip: Pick<Trip, "stops">, visits: { stopId: string; start: number; end: number }[], places?: Record<string, Place>): MealGap[] {
+  const meals = visits.filter((visit) => { const stop = trip.stops.find((candidate) => candidate.id === visit.stopId); return stop && isMeal(trip, stop, places?.[stop.id]); }).sort((left, right) => left.start - right.start);
+  const booked = (id: string) => Boolean(trip.stops.find((stop) => stop.id === id)?.fixedTime);
+  return meals.slice(1).flatMap((visit, index) => {
+    const previous = meals[index];
+    const gap = visit.start - previous.end;
+    return gap < mealGapMinutes - 0.01 && !(booked(previous.stopId) && booked(visit.stopId)) ? [{ first: previous.stopId, second: visit.stopId, gap, shortfall: mealGapMinutes - gap }] : [];
+  });
+}
+
 export function capCategory(trip: Pick<Trip, "stops">, stop: Stop, place?: Place): CapCategory | null {
   const timing = visitTiming(trip, stop, place);
   if (timing.kind === "coffee") return "coffee";
   if (timing.kind === "meal" && (timing.slot === "breakfast" || timing.slot === "lunch" || timing.slot === "dinner")) return timing.slot;
+  if (timing.kind === "meal") return "meal";
   return null;
 }
 

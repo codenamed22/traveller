@@ -54,7 +54,7 @@ const leg = (from: string, to: string, minutes: number): TravelEdge => ({ day: 0
 
 function journey() {
   const coffee = { ...newStop("Sango Coffee"), placeId: "g-sango", duration: 45, source: "09:30 – 10:15 | Sango\\nBest pour-over in town" };
-  const museum = { ...newStop("Rijksmuseum"), placeId: "g-rijks", day: 0, fixedTime: "11:00", duration: 120 };
+  const museum = { ...newStop("Rijksmuseum"), placeId: "g-rijks", day: 0, fixedTime: "11:00", duration: 120, source: "See the **Night Watch** first *(2 hours)*." };
   const dinner = { ...newStop("FUKU"), placeId: "g-fuku", duration: 60 };
   const amsterdam: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 2, timeZone: "Europe/Amsterdam", dailyStart: "09:00", dailyEnd: "21:00", stops: [coffee, museum, dinner] };
   const at = (day: number, time: string) => minuteAt(amsterdam, day, time);
@@ -68,11 +68,11 @@ function journey() {
 }
 
 // Keeps progress in state, as the planner does.
-function Harness({ canTrack, onClose, record }: { canTrack: boolean; onClose: () => void; record: (cityId: string, date: string, progress?: DayProgress) => void }) {
+function Harness({ canTrack, onClose, record, photos = false }: { canTrack: boolean; onClose: () => void; record: (cityId: string, date: string, progress?: DayProgress) => void; photos?: boolean }) {
   const { cities, plans } = journey();
   const [data] = useState({ cities, plans });
   const [execution, setExecution] = useState<Journey["execution"]>({});
-  return createElement(TripMode, { title: "Amsterdam & Brussels", cities: data.cities, plans: data.plans, execution, canTrack, onClose, onProgress: canTrack ? (cityId: string, date: string, progress?: DayProgress) => {
+  return createElement(TripMode, { title: "Amsterdam & Brussels", cities: data.cities, plans: data.plans, execution, canTrack, onClose, photos, onProgress: canTrack ? (cityId: string, date: string, progress?: DayProgress) => {
     record(cityId, date, progress);
     setExecution((current) => { const city = { ...current?.[cityId] }; if (progress) city[date] = progress; else delete city[date]; return { ...current, [cityId]: city }; });
   } : undefined });
@@ -101,6 +101,23 @@ describe("trip mode", () => {
     await click("Undo");
     expect(record).toHaveBeenLastCalledWith(expect.any(String), "2026-12-24", undefined);
     expect(container.querySelector(".trip-card")?.textContent).toContain("Sango Coffee");
+  });
+
+  it("loads photos of a tapped place and shows its note without Markdown", async () => {
+    const fetch = vi.fn(async () => Response.json({ placeId: "g-sango", index: 0, total: 2, photo: { uri: "https://lh3.googleusercontent.com/sango", authors: [{ displayName: "A traveller" }], googleMapsUri: "https://maps.google.com/?photo=sango" } }));
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => root.render(createElement(Harness, { canTrack: true, onClose: vi.fn(), record: vi.fn(), photos: true })));
+    // The next-stop card stays compact until a place is tapped.
+    expect(container.querySelector(".trip-card .place-photos")).toBeNull();
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".itinerary-stop")].find((item) => item.textContent?.includes("Sango Coffee"))!.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    const [url, options] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/place-photos");
+    expect(JSON.parse(String(options.body))).toMatchObject({ placeId: "g-sango", index: 0 });
+    expect(container.querySelector(".trip-card img")?.getAttribute("src")).toContain("lh3.googleusercontent.com/sango");
+    expect(container.querySelector(".trip-card")?.textContent).toContain("A traveller");
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".itinerary-stop")].find((item) => item.textContent?.includes("Rijksmuseum"))!.click());
+    expect(container.querySelector(".trip-card-note")?.textContent).toBe("See the Night Watch first (2 hours).");
   });
 
   it("switches days from the menu and the arrows, and back closes the menu before trip mode", async () => {

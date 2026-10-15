@@ -15,6 +15,10 @@ type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | n
   padding?: google.maps.Padding; fitToken?: number; popup?: boolean; zoomOnSelect?: boolean; fitCurrentLocation?: boolean;
   markerStatus?: Record<string, "done" | "skipped" | "next">; centerOn?: { lat: number; lng: number; token: number } };
 
+// Room for the city and day chip and the route legend along the top (stacked on narrow screens) and the assistant tab on
+// the right, so no marker is fitted underneath them.
+const overlayPadding: google.maps.Padding = { top: 130, right: 70, bottom: 60, left: 60 };
+
 function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry, padding, fitToken, popup = true, zoomOnSelect = false, fitCurrentLocation = true, markerStatus, centerOn }: Props) {
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
@@ -24,13 +28,13 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   const selectedName = selected === "hotel" ? places.hotel?.name : trip.stops.find((stop) => stop.id === selected)?.name ?? selectedPlace?.name;
   const fitLocation = fitCurrentLocation ? currentLocation : undefined;
   const locationKey = visiblePlaces.map(([id, place]) => `${id}:${place.location.lat},${place.location.lng}`).join("|") + (fitLocation ? `|current:${fitLocation.lat},${fitLocation.lng}` : "");
-  const paddingKey = JSON.stringify(padding ?? 70);
+  const paddingKey = JSON.stringify(padding ?? overlayPadding);
   useEffect(() => {
     if (!map || !locationKey) return;
     const bounds = new google.maps.LatLngBounds();
     visiblePlaces.forEach(([, place]) => bounds.extend(place.location));
     if (fitLocation) bounds.extend(fitLocation);
-    map.fitBounds(bounds, padding ?? 70);
+    map.fitBounds(bounds, padding ?? overlayPadding);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, locationKey, paddingKey, fitToken]);
   useEffect(() => {

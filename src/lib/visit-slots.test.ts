@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { newStop, newTrip, type Stop, type Trip } from "./trip";
-import { alternativeGroups, capCategory, describeTiming, isRequiredStop, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitTiming } from "./visit-slots";
+import { afterDark, alternativeGroups, capCategory, describeTiming, isRequiredStop, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitHours, visitTiming } from "./visit-slots";
 
 const stop = (name: string, source: string, patch: Partial<Stop> = {}): Stop => ({ ...newStop(name), source, ...patch });
 const amsterdam = (stops: Stop[]): Trip => ({ ...newTrip(), city: "Amsterdam", hotel: "Hotel", startDate: "2026-12-24", days: 4, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00", stops });
@@ -12,6 +12,7 @@ describe("time-of-day inference from itinerary notes", () => {
     ["Elevate Coffee Lab", "Coffee 2: Elevate Coffee Lab in Amsterdam-Zuid (€7).", { kind: "coffee" }],
     ["Vondelpark", "Crisp morning walk through the free Vondelpark into the museum district.", { kind: "walk", slot: "morning" }],
     ["Trajectum Lumen", "Walk the free Trajectum Lumen light trail.", { kind: "walk", slot: "evening" }],
+    ["Gentse Winterfeesten", "Wander the **Gentse Winterfeesten** light displays along the Lys River *(2 hours)*.", { kind: "walk", slot: "evening" }],
     ["Stadskasteel Oudaen", "Lunch: Stadskasteel Oudaen for a house-brewed castle beer and bar snack (€12).", { kind: "meal", slot: "lunch" }],
     ["Leeman Döner", "Fresh Turkish lahmacun or döner wrap at Leeman Döner (€5 - €9).", { kind: "snack" }],
     ["Toki Specialty Coffee", "17:50 – 18:35 | Toki Specialty Coffee Walk 8 mins into Jordaan for coffee at Toki (45 mins)", { kind: "coffee", plannedTime: "17:50" }],
@@ -73,6 +74,33 @@ describe("soft time targets", () => {
     expect(anyTime.label).toMatch(/^Daylight/);
     expect(anyTime.end).toBeLessThanOrEqual(sunset);
     expect(timeTarget(trip, trip.stops[2], 0)!.start).toBe(sunset);
+  });
+
+  it("keeps after-dark places in the evening when the itinerary slots them in daylight", () => {
+    const location = { lat: 51.21, lng: 3.22 };
+    const trip = { ...amsterdam([
+      stop("Markt Square", "Walk the Winter Glow Light Trail to Markt Square (60 mins).", { plannedTime: "09:30", duration: 60 }),
+      stop("Winterfeesten", "Gentse Winterfeesten light displays.", { plannedTime: "19:00", duration: 120 }),
+      stop("Belfry", "Climb the Belfry.", { plannedTime: "09:30" }),
+    ]), hotelLocation: location };
+    const sunset = sunsetMinute(trip, 0, location)!;
+    expect(timeTarget(trip, trip.stops[0], 0)).toMatchObject({ start: sunset, source: "note" });
+    expect(describeTiming(trip, trip.stops[0])?.label).toBe("Evening, after sunset");
+    expect(timeTarget(trip, trip.stops[1], 0)).toMatchObject({ start: 18 * 60, source: "itinerary" });
+    expect(timeTarget(trip, trip.stops[2], 0)).toMatchObject({ start: 8 * 60 + 30, source: "itinerary" });
+  });
+
+  it("holds light trails and night markets to after sunset, unless another time of day is chosen", () => {
+    const location = { lat: 51.21, lng: 3.22 };
+    const trail = stop("Markt Square", "Walk the *Winter Glow Light Trail* to Markt Square.");
+    const trip = { ...amsterdam([trail]), hotelLocation: location };
+    const sunset = sunsetMinute(trip, 0, location)!;
+    expect(visitHours(trip, 0, trail)).toEqual([[Math.ceil(sunset), 2880]]);
+    expect(visitHours(trip, 0, trail, { id: "p", name: "Markt", address: "", location, hours: [{ open: { day: 4, hour: 9, minute: 0 }, close: { day: 4, hour: 19, minute: 0 } }] })).toEqual([[Math.ceil(sunset), 19 * 60]]);
+    expect(afterDark(stop("Night market", "Browse the night market stalls."))).toBe(true);
+    expect(afterDark({ ...trail, slot: "afternoon" })).toBe(false);
+    expect(afterDark(stop("Evening stroll", "An evening walk along the canals."))).toBe(false);
+    expect(visitHours(trip, 0, stop("Museum", "Rijksmuseum"))).toBeNull();
   });
 
   it("drops an original itinerary time that overlaps a booking that day", () => {

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { ArrowUpRight, CalendarDays, Compass, Eye, FolderOpen, Hotel, List, LockKeyhole, Map, MapPin, Navigation, Route } from "lucide-react";
 import type { SharedView } from "@/lib/shared-trips";
-import { dayStart, endpointKey, formatMinute, tripDate } from "@/lib/trip";
+import { dayStart, endpointKey, formatMinute, planningKey, tripDate } from "@/lib/trip";
 import { ExportMenu } from "./ExportMenu";
 import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
@@ -30,8 +30,10 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
   const snapshot = view.plans[city.id]?.snapshot;
   const trip = snapshot?.trip ?? city;
   const currentDay = snapshot?.schedule.days.find((entry) => entry.day === day);
-  const changed = Boolean(snapshot && JSON.stringify(snapshot.trip) !== JSON.stringify(city));
+  const changed = Boolean(snapshot && planningKey(snapshot.trip) !== planningKey(city));
   const journey = { ...view, execution: undefined };
+  // Notes come from the city as it is now: writing one doesn't replan.
+  const note = (stopId: string) => city.stops.find((entry) => entry.id === stopId)?.note;
   const toDeparture = endpointKey(trip, day, "hotel", "to") === "departure";
 
   return <div className="app-shell trip-viewer">
@@ -63,7 +65,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
                 if (!stop) return null;
                 const alternatives = stop.alternativeGroup ? currentDay.visits.filter((other) => other.stopId !== stop.id && trip.stops.find((entry) => entry.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => trip.stops.find((entry) => entry.id === other.stopId)!.name) : [];
                 return <div key={visit.stopId}><LegDetails edge={visit.leg} places={snapshot.places} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(trip, day, visit.start)} - {formatMinute(trip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>
-                  {selected === stop.id && (stop.source || stop.sourceUrl) && <div className="stop-details">{stop.source && <blockquote>{stop.source}</blockquote>}{stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}</div>}</div>;
+                  {selected === stop.id && (note(stop.id) || stop.source || stop.sourceUrl) && <div className="stop-details">{note(stop.id) && <p className="stop-note">{note(stop.id)}</p>}{stop.source && <blockquote>{stop.source}</blockquote>}{stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}</div>}</div>;
               })}
               {currentDay.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={snapshot.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${trip.departure!.place || "the station"}` : `Back to ${trip.hotel}`}</strong><span>{formatMinute(trip, day, (currentDay.visits.at(-1)?.end ?? dayStart(trip, day)) + currentDay.returnLeg.minutes)}</span></div></div></>}
               {day === trip.days - 1 && trip.departure && <TransferLine trip={trip} kind="departure" />}

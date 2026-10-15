@@ -40,6 +40,13 @@ describe("trip constraints", () => {
     const mixed = structuredClone(schedule);
     mixed.days[1].visits.push(mixed.days[0].visits.pop()!);
     expect(validateSchedule(trip, mixed)).toContain("Utrecht: this day is reserved for the group.");
+    // A group with no day left names the visit in the way.
+    const pinned = tripSchema.safeParse({ ...trip, stops: stops.map((stop, index) => index === 0 ? { ...stop, day: 0 } : stop) });
+    expect(pinned.error?.issues.map((issue) => issue.message)).toContain("Utrecht can't go on any day: Canal is set to Day 1, but Utrecht is only allowed on Day 2, Day 3. Change one of them in Plan my days.");
+    const crowded = tripSchema.safeParse({ ...trip, stops: [...stops, { ...newStop("Museum"), day: 1 }, { ...newStop("Park"), day: 2 }] });
+    expect(crowded.error?.issues.map((issue) => issue.message)).toContain("Utrecht can't go on any day: it needs a day to itself, and every day it's allowed on already has other places. Move them, or allow another day in Plan my days.");
+    const apart = tripSchema.safeParse({ ...trip, stops: stops.map((stop, index) => index < 2 ? { ...stop, day: index + 1 } : stop) });
+    expect(apart.error?.issues.map((issue) => issue.message)).toContain("Utrecht can't go on one day: Canal is set to Day 2, Lunch is set to Day 3. Put them on the same day, or let the planner pick.");
     for (const dayGroups of [[{ ...group, stopIds: [crypto.randomUUID()] }], [group, { ...group, id: crypto.randomUUID() }], [{ ...group, allowedDays: [3] }], [{ ...group, allowedDays: [0] }]]) {
       expect(tripSchema.safeParse({ ...trip, dayGroups }).success).toBe(false);
     }
@@ -65,7 +72,10 @@ describe("trip constraints", () => {
     const schedule = { days: [{ visits: [{ stopId: trip.stops[0].id, start: 0, end: 54 }, { stopId: trip.stops[1].id, start: 0, end: 10 }] }] } as Schedule;
     expect(applyScheduleDurations(candidate, schedule).stops.map((stop) => stop.duration)).toEqual([54, 10, 45]);
     expect(applyScheduleDurations(candidate, schedule).stops.every((stop) => stop.durationOptions === undefined)).toBe(true);
-    schedule.days[0].visits[0].end = 30;
+    // A start at a fractional minute (a computed sunset) leaves the length a hair off a whole number.
+    schedule.days[0].visits[0] = { ...schedule.days[0].visits[0], start: 1007.8012434, end: 1007.8012434 + 54.000000001 };
+    expect(applyScheduleDurations(candidate, schedule).stops[0].duration).toBe(54);
+    schedule.days[0].visits[0] = { ...schedule.days[0].visits[0], start: 0, end: 30 };
     expect(() => applyScheduleDurations(candidate, schedule)).toThrow("not approved");
   });
   it("preserves actual booking dates when the trip start changes", () => {

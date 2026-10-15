@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { blockedDayFixes, bookingConflicts, commonHoliday, compactWaits, PlanningError, squeezeIns, solveTrip, solveTripByDays, travelEstimator, type SolverStage } from "./planner";
+import { blockedDayFixes, bookingConflicts, commonHoliday, crowdedDayAdvice, compactWaits, PlanningError, squeezeIns, solveTrip, solveTripByDays, travelEstimator, type SolverStage } from "./planner";
 import { applyPlanningFixes, bookingConflictDetails, bookingTimeSuggestion, minuteAt, squeezeInNote, tripDate, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
 import { splitVisits, validateSchedule } from "./schedule-validation";
+import { sunsetMinute } from "./visit-slots";
 import { solveWithDurationRelaxation } from "./duration-relaxation";
 
 function routes(trip: Trip, minutes = 10): TravelEdge[] {
@@ -16,6 +17,20 @@ function fixture(): Trip {
   ] };
 }
 describe("schedule optimizer", () => {
+  it("lets a booking past the end of the day, like a midnight countdown, stretch only its own day", async () => {
+    const countdown = { ...newStop("New Year's countdown"), day: 0, fixedTime: "23:00", duration: 75 };
+    const dinner = { ...newStop("Dinner"), day: 0, fixedTime: "19:30", duration: 90 };
+    const trip = { ...fixture(), startDate: "2026-12-31", days: 2, dailyStart: "09:00", dailyEnd: "21:00", stops: [dinner, countdown, { ...newStop("Garden"), day: 1, duration: 45 }] };
+    expect(bookingConflicts(trip)).toEqual([]);
+    const schedule = await solveTrip(trip, routes(trip), 2);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const visit = schedule.days[0].visits.find((entry) => entry.stopId === countdown.id)!;
+    expect([visit.start, visit.end]).toEqual([23 * 60, 24 * 60 + 15]);
+    expect(schedule.warnings).toContain("Day 1: New Year's countdown (23:00, 75 min) runs past 21:00, so that day ends at 00:15.");
+    expect(schedule.warnings.join(" ")).toContain("Day 1: back at the hotel around 00:25, after sightseeing ends at 00:15.");
+    // The next day keeps the usual hours.
+    expect(schedule.days[1].visits.every((entry) => entry.end <= 21 * 60)).toBe(true);
+  });
   it("plans day by day around locked days, bookings and an exclusive day trip", async () => {
     const locked = Array.from({ length: 6 }, (_, index) => ({ ...newStop(`Locked ${index}`), day: index % 2, duration: 60 }));
     const flexible = Array.from({ length: 4 }, (_, index) => ({ ...newStop(`Flexible ${index}`), duration: 45, ...(index === 0 ? { durationOptions: [45, 41, 36] } : {}) }));
@@ -163,6 +178,61 @@ describe("schedule optimizer", () => {
     expect(validateSchedule(coupled, coupledSchedule)).toEqual([]);
     expect(coupledSchedule.days[0].visits).toHaveLength(2);
     expect(coupledStages.filter((stage) => stage.stage === "optimization").map((stage) => stage.objective)).toEqual(["duration", "balance", "travel"]);
+  });
+  it("keeps meals two hours apart, dropping an optional meal before squeezing it in", async () => {
+    const gaps = (trip: Trip, schedule: Awaited<ReturnType<typeof solveTrip>>) => {
+      const meals = schedule.days[0].visits.filter((visit) => trip.stops.find((stop) => stop.id === visit.stopId)?.kind === "meal");
+      return meals.slice(1).map((visit, index) => visit.start - meals[index].end);
+    };
+    const fries = { ...newStop("Friterie Tabora"), kind: "meal" as const, plannedTime: "17:15", duration: 30 };
+    const pizza = { ...newStop("NONA"), kind: "meal" as const, plannedTime: "18:00", duration: 45 };
+    const museum = { ...newStop("Museum"), kind: "sight" as const, duration: 60 };
+    const evening = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "21:30", stops: [fries, pizza, museum] };
+    const apart = await solveTrip(evening, routes(evening), 2);
+    expect(validateSchedule(evening, apart)).toEqual([]);
+    expect(Math.min(...gaps(evening, apart))).toBeGreaterThanOrEqual(119.9);
+    expect(apart.warnings.join(" ")).not.toContain("Meals are kept");
+    // The same with day-trip coupling, where caps and gaps share the balance stage.
+    const coupled = { ...evening, stops: [fries, pizza, { ...museum, durationOptions: [60, 54, 48] }] };
+    const stages: SolverStage[] = [];
+    const coupledApart = await solveTrip(coupled, routes(coupled), 3, { onStage: (stage) => stages.push(stage) });
+    expect(validateSchedule(coupled, coupledApart)).toEqual([]);
+    expect(Math.min(...gaps(coupled, coupledApart))).toBeGreaterThanOrEqual(119.9);
+    expect(stages.some((stage) => stage.objective === "balance")).toBe(true);
+
+    const lunch = { ...newStop("Booked lunch"), kind: "meal" as const, day: 0, fixedTime: "12:00", duration: 60 };
+    const waffles = { ...newStop("Waffle Factory"), kind: "meal" as const, duration: 45, optional: true };
+    const short = { ...fixture(), days: 1, dailyStart: "11:00", dailyEnd: "14:30", stops: [lunch, waffles] };
+    const dropped = await solveTrip(short, routes(short), 2);
+    expect(dropped.omitted).toEqual([waffles.id]);
+    const [fit] = squeezeIns(short, dropped, routes(short));
+    expect(fit.nearMeal).toMatchObject({ stopId: lunch.id });
+    expect(squeezeInNote(short, fit)).toMatch(/; only \d+ min (after|before) Booked lunch$/);
+
+    const required = { ...short, stops: [lunch, { ...waffles, optional: false }] };
+    const crowded = await solveTrip(required, routes(required), 2);
+    expect(crowded.omitted).toEqual([]);
+    expect(crowded.warnings.join(" ")).toMatch(/Day 1: (Waffle Factory|Booked lunch) starts \d+ min after (Waffle Factory|Booked lunch) ends\. Meals are kept 2 hours apart/);
+  });
+  it("spreads meals with no lunch or dinner label at two a day when planning day by day", async () => {
+    const meals = ["NONA", "Fin de Siècle", "My Tannour", "Alibaba"].map((name) => ({ ...newStop(name), kind: "meal" as const, duration: 60 }));
+    const trip = { ...fixture(), dailyStart: "09:00", dailyEnd: "21:30", stops: meals };
+    const schedule = await solveTripByDays(trip, routes(trip), 5);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.days.map((day) => day.visits.length)).toEqual([2, 2]);
+  });
+  it("keeps a light trail after dark even when optional places want the evening, and food near its time", async () => {
+    const location = { lat: 51.21, lng: 3.22 };
+    const trail = { ...newStop("Markt Square"), source: "Walk the Winter Glow Light Trail to Markt Square (60 mins).", plannedTime: "09:30", duration: 60 };
+    const show = { ...newStop("Long show"), kind: "activity" as const, duration: 180, optional: true };
+    const trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "21:00", hotelLocation: location, stops: [trail, show] };
+    const schedule = await solveTrip(trip, routes(trip), 2);
+    const visit = schedule.days[0].visits.find((entry) => entry.stopId === trail.id)!;
+    expect(visit.start).toBeGreaterThanOrEqual(sunsetMinute(trip, 0, location)! - 0.01);
+
+    const noordzee = { ...newStop("Noordzee"), kind: "meal" as const, plannedTime: "16:45", duration: 30, optional: true };
+    const morning = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "12:00", stops: [noordzee, { ...newStop("Museum"), kind: "sight" as const, duration: 60 }] };
+    expect((await solveTrip(morning, routes(morning), 2)).omitted).toEqual([noordzee.id]);
   });
   it("finishes one neighbourhood before crossing town even when itinerary times zig-zag", async () => {
     const names = ["West A", "East A", "West B", "East B"];
@@ -379,16 +449,16 @@ describe("schedule optimizer", () => {
     ] };
     expect(bookingConflicts(trip)).toEqual([]);
     const error = await solveTrip(trip, routes(trip, 5)).catch((cause: Error) => cause);
-    expect(error).toMatchObject({ reason: "conflict", detailed: false });
-    expect((error as Error).message).toContain("DAK Showroom (08:30) to Vondelpark (09:30) leaves 0 min for travel; sampled routes need at least 5 min");
+    expect(error).toMatchObject({ reason: "conflict", detailed: true, code: "hard-input-conflict" });
+    expect((error as Error).message).toContain("Day 1: Vondelpark is booked at 09:30, which can't be reached in time. DAK Showroom ends at 09:15 and it's at least 5 min from there, with 15 min to spare on arrival. Book it at 09:35 or later.");
   });
   it("explains sampled hotel departure and return shortfalls", async () => {
     const trip = { ...fixture(), days: 1, stops: [{ ...newStop("Museum"), day: 0, fixedTime: "09:05", duration: 5, buffer: 0 }] };
-    await expect(solveTrip(trip, routes(trip, 10))).rejects.toThrow("hotel start (09:00) to Museum (09:05) leaves 5 min for travel; sampled routes need at least 10 min");
+    await expect(solveTrip(trip, routes(trip, 10))).rejects.toThrow("Day 1: Museum is booked at 09:05, which can't be reached in time. It's at least 10 min from the hotel and the day starts at 09:00. Book it at 09:10 or later, or start sightseeing at 08:55.");
     // Sightseeing ends at 18:00; the trip back may take up to two more hours.
     trip.stops[0].fixedTime = "17:55";
     expect(validateSchedule(trip, await solveTrip(trip, routes(trip, 10)))).toEqual([]);
-    await expect(solveTrip(trip, routes(trip, 125))).rejects.toThrow("Museum (17:55) to the hotel leaves 120 min for travel; sampled routes need at least 125 min");
+    await expect(solveTrip(trip, routes(trip, 125))).rejects.toMatchObject({ message: expect.stringContaining("Day 1: Museum (17:55) ends too late to get back to the hotel. It ends at 18:00 and it's at least 125 min back to the hotel, later than the day allows."), fixes: [expect.objectContaining({ action: "rebook", time: "17:50" })] });
     trip.returnToHotel = false;
     expect(validateSchedule(trip, await solveTrip(trip, routes(trip, 125)))).toEqual([]);
   });
@@ -456,6 +526,32 @@ describe("schedule optimizer", () => {
     schedule.days[0].returnLeg!.mode = "WALK";
     expect(validateSchedule(trip, schedule)).toContain("Day 1: hotel return violates transport preferences.");
   });
+  it("says when a booking can't be reached in time, with the time that works, and plans once it is applied", async () => {
+    const park = { ...newStop("Theme park"), day: 1, fixedTime: "09:30", duration: 480 };
+    const show = { ...newStop("Show"), day: 0, fixedTime: "12:00", duration: 60 };
+    const dinner = { ...newStop("Dinner"), day: 0, fixedTime: "13:20", duration: 60 };
+    const trip = { ...fixture(), days: 2, dailyStart: "09:00", dailyEnd: "21:00", stops: [show, dinner, park] };
+    const travel = routes(trip).map((edge) => edge.to === park.id || edge.from === park.id ? { ...edge, mode: "TRANSIT" as const, minutes: 66, meters: 34_000 } : edge.from === show.id && edge.to === dinner.id ? { ...edge, minutes: 20 } : edge);
+    expect(bookingConflicts(trip)).toEqual([]);
+    const error = await solveTrip(trip, travel, 2).catch((cause: PlanningError) => cause);
+    expect(error).toBeInstanceOf(PlanningError);
+    expect((error as PlanningError).code).toBe("hard-input-conflict");
+    expect((error as PlanningError).message).toContain("Day 2: Theme park is booked at 09:30, which can't be reached in time. It's at least 66 min from the hotel and the day starts at 09:00, with 15 min to spare on arrival. Book it at 10:25 or later, or start sightseeing at 08:05.");
+    expect((error as PlanningError).message).toContain("Day 1: Dinner is booked at 13:20, which can't be reached in time. Show ends at 13:00 and it's at least 20 min from there, with 15 min to spare on arrival. Book it at 13:35 or later.");
+    expect((error as PlanningError).fixes.map((fix) => [fix.stopName, fix.action, fix.time])).toEqual([["Dinner", "rebook", "13:35"], ["Theme park", "rebook", "10:25"]]);
+    // Estimated legs never count here, so the search itself decides.
+    const estimated = await solveTrip(trip, travel.map((edge) => edge.minutes === 66 ? { ...edge, estimated: true } : edge), 2).catch((cause: PlanningError) => cause);
+    expect((estimated as PlanningError).message).not.toContain("Theme park is booked");
+    const fixed = applyPlanningFixes(trip, (error as PlanningError).fixes);
+    expect(fixed.stops.map((stop) => stop.fixedTime)).toEqual(["12:00", "13:35", "10:25"]);
+    const schedule = await solveTrip(fixed, travel, 2);
+    expect(validateSchedule(fixed, schedule)).toEqual([]);
+  });
+  it("names a crowded day's longest flexible visits as what to change", () => {
+    const stops = [{ ...newStop("Louvre"), day: 2, fixedTime: "10:00", duration: 150 }, ...[["Pont des Arts", 90], ["Galerie Vivienne", 75], ["Pharamond", 75], ["Palais Royal", 30]].map(([name, duration]) => ({ ...newStop(name as string), day: 2, duration: duration as number }))];
+    expect(crowdedDayAdvice(stops)).toBe(" It has 5 places, 1 of them booked, likely too many for one day. Its longest flexible visits are Pont des Arts (90 min), Galerie Vivienne (75 min) and Pharamond (75 min): shorten some, mark some optional, or move some to another day.");
+    expect(crowdedDayAdvice([stops[0]])).toBe("");
+  });
   it("names the bookings that cannot fit", async () => {
     const trip = fixture();
     trip.stops = [
@@ -466,7 +562,8 @@ describe("schedule optimizer", () => {
     trip.dailyEnd = "18:00";
     const error = await solveTrip(trip, routes(trip)).catch((cause: Error) => cause.message);
     expect(error).toContain("First (10:00) and Second (10:30) are too close");
-    expect(error).toContain("Late (17:30, 60 min) ends after the day ends");
+    // A booking past the usual end stretches its day rather than failing.
+    expect(error).not.toContain("Late");
   });
   it("rejects walking beyond the configured leg limit", async () => {
     const trip = fixture();

@@ -66,6 +66,7 @@ input[type="date"], input[type="time"] { color-scheme: light; }
 .save-state { color: #9a8560; }
 .save-state::before { content: ""; height: 5px; width: 5px; border-radius: 50%; background: currentColor; }
 .save-state.saved { color: var(--green); }
+.save-state.blocked { color: var(--red); }
 .trip-actions { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
 .workspace-toolbar { padding: 0 32px; display: flex; align-items: center; justify-content: space-between; gap: 20px; background: var(--paper); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); min-height: 62px; }
 .day-tabs { display: flex; gap: 8px; min-width: 0; overflow-x: auto; scrollbar-width: thin; align-self: stretch; }
@@ -186,6 +187,9 @@ summary::-webkit-details-marker { display: none; }
 .itinerary-stop { width: 100%; display: flex; gap: 10px; text-align: left; align-items: center; background: #f7f9f4; border: 1px solid #e2e8db; border-radius: 6px; padding: 13px 11px; }
 .itinerary-stop.selected { border-color: var(--green); }
 .stop-heading > .alternative-note { display: block; font-size: 10px; color: var(--green); margin-top: 2px; }
+/* The traveller's own note: a quiet amber strip so it stands apart from the imported itinerary text. */
+.stop-note { display: block; margin: 4px 0 0; padding: 5px 8px; border-left: 3px solid #d9a441; background: #fff9e9; color: #6f5317; font-size: 11px; line-height: 1.4; white-space: pre-line; overflow-wrap: anywhere; border-radius: 0 4px 4px 0; }
+.stop-heading > .stop-note { color: #6f5317; font-size: 11px; }
 .travel-leg { margin: 0 0 0 14px; padding: 12px 0 12px 20px; border-left: 1px dashed #c9d6c3; }
 .travel-leg > summary { display: flex; align-items: center; gap: 7px; font-size: 10px; cursor: pointer; color: #7c8777; list-style: none; }
 .leg-details { font-size: 11px; padding: 8px 8px 0 0; color: var(--muted); }
@@ -202,6 +206,7 @@ summary::-webkit-details-marker { display: none; }
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 24px; font-size: 12px; border-top: 1px solid var(--line); }
 .banner.success { background: #edf4e9; color: #54704b; }
 .banner.error { background: #fff1ed; color: var(--red); }
+.banner.warning { background: #fff9e9; color: #956820; }
 .notice { padding: 11px 13px; border: 1px solid #e1e7dd; background: #f6f8f2; border-radius: 5px; font-size: 12px; line-height: 1.6; color: #69765f; overflow-wrap: anywhere; }
 .notice.error { color: var(--red); background: #fff2ef; border-color: #efd6d0; }
 .planning-fixes { display: grid; gap: 8px; justify-items: start; }
@@ -337,6 +342,7 @@ blockquote { margin: 0; padding: 7px 11px; border-left: 2px solid #d6dece; backg
 .place-matches button > span { flex: 1; min-width: 0; display: grid; gap: 4px; }
 .place-matches strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 .place-matches small { color: var(--muted); font-size: 11px; }
+.place-matches small.place-closed { color: var(--red); font-weight: 500; }
 .provider-attribution { font-size: 12px; color: #646d61; margin: 15px 0 0; }
 .connection-list { display: grid; }
 .connection-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--line); font-size: 13px; }

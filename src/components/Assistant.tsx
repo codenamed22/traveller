@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, getToolName, isToolUIPart, type UIMessage } from "ai";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, LoaderCircle, RotateCcw, Route, Search, ShieldCheck, Sparkles, Square, SquarePen } from "lucide-react";
@@ -16,7 +16,10 @@ type Props = {
   // Returns why the change can't be undone, or null once it is.
   onUndo: (token: string) => string | null;
   onReplan: (cityId: string) => void;
+  ref?: Ref<AssistantHandle>;
 };
+// Sends a message for the traveller, such as a planning failure: it opens the panel and sends once consent is given.
+export type AssistantHandle = { ask: (text: string) => void };
 
 // Bump the version when what the assistant shares changes, so everyone is asked again.
 const consentKey = "traveller.assistant.consent";
@@ -31,7 +34,7 @@ function errorText(error: Error) {
 
 // A chat that answers questions about the trip and suggests small changes as cards to apply. It hides behind a tab on
 // the right edge; opening it adds an #assistant history entry so the back button or gesture closes it again.
-export function Assistant({ journey, view, model, onApply, onUndo, onReplan }: Props) {
+export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref }: Props) {
   const [open, setOpen] = useState(false);
   const [consented, setConsented] = useState(false);
   const [input, setInput] = useState("");
@@ -41,6 +44,8 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan }: P
   const drag = useRef<number | null>(null);
   const log = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLTextAreaElement>(null);
+  // A request waiting for consent before it is sent.
+  const pending = useRef<string | null>(null);
   // Each request carries the recent conversation, the trip as it is now (see context()) and a fresh operation id for the
   // usage limit.
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/assistant", prepareSendMessagesRequest: ({ messages, body }) => ({
@@ -85,6 +90,8 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan }: P
   function accept() {
     try { window.localStorage.setItem(consentKey, consentVersion); } catch { /* consent then lasts for this visit only */ }
     setConsented(true);
+    const waiting = pending.current; pending.current = null;
+    if (waiting) send(waiting);
   }
   function send(text: string) {
     const message = text.trim();
@@ -92,6 +99,10 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan }: P
     clearError(); setInput("");
     void sendMessage({ text: message.slice(0, 2000) }, context());
   }
+  useImperativeHandle(ref, () => ({ ask(text: string) {
+    show();
+    if (hasConsent()) send(text); else pending.current = text;
+  } }));
   function submit(event: FormEvent) { event.preventDefault(); send(input); }
   function apply(id: string, proposal: ProposalOutput) {
     const outcome = onApply(proposal.operations);

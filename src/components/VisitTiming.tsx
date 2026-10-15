@@ -11,12 +11,15 @@ export function VisitTimingFields({ trip, stop, place, groups, onChange }: Props
   const current = describeTiming(trip, stop, place);
   const group = groups.find((candidate) => candidate.stopIds.includes(stop.id));
   const others = group?.stopIds.filter((id) => id !== stop.id).map((id) => trip.stops.find((candidate) => candidate.id === id)?.name).filter(Boolean) ?? [];
+  // "Plan separately" only takes this place out; the itinerary's other choice keeps the group, so it can come back.
+  const rejoin = stop.alternativeGroup === null && stop.source.trim() ? trip.stops.find((other) => other.id !== stop.id && other.alternativeGroup && other.source.trim() === stop.source.trim()) : undefined;
   return <div className="visit-timing">
     <label className="field">Time of day<select aria-label={`Time of day for ${stop.name}`} value={stop.slot ?? ""} onChange={(event) => onChange({ slot: (event.target.value || undefined) as VisitSlot | undefined })}>
       <option value="">Automatic{automatic ? ` (${automatic.label})` : " (no preference)"}</option>
       {(Object.keys(slotLabels) as VisitSlot[]).map((slot) => <option key={slot} value={slot}>{slotLabels[slot]}</option>)}
     </select></label>
     {current && <span className="quiet">{current.label} · {timingSourceLabels[current.source]}. A soft preference; opening hours and bookings come first.</span>}
+    {!group && rejoin && <span className="visit-alternative">Listed with {rejoin.name} as alternatives in the itinerary, now planned separately.<button type="button" className="text-button" onClick={() => onChange({ alternativeGroup: rejoin.alternativeGroup })}>Plan as alternatives</button></span>}
     {group && <span className="visit-alternative">Alternative to {others.join(", ")}. Both are planned when they fit; otherwise one is kept.<button type="button" className="text-button" onClick={() => onChange({ alternativeGroup: null })}>Plan separately</button></span>}
   </div>;
 }

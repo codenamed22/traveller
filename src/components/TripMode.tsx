@@ -11,8 +11,10 @@ import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, 
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
+import { PlacePhotos } from "./PlacePhotos";
 import { TransferLine } from "./TransferFields";
 import { TripMap } from "./TripMap";
+import { usePlacePhotos } from "./usePlacePhotos";
 
 type Props = {
   title: string; cities: Trip[]; plans: Record<string, SavedPlan>; execution?: Journey["execution"]; start?: { cityId: string; day: number };
@@ -21,6 +23,8 @@ type Props = {
   onAdjustToday?: (cityId: string, day: number) => void; onClose: () => void;
   // Changing this asks trip mode to close, as its own close button does.
   exitSignal?: number;
+  // Owners can load Google photos of a tapped place; shared viewers cannot.
+  photos?: boolean;
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
@@ -28,7 +32,7 @@ const noPhotos = {};
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false }: Props) {
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
   const [key, setKey] = useState(() => startingDay(days, start)?.key);
@@ -116,6 +120,10 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     }, { enableHighAccuracy: true, maximumAge: 15_000, timeout: 20_000 });
   }
 
+  // Photos load for a place you tap, as in the planner.
+  const photoPlaceId = selected ? entry?.places[selected]?.id || entry?.trip.stops.find((stop) => stop.id === selected)?.placeId || undefined : undefined;
+  const photoKey = photoPlaceId ? `${entry?.cityId}:${photoPlaceId}` : null;
+  const photo = usePlacePhotos(photoKey, photoPlaceId, photos);
   if (!entry) return null;
   const stopName = (id: string) => entry.trip.stops.find((stop) => stop.id === id)?.name ?? entry.places[id]?.name ?? "Removed place";
   const tracking = canTrack && entry.isToday && Boolean(onProgress);
@@ -147,6 +155,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       const leave = leaveBy(focus);
       const isNext = focus === next;
       const note = stop?.source ? exportNote(stop.source) : "";
+      // From the city as it is now, so a note written after planning shows.
+      const yourNote = entry.cityTrip.stops.find((candidate) => candidate.id === focus.stopId)?.note;
       return <div className="trip-card">
         <div className="trip-card-label">{isNext ? "Next" : "Stop"} · {index + 1} of {entry.plan.visits.length}{selected && next && focus !== next && <button type="button" className="chip" onClick={() => setSelected(null)}>Back to next</button>}</div>
         <h2>{stopName(focus.stopId)}</h2>
@@ -154,6 +164,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         {status === "done" ? <p className="trip-card-status done"><Check size={14} />Done{completed ? ` ${formatMinute(entry.cityTrip, entry.day, completed.start)}–${formatMinute(entry.cityTrip, entry.day, completed.end)}` : ""}</p>
           : status === "skipped" ? <p className="trip-card-status skipped"><SkipForward size={14} />Skipped</p>
           : <p className="trip-card-leave">{focus.leg.mode === "WALK" ? <Footprints size={14} /> : <TrainFront size={14} />}Leave by {formatMinute(entry.trip, entry.day, leave)} · {modeLabel(focus)}{entry.isToday && isNext ? leave > nowMinute ? ` · in ${durationLabel(leave - nowMinute)}` : " · now" : ""}</p>}
+        {selected && <PlacePhotos key={photoKey ?? focus.stopId} placeName={stopName(focus.stopId)} variant="carousel" total={photo.total} frames={photo.frames} loading={photo.loading} errors={photo.errors} disabledMessage={photo.disabledMessage} onRequest={photo.request} onRetry={photo.retry} />}
+        {yourNote && <p className="stop-note">{yourNote}</p>}
         {selected && note && <p className="trip-card-note">{note}</p>}
         <div className="trip-card-actions">
           <a className="button primary small" href={directionsUrl(focus.leg, entry.places, { fromHere: entry.isToday && status === "pending" })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>

@@ -781,6 +781,17 @@ test("itinerary persistence restores timings and complete routes without regener
   await expect(page.locator(".travel-leg summary").first()).toContainText("timetable of 2026-10-12");
   await expect(page.locator(".itinerary-start").last()).toContainText("Back to Private hotel");
   expect(calls).toBe(1);
+  // A note shows on the itinerary without making it out of date.
+  await page.getByRole("button", { name: /^Places/ }).click();
+  await page.locator(".stop-summary").first().click();
+  await page.getByLabel("Notes").fill("Light trail ended in 2025; find a replacement.");
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.locator(".itinerary-stop .stop-note")).toHaveText(["Light trail ended in 2025; find a replacement."]);
+  await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Places/ }).click();
+  await page.getByLabel("Notes").fill("");
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.locator(".itinerary-stop")).toHaveText(timings);
   await expect(page.locator(".confirmed-hotel")).toContainText("Private hotel");
   await page.getByLabel("Hotel or starting point").fill("Another hotel");
   await expect(page.locator(".confirmed-hotel")).toHaveCount(0);
@@ -934,6 +945,27 @@ test("a direct departure ends the last day at the confirmed station", async ({ p
   await page.getByRole("button", { name: /^Itinerary/ }).click();
   await expect(page.getByText("At Gare du Nord", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Departure")).toContainText("Checked out; at Gare du Nord by 16:40");
+  expect(errors).toEqual([]);
+});
+
+test("day trips held to one day by their places' days offer to let the planner choose", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await openPlanningTrip(page, "Hotel", [
+    { ...newStop("Belfry"), placeId: "belfry", day: 0 },
+    { ...newStop("Markt light trail"), placeId: "markt", day: 0 },
+    { ...newStop("Louvre Museum"), placeId: "museum-id" },
+  ]);
+  const dialog = page.getByRole("dialog", { name: "Plan my days", exact: true });
+  await dialog.getByRole("button", { name: "Add day trip" }).click();
+  await dialog.getByLabel("Day-trip name 1").fill("Bruges");
+  await dialog.getByLabel("Include Belfry in Bruges").check();
+  await dialog.getByLabel("Include Markt light trail in Bruges").check();
+  const group = dialog.getByRole("group", { name: "Bruges group" });
+  await expect(group.getByRole("status")).toHaveText("2 of its places are set to Day 1, so Bruges can only go on Day 1. Let the planner pick the day");
+  await group.getByRole("button", { name: "Let the planner pick the day" }).click();
+  await expect(group.getByRole("status")).toHaveCount(0);
+  await expect(group.getByText("/ Day 1")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -1439,21 +1471,25 @@ test("planning failures offer one click to apply all suggested fixes and plan ag
   await page.route("**/api/plan", async (route) => {
     const trip = route.request().postDataJSON().trip as Trip;
     submitted.push(trip);
-    const [, garden, cafe] = trip.stops;
+    const [museum, garden, cafe] = trip.stops;
     await route.fulfill(submitted.length === 1 ? { status: 422, json: { error: "No schedule fits these bookings and opening hours. Long explanation.", code: "sampled-model-conflict", fixes: [
+      { stopId: museum.id, stopName: museum.name, issue: "Booked 10:00 on Day 1. It's at least 66 min from the hotel and the day starts at 09:00.", action: "rebook", time: "10:30" },
       { stopId: garden.id, stopName: garden.name, issue: "Open 12:00–21:00, which leaves no gap around Day 1's bookings. Day 2 has room.", action: "optimize-day" },
       { stopId: cafe.id, stopName: cafe.name, issue: "Closed, or open too briefly, on every trip day.", action: "make-optional" },
     ] } } : { json: previewFixture(trip) });
   });
   await openPlanningTrip(page, "Private hotel", [
-    { ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:30" },
+    { ...newStop("Louvre Museum"), placeId: "museum-id", day: 0, fixedTime: "10:00" },
     { ...newStop("Luxembourg Gardens"), placeId: "garden-id", day: 0 },
     { ...newStop("Corner Cafe"), placeId: "cafe-id" },
   ]);
   const dialog = page.getByRole("dialog", { name: "Plan my days" });
   await dialog.getByRole("button", { name: "Optimize preview" }).click();
   const alert = dialog.getByRole("alert");
-  await expect(alert).toContainText("2 visits can't be scheduled as set");
+  await expect(alert).toContainText("3 visits can't be scheduled as set");
+  await expect(alert).toContainText("Suggested: book it at 10:30");
+  // Asking the assistant is offered only where it is set up.
+  await expect(dialog.getByRole("button", { name: "Ask the assistant to fix this" })).toHaveCount(0);
   await expect(alert).toContainText("Luxembourg Gardens: Open 12:00–21:00");
   await expect(alert).toContainText("Suggested: set Day to Optimize");
   await expect(alert).toContainText("Suggested: mark Optional");
@@ -1461,7 +1497,7 @@ test("planning failures offer one click to apply all suggested fixes and plan ag
   await alert.getByRole("button", { name: "Apply all suggestions and plan again" }).click();
   await expect(dialog.getByRole("button", { name: "Use this plan" })).toBeVisible();
   expect(submitted).toHaveLength(2);
-  expect(submitted[1].stops.map((stop) => [stop.day, stop.optional])).toEqual([[0, false], [null, false], [null, true]]);
+  expect(submitted[1].stops.map((stop) => [stop.day, stop.optional, stop.fixedTime])).toEqual([[0, false, "10:30"], [null, false, null], [null, true, null]]);
   await dialog.getByRole("button", { name: "Preferences", exact: true }).click();
   await expect(dialog.getByLabel("Day for Luxembourg Gardens", { exact: true })).toHaveValue("");
   await expect(dialog.getByLabel("Optional Corner Cafe")).toBeChecked();

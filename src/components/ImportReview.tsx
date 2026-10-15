@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import Image from "next/image";
-import { ArrowUpRight, Clock, FileText, ImagePlus, Link, LoaderCircle, Map as MapIcon, Plane, Sparkles, Trash2, Upload, Video } from "lucide-react";
+import { ArrowUpRight, Clock, FileText, ImagePlus, Link, LoaderCircle, Map as MapIcon, Sparkles, Trash2, Upload, Video } from "lucide-react";
 import { Dialog } from "./Dialog";
+import { transferIcons } from "./TransferFields";
 import { candidatesToStops, dayTripGroup, duplicateCandidateIndexes, importDayTrips, importResultSchema, itineraryHours, manualCandidates, maxImportPlaces, mergeDuplicateDetails, transferProposal, youtubeUrl, type ExtractionServices, type ImportCandidate, type TransferCandidate } from "@/lib/import";
 import { readDocument, type ImportImage } from "@/lib/documents";
 import { maxStopsPerCity, stopSchema, tripDate, type DayGroup, type Stop, type Transfer, type Trip } from "@/lib/trip";
@@ -155,14 +156,14 @@ export function ImportReview({ trip, canExtract, extraction, onImport, onClose }
       {!!proposal?.changes.length && <div className="notice"><strong>Proposed duplicate updates</strong><ul>{proposal.changes.map((change, index) => <li key={index}>{change}</li>)}</ul><label className="checkbox"><input type="checkbox" checked={mergeApproved} onChange={(event) => setApprovedMerge(event.target.checked ? mergeKey : null)} />Apply these duplicate updates</label></div>}
       {!!transferRows.length && <div className="review-transfers">
         <strong>Getting there and away</strong>
-        {transferRows.map((row) => <div key={row.kind} className="review-transfer">
+        {transferRows.map((row) => { const Icon = transferIcons[row.transfer.mode]; return <div key={row.kind} className="review-transfer">
           <label className="checkbox"><input type="checkbox" aria-label={`Use this ${row.kind}`} checked={!row.blocked && !row.same && useTransfer[row.kind]} disabled={Boolean(row.blocked || row.same)} onChange={(event) => setUseTransfer((current) => ({ ...current, [row.kind]: event.target.checked }))} />
-            <Plane size={14} /><span><b>{row.kind === "arrival" ? "Arrival" : "Departure"}</b> {row.label}</span></label>
+            <Icon size={14} aria-hidden /><span><b>{row.kind === "arrival" ? "Arrival" : "Departure"}</b> {row.label}</span></label>
           {row.same && <p className="quiet">Already set for {trip.city || "this city"}.</p>}
           {row.replaces && <p className="quiet">Replaces {row.replaces}.</p>}
           {row.blocked && <p className="warning-text">{row.blocked}</p>}
           {row.candidate.source && <blockquote>{row.candidate.source}</blockquote>}
-        </div>)}
+        </div>; })}
       </div>}
       {!!dayTrips.length && <div className="review-transfers">
         <strong>Day trips</strong>
@@ -177,7 +178,7 @@ export function ImportReview({ trip, canExtract, extraction, onImport, onClose }
         <strong>Day hours</strong>
         <div className="review-transfer"><label className="checkbox"><input type="checkbox" aria-label="Use the itinerary's hours" checked={useHours} onChange={(event) => setUseHours(event.target.checked)} />
           <Clock size={14} /><span>Use the itinerary&apos;s hours, <b>{hours.dailyStart}–{hours.dailyEnd}</b></span></label>
-          <p className="quiet">{trip.city || "This city"} is set to {trip.dailyStart}–{trip.dailyEnd}, so visits outside it would not fit.</p></div>
+          <p className="quiet">{trip.city || "This city"} is set to {trip.dailyStart}–{trip.dailyEnd}, so visits outside it would not fit. The new hours leave 30 min after the last visit for transit running late.</p></div>
       </div>}
       {!!proposal?.issues.length && <div className="notice warning"><ul>{proposal.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
       <div className="review-list">{candidates.map(({ place: candidate, included }, index) => <section className="review-item" key={index}>
