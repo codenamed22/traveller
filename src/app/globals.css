@@ -356,6 +356,8 @@ blockquote { margin: 0; padding: 7px 11px; border-left: 2px solid #d6dece; backg
 .saved-trip > span:nth-child(2) { display: grid; gap: 4px; flex: 1; min-width: 0; }
 .saved-trip strong { font-weight: 500; overflow-wrap: anywhere; }
 .saved-trip small { color: var(--muted); font-size: 11px; }
+/* The trip already open; choosing it just returns to it. */
+.saved-trip-current { font-size: 11px; font-weight: 600; color: var(--green); white-space: nowrap; }
 .saved-trip-icon { width: 43px; height: 43px; border-radius: 5px; display: grid; place-items: center; background: #eff3e9; color: #779067; flex-shrink: 0; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
