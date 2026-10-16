@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
 import { newDayProgress } from "./day-recovery";
 import { minuteAt, newStop, newTrip, persistedPlan, type DayPlan, type Place, type Schedule, type TravelEdge, type Trip } from "./trip";
-import { daySummary, directionsUrl, durationLabel, leaveBy, markDone, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus } from "./trip-mode";
+import { daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus } from "./trip-mode";
 
 const place = (id: string, name: string): Place => ({ id, name, address: `${name} street`, location: { lat: 52.37, lng: 4.89 } });
 const leg = (from: string, to: string, minutes: number, mode: TravelEdge["mode"] = "WALK"): TravelEdge => ({ day: 0, from, to, mode, minutes, meters: 900 });
@@ -78,6 +78,23 @@ describe("trip mode days", () => {
     const missed = markSkipped(today, museum);
     expect(missed).toMatchObject({ skipped: [museum.id], missedBookings: [museum.id], version: 1 });
     expect(markSkipped(today, coffee).missedBookings).toEqual([]);
+  });
+
+  it("undoes one visit any time that day, keeping the others", () => {
+    const { amsterdam, coffee, museum, plans } = fixture();
+    const [today] = tripModeDays([amsterdam], plans, undefined, christmasEve);
+    const now = minuteNow(today, christmasEve);
+    const first = markDone(today, coffee.id, now);
+    const second = markDone({ ...today, progress: first }, museum.id, now + 30);
+    // The coffee was tapped by mistake; the museum visit stays done and the day still carries on from it.
+    const undone = markPending({ ...today, progress: second }, coffee.id);
+    expect(undone).toMatchObject({ version: 3, completed: [{ stopId: museum.id }], originId: museum.id, readyAt: now + 30 });
+    expect(visitStatus(undone, coffee.id)).toBe("pending");
+    // The last one undone too: back to the hotel, free from no particular time.
+    expect(markPending({ ...today, progress: undone }, museum.id)).toMatchObject({ completed: [], originId: "hotel", readyAt: null });
+    // A skipped booking is no longer missed.
+    const missed = markSkipped(today, museum);
+    expect(markPending({ ...today, progress: missed }, museum.id)).toMatchObject({ skipped: [], missedBookings: [], version: 2 });
   });
 
   it("links directions from the previous stop, or from wherever the phone is", () => {

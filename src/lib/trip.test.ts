@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyScheduleDurations, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { applyScheduleDurations, persistedPlan, planningKey, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -158,5 +158,22 @@ describe("trip constraints", () => {
     // A late flight: back at the hotel by 19:59 (23:59 − 3 h − 45 min − 15 min for bags), never the usual 23:00.
     const late = { ...base, departure: { mode: "FLIGHT" as const, time: "23:59", place: "Schiphol" } };
     expect(returnDeadline(late, 4)).toBe(minuteAt(late, 4, "19:59"));
+  });
+});
+
+describe("planning key", () => {
+  it("matches a city to its plan right after the first plan, when the planning settings come last", () => {
+    // The planning dialog adds `planning` to a city that had none; the accepted plan keeps the schema's own order.
+    const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [{ ...newStop("Charminar"), placeId: "g-charminar" }] };
+    const planned = { ...city, planning: { mode: "AUTO" as const, goal: "TRAVEL" as const, maxWalkMinutes: null, maxStopsPerDay: 25, transitPreference: "DEFAULT" as const } };
+    const accepted = persistedPlan({ generatedAt: "2026-10-16T06:00:00Z", warnings: [], omitted: [], days: [] }, planned).snapshot!.trip;
+    expect(Object.keys(accepted)).not.toEqual(Object.keys(planned));
+    expect(planningKey(accepted)).toBe(planningKey(planned));
+  });
+
+  it("still tells a real change and ignores notes", () => {
+    const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [newStop("Charminar")] };
+    expect(planningKey({ ...city, stops: [{ ...city.stops[0], duration: 90 }] })).not.toBe(planningKey(city));
+    expect(planningKey({ ...city, stops: [{ ...city.stops[0], note: "Go early" }] })).toBe(planningKey(city));
   });
 });

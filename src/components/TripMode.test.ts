@@ -110,6 +110,20 @@ describe("trip mode", () => {
     expect(container.querySelector(".trip-card")?.textContent).toContain("Sango Coffee");
   });
 
+  it("undoes a visit from its card, after the quick Undo has gone", async () => {
+    const record = vi.fn();
+    await act(async () => root.render(createElement(Harness, { canTrack: true, onClose: vi.fn(), record })));
+    await click("Done");
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".itinerary-stop")].find((item) => item.textContent?.includes("Sango Coffee"))!.click());
+    const card = container.querySelector(".trip-card")!;
+    expect(card.textContent).toContain("Done 09:15–10:00");
+    expect([...card.querySelectorAll("button")].map((item) => item.textContent)).not.toContain("Done");
+    await act(async () => [...card.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Undo")!.click());
+    expect(record).toHaveBeenLastCalledWith(expect.any(String), "2026-12-24", expect.objectContaining({ completed: [], version: 2 }));
+    expect(text()).toContain("Sango Coffee no longer marked done");
+    expect(container.querySelector(".trip-card")?.textContent).toContain("Leave by 09:15");
+  });
+
   it("loads photos of a tapped place and shows its note without Markdown", async () => {
     const fetch = vi.fn(async () => Response.json({ placeId: "g-sango", index: 0, total: 2, photo: { uri: "https://lh3.googleusercontent.com/sango", authors: [{ displayName: "A traveller" }], googleMapsUri: "https://maps.google.com/?photo=sango" } }));
     vi.stubGlobal("fetch", fetch);

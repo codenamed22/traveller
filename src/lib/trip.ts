@@ -330,9 +330,13 @@ export function durationChoices(duration: number, rule: DurationRule): number[] 
 }
 
 // What a plan depends on, for telling whether a city changed since it was planned. Notes are left out: writing one
-// doesn't make the itinerary out of date.
+// doesn't make the itinerary out of date. The city is read through its schema first, so the same details in another
+// order (as a city has right after its first plan, before the database reorders them) still match.
 export function planningKey(trip: Trip | undefined) {
-  return trip ? JSON.stringify({ ...trip, stops: trip.stops.map(({ note, ...stop }) => (void note, stop)) }) : "";
+  if (!trip) return "";
+  const parsed = tripSchema.safeParse(trip);
+  const canonical = parsed.success ? parsed.data : trip;
+  return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, ...stop }) => (void note, stop)) });
 }
 
 export function applyScheduleDurations(trip: Trip, schedule: Schedule): Trip {

@@ -2,12 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, TrainFront, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
 import type { Journey } from "@/lib/journey";
 import { endpointKey, formatMinute, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
-import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
+import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
@@ -146,6 +146,15 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     setSelected(null);
   }
 
+  // Undo on the visit itself, for any time after the quick Undo has gone.
+  function reset(visit: Visit) {
+    const stop = entry.trip.stops.find((candidate) => candidate.id === visit.stopId);
+    if (!onProgress || !stop) return;
+    const wasDone = visitStatus(entry.progress, visit.stopId) === "done";
+    onProgress(entry.cityId, entry.date, markPending(entry, visit.stopId));
+    setUndo({ cityId: entry.cityId, date: entry.date, previous: entry.progress, message: wasDone ? `${stop.name} no longer marked done` : `${stop.name} no longer skipped` });
+  }
+
   function card() {
     if (focus) {
       const index = entry.plan.visits.indexOf(focus);
@@ -170,6 +179,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         <div className="trip-card-actions">
           <a className="button primary small" href={directionsUrl(focus.leg, entry.places, { fromHere: entry.isToday && status === "pending" })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>
           {tracking && status === "pending" && <><button type="button" className="button secondary small" onClick={() => record("done", focus)}><Check size={15} />Done</button><button type="button" className="button secondary small" onClick={() => record("skip", focus)}><SkipForward size={15} />Skip</button></>}
+          {tracking && status !== "pending" && <button type="button" className="button secondary small" onClick={() => reset(focus)}><Undo2 size={15} />Undo</button>}
         </div>
       </div>;
     }

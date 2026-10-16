@@ -99,6 +99,22 @@ export function markSkipped(entry: TripModeDay, stop: Stop): DayProgress {
   });
 }
 
+// Undo for one visit at any time that day: back to not done, as if Done or Skip was never tapped for it. Where the day
+// carries on from goes back to the latest visit still done, or the hotel.
+export function markPending(entry: TripModeDay, stopId: string): DayProgress {
+  const progress = baseProgress(entry);
+  const removed = progress.completed.find((done) => done.stopId === stopId);
+  const completed = progress.completed.filter((done) => done.stopId !== stopId);
+  const latest = completed.reduce<(typeof completed)[number] | undefined>((last, done) => !last || done.end >= last.end ? done : last, undefined);
+  return dayProgressSchema.parse({
+    ...progress, version: progress.version + 1, completed,
+    skipped: progress.skipped.filter((id) => id !== stopId),
+    missedBookings: progress.missedBookings.filter((id) => id !== stopId),
+    originId: progress.originId === stopId ? latest?.stopId ?? "hotel" : progress.originId,
+    readyAt: removed && progress.readyAt === removed.end ? latest?.end ?? null : progress.readyAt,
+  });
+}
+
 // Google Maps directions for one leg. From here leaves out the origin, so Google Maps starts from the phone's location.
 export function directionsUrl(edge: TravelEdge, places: Record<string, Place>, options: { fromHere?: boolean; toDeparture?: boolean } = {}) {
   const origin = places[edge.from];

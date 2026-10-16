@@ -1,11 +1,11 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
-import { markDone, markSkipped, minuteNow, tripModeDays } from "@/lib/trip-mode";
+import { markDone, markPending, markSkipped, minuteNow, tripModeDays, visitStatus } from "@/lib/trip-mode";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset"];
 
 type Deps = {
   journey: Journey;
@@ -77,6 +77,18 @@ export function createNativeApi({ journey, recordProgress, adjustToday, closed, 
       writeUndo(undoKey(journey.id, cityId, entry.date), { before: entry.progress ?? null, afterVersion: next.version });
       recordProgress(cityId, entry.date, next);
       return kind === "done" ? `${stop.name} marked done` : `${stop.name} skipped`;
+    },
+    // Undo on the visit itself, any time that day: back to not done, whatever was recorded after it.
+    reset(cityId: string, day: number, stopId: string) {
+      const entry = tripModeDays(journey.cities, journey.plans, journey.execution, clock()).find((candidate) => candidate.cityId === cityId && candidate.day === day);
+      const stop = entry?.trip.stops.find((candidate) => candidate.id === stopId);
+      if (!entry?.isToday || !stop) throw new Error("Only today's visits can be changed.");
+      const status = visitStatus(entry.progress, stopId);
+      if (status === "pending") return `${stop.name} isn't marked`;
+      const next = markPending(entry, stopId);
+      writeUndo(undoKey(journey.id, cityId, entry.date), { before: entry.progress ?? null, afterVersion: next.version });
+      recordProgress(cityId, entry.date, next);
+      return status === "done" ? `${stop.name} no longer marked done` : `${stop.name} no longer skipped`;
     },
     // Only while the day is still as that Done or Skip left it; anything recorded since would be lost.
     undo(cityId: string, date: string) {

@@ -46,7 +46,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("the page's calls for the iPhone app", () => {
   it("says which calls it understands", async () => {
     const { journey } = fixture();
-    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved"]));
+    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset"]));
   });
 
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {
@@ -102,6 +102,20 @@ describe("the page's calls for the iPhone app", () => {
     const reloaded = api(await load(), withProgress(journey, amsterdam.id, later));
     expect(reloaded.native.undo(amsterdam.id, "2026-12-24")).toBe(false);
     expect(reloaded.recorded).toEqual([]);
+  });
+
+  it("undoes a visit from the visit itself, long after the quick Undo has gone", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const first = api(await load(), journey);
+    first.native.record("done", amsterdam.id, 0, coffee.id, Date.parse("2026-12-24T08:00:00Z"));
+    const later = api(await load(), withProgress(journey, amsterdam.id, first.recorded[0].next));
+    expect(later.native.reset(amsterdam.id, 0, coffee.id)).toBe("Sango Coffee no longer marked done");
+    expect(later.recorded[0].next).toMatchObject({ completed: [], originId: "hotel", readyAt: null });
+    // Its own quick Undo puts the Done back.
+    const again = api(await load(), withProgress(journey, amsterdam.id, later.recorded[0].next));
+    expect(again.native.undo(amsterdam.id, "2026-12-24")).toBe(true);
+    expect(again.recorded[0].next).toEqual(first.recorded[0].next);
+    expect(api(await load(), journey).native.reset(amsterdam.id, 0, coffee.id)).toBe("Sango Coffee isn't marked");
   });
 
   it("forgets Undo for days that have passed", async () => {
