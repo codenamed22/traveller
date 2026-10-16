@@ -5,12 +5,13 @@ import { markDone, markPending, markSkipped, minuteNow, tripModeDays, visitStatu
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened"];
 
 type Deps = {
   journey: Journey;
   recordProgress: (cityId: string, date: string, next: DayProgress | undefined) => void;
   adjustToday: (cityId: string, day: number) => void;
+  opened: () => void;
   closed: () => void;
   photo?: (placeId: string, index: number) => Promise<unknown>;
   now?: () => Temporal.Instant;
@@ -56,7 +57,7 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, closed, photo, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, now: clock = () => Temporal.Now.instant() }: Deps) {
   return {
     features: nativeFeatures,
     // `at` (epoch ms) is when the app recorded it, for Done tapped without a connection and sent later; without it, now.
@@ -103,6 +104,8 @@ export function createNativeApi({ journey, recordProgress, adjustToday, closed, 
       return true;
     },
     adjustToday,
+    // Trip mode opened by the app itself, such as from a reminder; the page sends it updates from now on.
+    opened,
     closed,
     photo(placeId: string, index: number) {
       if (!photo) throw new Error("Photos are unavailable");

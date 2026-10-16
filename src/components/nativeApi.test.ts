@@ -27,7 +27,7 @@ async function load() {
 
 function api(createNativeApi: Awaited<ReturnType<typeof load>>, journey: Journey) {
   const recorded: { cityId: string; date: string; next: DayProgress | undefined }[] = [];
-  const native = createNativeApi({ journey, recordProgress: (cityId, date, next) => recorded.push({ cityId, date, next }), adjustToday() {}, closed() {}, now: () => now });
+  const native = createNativeApi({ journey, recordProgress: (cityId, date, next) => recorded.push({ cityId, date, next }), adjustToday() {}, opened() {}, closed() {}, now: () => now });
   return { native, recorded };
 }
 
@@ -46,7 +46,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("the page's calls for the iPhone app", () => {
   it("says which calls it understands", async () => {
     const { journey } = fixture();
-    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset"]));
+    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset", "opened"]));
   });
 
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {

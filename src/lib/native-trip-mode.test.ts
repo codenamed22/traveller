@@ -100,4 +100,16 @@ describe("native trip mode snapshot", () => {
     const [day] = nativeTripMode(journey, Temporal.Instant.from(tenOClock), { canTrack: true, photos: false }).days;
     expect(day.visits[0]).toMatchObject({ startLabel: "10:00", leaveLabel: "09:40", startAt: Date.parse(tenOClock), leaveAt: Date.parse(tenOClock) - 20 * 60_000, endAt: Date.parse(tenOClock) + 120 * 60_000 });
   });
+
+  it("says when to leave the hotel for the last day's train", () => {
+    const louvre = { ...newStop("Louvre"), placeId: "g-louvre", duration: 120 };
+    // A 18:00 train, 30 min at the station and 30 min to get there: leave the hotel at 17:00 (16:00 UTC in winter).
+    const paris: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", startDate: "2026-12-31", days: 1, timeZone: "Europe/Paris", stops: [louvre], departure: { mode: "TRAIN", time: "18:00", place: "Gare du Nord", bufferMinutes: 30, transferMinutes: 30 } };
+    const schedule: Schedule = { generatedAt: "2026-10-14T06:00:00Z", warnings: [], omitted: [], days: [
+      { day: 0, date: "2026-12-31", visits: [{ stopId: louvre.id, start: minuteAt(paris, 0, "10:00"), end: minuteAt(paris, 0, "12:00"), leg: leg("hotel", louvre.id, 20) }], returnLeg: leg(louvre.id, "hotel", 20) },
+    ] };
+    const journey: Journey = { id: crypto.randomUUID(), title: "Paris", cities: [paris], plans: { [paris.id]: persistedPlan(schedule, paris, { hotel: place("g-hotel", "Hotel"), [louvre.id]: place("g-louvre", "Louvre") }) } };
+    const [day] = nativeTripMode(journey, Temporal.Instant.from("2026-12-31T08:00:00Z"), { canTrack: true, photos: false }).days;
+    expect(day.departure).toMatchObject({ title: "Train leaves Gare du Nord 18:00", at: Date.parse("2026-12-31T17:00:00Z"), leaveAt: Date.parse("2026-12-31T16:00:00Z") });
+  });
 });

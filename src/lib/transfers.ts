@@ -19,6 +19,15 @@ export function transferLineText(trip: Trip, kind: Kind) {
   return { mode: transfer.mode, title, detail };
 }
 
+// When to leave the hotel for the airport or station on the last day, in epoch milliseconds. A direct departure goes
+// from the last visit instead, so it has none.
+export function transferLeaveAt(trip: Trip) {
+  try {
+    const times = departureTimes(trip);
+    return times && !times.direct ? instantForMinute(trip, times.day, times.leaveHotel).epochMilliseconds : undefined;
+  } catch { return undefined; }
+}
+
 // When the flight or train lands or leaves, in epoch milliseconds.
 export function transferAt(trip: Trip, kind: Kind) {
   try {

@@ -73,15 +73,17 @@ describe("native trip mode in the iPhone app", () => {
     // 10:00 in Amsterdam on Christmas Eve.
     vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));
     try {
-      const posted: { type: string; snapshot: NativeTripMode }[] = [];
-      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => posted.push(message) } } } });
+      // Trip mode's own messages; the app's background copies (`sync`) are checked on their own below.
+      const messages: { type: string; snapshot: NativeTripMode }[] = [];
+      const posted = { get list() { return messages.filter((message) => message.type !== "sync"); } };
+      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });
       vi.stubGlobal("fetch", vi.fn(async () => Response.json({ revision: 2 })));
       const { coffee, amsterdam, entry } = planned();
       await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: entry, initialList: null, config } as never)));
       await act(async () => (container.querySelector(".trip-mode-pill") as HTMLElement).click());
       expect(container.querySelector(".trip-mode")).toBeNull();
-      expect(posted.map((message) => message.type)).toEqual(["open"]);
-      expect(posted[0].snapshot).toMatchObject({ title: "Christmas", startKey: `${amsterdam.id}:0`, canTrack: true, days: [{ visits: [{ name: "Sango Coffee", status: "pending" }] }] });
+      expect(posted.list.map((message) => message.type)).toEqual(["open"]);
+      expect(posted.list[0].snapshot).toMatchObject({ title: "Christmas", startKey: `${amsterdam.id}:0`, canTrack: true, days: [{ visits: [{ name: "Sango Coffee", status: "pending" }] }] });
 
       // The app looks the calls up afresh each time, as they're rebuilt with every render.
       type Native = { features: string[]; record: (...args: unknown[]) => string; undo: (...args: unknown[]) => boolean; closed: () => void };
@@ -90,17 +92,38 @@ describe("native trip mode in the iPhone app", () => {
       let message = "";
       await act(async () => { message = native().record("done", amsterdam.id, 0, coffee.id); });
       expect(message).toBe("Sango Coffee marked done");
-      expect(posted.at(-1)).toMatchObject({ type: "update", snapshot: { days: [{ visits: [{ status: "done", doneLabel: "09:15–10:00" }] }] } });
+      expect(posted.list.at(-1)).toMatchObject({ type: "update", snapshot: { days: [{ visits: [{ status: "done", doneLabel: "09:15–10:00" }] }] } });
       await act(async () => { native().undo(amsterdam.id, "2026-12-24"); });
-      expect(posted.at(-1)?.snapshot.days[0].visits[0].status).toBe("pending");
+      expect(posted.list.at(-1)?.snapshot.days[0].visits[0].status).toBe("pending");
       expect(native().undo(amsterdam.id, "2026-12-24")).toBe(false);
       // A Done tapped without a connection arrives later with the time it was tapped.
       await act(async () => { native().record("done", amsterdam.id, 0, coffee.id, Date.parse("2026-12-24T08:40:00Z")); });
-      expect(posted.at(-1)?.snapshot.days[0].visits[0]).toMatchObject({ status: "done", doneLabel: "08:55–09:40" });
+      expect(posted.list.at(-1)?.snapshot.days[0].visits[0]).toMatchObject({ status: "done", doneLabel: "08:55–09:40" });
       // Once the app closes trip mode, trip changes stay here.
-      const count = posted.length;
+      const count = posted.list.length;
       await act(async () => { native().closed(); native().record("skip", amsterdam.id, 0, coffee.id); });
-      expect(posted).toHaveLength(count);
+      expect(posted.list).toHaveLength(count);
     } finally { vi.useRealTimers(); }
+  });
+
+  it("gives the app a copy of the trip shortly after it loads or changes, and says when it's deleted", async () => {
+    const messages: { type: string; snapshot?: NativeTripMode; journeyId?: string }[] = [];
+    Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ revision: 2 })));
+    const { entry } = planned();
+    await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: entry, initialList: null, config } as never)));
+    expect(messages).toEqual([]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ type: "sync", snapshot: { journeyId: entry.data.id, level: 2, days: [{ visits: [{ name: "Sango Coffee" }] }] } });
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => init?.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json({ trips: [entry] })));
+    vi.stubGlobal("confirm", () => true);
+    Object.assign(window, { confirm: () => true });
+    await act(async () => button("My trips").click());
+    await settle();
+    await act(async () => (container.querySelector(".saved-trips button[aria-label^='Delete']") as HTMLElement).click());
+    await settle();
+    expect(messages.at(-1)).toEqual({ type: "removed", journeyId: entry.data.id });
   });
 });
