@@ -2,11 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, TrainFront, Undo2, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
 import type { Journey } from "@/lib/journey";
-import { endpointKey, formatMinute, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
+import { endpointKey, formatMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
@@ -165,11 +165,12 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       const isNext = focus === next;
       const note = stop?.source ? exportNote(stop.source) : "";
       // From the city as it is now, so a note written after planning shows.
-      const yourNote = entry.cityTrip.stops.find((candidate) => candidate.id === focus.stopId)?.note;
+      const current = entry.cityTrip.stops.find((candidate) => candidate.id === focus.stopId);
+      const yourNote = current?.note;
       return <div className="trip-card">
         <div className="trip-card-label">{isNext ? "Next" : "Stop"} · {index + 1} of {entry.plan.visits.length}{selected && next && focus !== next && <button type="button" className="chip" onClick={() => setSelected(null)}>Back to next</button>}</div>
         <h2>{stopName(focus.stopId)}</h2>
-        <p className="trip-card-time">{formatMinute(entry.trip, entry.day, focus.start)}–{formatMinute(entry.trip, entry.day, focus.end)}{stop?.fixedTime && <span className="booked"><LockKeyhole size={12} />Booked</span>}</p>
+        <p className="trip-card-time">{formatMinute(entry.trip, entry.day, focus.start)}–{formatMinute(entry.trip, entry.day, focus.end)}{stop?.fixedTime && <span className="booked"><LockKeyhole size={12} />Booked</span>}{current && isMustSee(current) && <span className="booked"><Star size={12} />Must-see</span>}</p>
         {status === "done" ? <p className="trip-card-status done"><Check size={14} />Done{completed ? ` ${formatMinute(entry.cityTrip, entry.day, completed.start)}–${formatMinute(entry.cityTrip, entry.day, completed.end)}` : ""}</p>
           : status === "skipped" ? <p className="trip-card-status skipped"><SkipForward size={14} />Skipped</p>
           : <p className="trip-card-leave">{focus.leg.mode === "WALK" ? <Footprints size={14} /> : <TrainFront size={14} />}Leave by {formatMinute(entry.trip, entry.day, leave)} · {modeLabel(focus)}{entry.isToday && isNext ? leave > nowMinute ? ` · in ${durationLabel(leave - nowMinute)}` : " · now" : ""}</p>}
@@ -246,7 +247,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
             <LegDetails edge={visit.leg} places={entry.places} />
             <button type="button" className={`itinerary-stop ${selected === visit.stopId ? "selected" : ""} ${visit === next ? "next" : ""}`} onClick={() => { setSelected(visit.stopId); setSnap("peek"); }}>
               <span className="stop-number">{status === "done" ? <Check size={13} /> : index + 1}</span>
-              <span className="stop-heading"><strong>{stopName(visit.stopId)}</strong><span>{formatMinute(entry.trip, entry.day, visit.start)} - {formatMinute(entry.trip, entry.day, visit.end)} · {visit.end - visit.start} min{status === "skipped" ? " · skipped" : ""}</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>
+              <span className="stop-heading"><strong>{stopName(visit.stopId)}{isMustSee(entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId) ?? { priority: 1 }) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(entry.trip, entry.day, visit.start)} - {formatMinute(entry.trip, entry.day, visit.end)} · {visit.end - visit.start} min{status === "skipped" ? " · skipped" : ""}</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>
               {stop?.fixedTime && <LockKeyhole size={15} />}
             </button>
           </div>;

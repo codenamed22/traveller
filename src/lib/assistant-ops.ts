@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 import { cityTripSchema, journeySchema, type Journey } from "./journey";
-import { bookingConflicts, changeStartDate, lateBookings, formatMinute, maxStopsPerCity, newStop, planningKey, squeezeInNote, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
+import { bookingConflicts, changeStartDate, lateBookings, formatMinute, isMustSee, maxStopsPerCity, mustSeePriority, newStop, planningKey, squeezeInNote, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
 import { dayLabel, markDone, markSkipped, minuteNow, tripModeDays } from "./trip-mode";
 
 // Small trip edits the assistant can propose. Nothing is applied until the traveller approves the proposal card, and the
@@ -25,6 +25,7 @@ export const operationSchema = z.object({
   minutes: z.number().int().min(5).max(480).optional().describe("How long the visit lasts; new places default to 45"),
   buffer: z.number().int().min(0).max(120).optional().describe("Minutes kept free before the visit"),
   optional: z.boolean().optional().describe("true = nice to have; the planner may leave it out"),
+  mustSee: z.boolean().optional().describe("true = a must-see: kept before other optional places and shortened last; false = an ordinary place"),
   travel: z.enum(["auto", "walk", "transit"]).optional().describe("How to get there"),
   slot: visitSlotSchema.nullable().optional().describe("Time of day it suits; null clears it"),
   kind: visitKindSchema.optional(),
@@ -110,11 +111,12 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
         if (operation.travel) stop.mode = modes[operation.travel];
         if (operation.slot && !stop.fixedTime) stop.slot = operation.slot;
         if (operation.kind) stop.kind = operation.kind;
+        if (operation.mustSee) stop.priority = mustSeePriority;
         if (operation.note) stop.note = operation.note;
         if (stop.fixedTime && assigned === null) throw new Error(`${stop.name}: a booking needs a day.`);
         if (stop.fixedTime && stop.optional) throw new Error(`${stop.name}: a booking can't be optional.`);
         trip.stops.push(stop); touched.add(trip.id);
-        changes.push(`+ ${stop.name} · ${dayText(assigned)}${stop.fixedTime ? ` · booked ${stop.fixedTime}` : stop.slot && stop.slot !== "any" ? ` · ${stop.slot}` : ""} · ${stop.duration} min${stop.optional ? " · optional" : ""} · ${stop.placeId ? "on the map" : "not on the map yet"}`);
+        changes.push(`+ ${stop.name} · ${dayText(assigned)}${stop.fixedTime ? ` · booked ${stop.fixedTime}` : stop.slot && stop.slot !== "any" ? ` · ${stop.slot}` : ""} · ${stop.duration} min${stop.optional ? " · optional" : ""}${isMustSee(stop) ? " · must-see" : ""} · ${stop.placeId ? "on the map" : "not on the map yet"}`);
         if (!stop.placeId) warnings.push(`Confirm ${stop.name} on the map before planning.`);
       } else if (operation.type === "update_stop") {
         const { city: trip, index, stop } = stopIn(need(operation.stopId, "stopId"));
@@ -150,6 +152,7 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
           parts.push(operation.slot === null ? "no time of day" : operation.slot);
         }
         if (operation.kind !== undefined && operation.kind !== stop.kind) { next.kind = operation.kind; parts.push(operation.kind); }
+        if (operation.mustSee !== undefined && operation.mustSee !== isMustSee(stop)) { next.priority = operation.mustSee ? mustSeePriority : 1; parts.push(operation.mustSee ? "must-see" : "no longer a must-see"); }
         if (operation.note !== undefined && operation.note !== (stop.note ?? "")) {
           if (operation.note) next.note = operation.note; else delete next.note;
           parts.push(operation.note ? `note: “${operation.note}”` : "note removed");
@@ -268,7 +271,7 @@ export function assistantContext(journey: Journey, view: { cityId?: string; day?
         departure: trip.departure ? { mode: trip.departure.mode, time: trip.departure.time, place: trip.departure.place || undefined } : undefined,
         places: trip.stops.map((stop) => ({
           id: stop.id, name: stop.name, day: stop.day === null ? "flexible" : stop.day + 1, booked: stop.fixedTime ?? undefined, minutes: stop.duration,
-          optional: stop.optional || undefined, slot: stop.slot, kind: stop.kind, travel: stop.mode === "AUTO" ? undefined : stop.mode.toLowerCase(), onMap: Boolean(stop.placeId && stop.location),
+          optional: stop.optional || undefined, mustSee: isMustSee(stop) || undefined, slot: stop.slot, kind: stop.kind, travel: stop.mode === "AUTO" ? undefined : stop.mode.toLowerCase(), onMap: Boolean(stop.placeId && stop.location),
           source: stop.source ? stop.source.slice(0, 160) : undefined, note: stop.note || undefined,
           dayTrip: trip.dayGroups?.find((group) => group.stopIds.includes(stop.id))?.name,
         })),

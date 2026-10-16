@@ -390,6 +390,10 @@ export function allowsTravelEdge(trip: Trip, edge: TravelEdge) {
     && (edge.mode !== "WALK" || ((limit === null || edge.minutes <= limit) && edge.meters <= maxWalkMeters));
 }
 
+// Priority runs from 1 to 5. A must-see is 5: the planner keeps it before other optional places and shortens it last.
+export const mustSeePriority = 5;
+export const isMustSee = (stop: Pick<Stop, "priority">) => stop.priority >= 3;
+
 export function newStop(name = ""): Stop {
   return { id: crypto.randomUUID(), name, placeId: null, duration: 45, day: null, fixedTime: null, buffer: 15, optional: false, priority: 1, mode: "AUTO", source: "" };
 }

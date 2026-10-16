@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
 import type { Journey } from "@/lib/journey";
-import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
+import { minuteAt, mustSeePriority, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
 import { markDone, markSkipped, tripModeDays } from "@/lib/trip-mode";
 import { nativeTripMode } from "./native-trip-mode";
 
@@ -63,6 +63,13 @@ describe("native trip mode snapshot", () => {
     expect(today.returnLeg).toMatchObject({ label: "25 min walk", to: { lat: 52.36, lng: 4.89 } });
     // The snapshot crosses into Swift as JSON.
     expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
+  });
+
+  it("stars must-sees, including one marked after planning", () => {
+    const { journey, amsterdam, museum } = fixture();
+    const marked = { ...journey, cities: [{ ...amsterdam, stops: amsterdam.stops.map((stop) => stop.id === museum.id ? { ...stop, priority: mustSeePriority } : stop) }] };
+    const [today] = nativeTripMode(marked, christmasEve, { canTrack: true, photos: false }).days;
+    expect(today.visits.map((visit) => visit.mustSee)).toEqual([undefined, true]);
   });
 
   it("shows progress recorded with the trip mode rules", () => {

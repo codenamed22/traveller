@@ -48,6 +48,32 @@ test("edit bookings, preserve calendar dates, and export a draft", async ({ page
   expect(errors).toEqual([]);
 });
 
+test("marks a must-see and sets what kind of place it is", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await page.getByLabel("City", { exact: true }).fill("Paris, France");
+  await page.getByLabel("New place name").fill("Cafe de Flore");
+  await page.getByRole("button", { name: "Add place", exact: true }).click();
+  await expect(page.getByLabel("Place type for Cafe de Flore")).toHaveValue("");
+  await expect(page.getByLabel("Place type for Cafe de Flore").locator("option").first()).toHaveText("Automatic (Coffee)");
+  await page.getByLabel("Place type for Cafe de Flore").selectOption("meal");
+  await page.getByRole("checkbox", { name: "Must-see", exact: true }).check();
+  await expect(page.locator(".stop-item").first().getByRole("img", { name: "Must-see" })).toBeVisible();
+  // A booking keeps its place type; the time of day gives way to the booked time.
+  await page.getByLabel("Fixed booking", { exact: true }).check();
+  await expect(page.getByLabel("Place type for Cafe de Flore")).toHaveValue("meal");
+  await expect(page.getByLabel("Time of day for Cafe de Flore")).toHaveCount(0);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("trip-backup.json");
+  await (await downloadPromise).saveAs(output);
+  expect(JSON.parse(await readFile(output, "utf8")).trip.stops[0]).toMatchObject({ name: "Cafe de Flore", kind: "meal", priority: 5 });
+  await page.getByRole("checkbox", { name: "Must-see", exact: true }).uncheck();
+  await expect(page.locator(".stop-item").first().getByRole("img", { name: "Must-see" })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("map-status icons remain visible independently of booking locks", async ({ page }, testInfo) => {
   const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: [
     { ...newStop("Confirmed museum"), placeId: "museum-id" },

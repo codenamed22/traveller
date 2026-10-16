@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { blockedDayFixes, bookingConflicts, commonHoliday, crowdedDayAdvice, compactWaits, PlanningError, squeezeIns, solveTrip, solveTripByDays, travelEstimator, type SolverStage } from "./planner";
-import { applyPlanningFixes, bookingConflictDetails, bookingTimeSuggestion, minuteAt, squeezeInNote, tripDate, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
+import { applyPlanningFixes, bookingConflictDetails, bookingTimeSuggestion, minuteAt, mustSeePriority, squeezeInNote, tripDate, newStop, newTrip, planningPreferences, resolvePlanningConstraints, type Trip, type TravelEdge } from "./trip";
 import { splitVisits, validateSchedule } from "./schedule-validation";
 import { sunsetMinute } from "./visit-slots";
 import { solveWithDurationRelaxation } from "./duration-relaxation";
@@ -60,6 +60,17 @@ describe("schedule optimizer", () => {
     expect(validateSchedule(grouped, groupSchedule)).toEqual([]);
     expect(groupSchedule.omitted).toEqual([optional.id]);
     expect(groupSchedule.days[1].visits[0].stopId).toBe(required.id);
+  });
+  it("keeps a must-see over an ordinary optional place when only one fits", async () => {
+    for (const order of [0, 1]) {
+      const ordinary = { ...newStop("Ordinary cafe"), duration: 60, optional: true };
+      const mustSee = { ...newStop("Must-see gallery"), duration: 60, optional: true, priority: mustSeePriority };
+      const trip = { ...fixture(), days: 1, dailyStart: "09:00", dailyEnd: "10:30", stops: order ? [mustSee, ordinary] : [ordinary, mustSee] };
+      const schedule = await solveTrip(trip, routes(trip), 2);
+      expect(validateSchedule(trip, schedule)).toEqual([]);
+      expect(schedule.days[0].visits.map((visit) => visit.stopId)).toEqual([mustSee.id]);
+      expect(schedule.omitted).toEqual([ordinary.id]);
+    }
   });
   it("puts meals in their time slots even when travel favours the opposite order", async () => {
     const dinner = { ...newStop("Bouillon d'Amsterdam"), source: "Dinner: Bouillon d'Amsterdam for a budget French bistro main (€12)." };

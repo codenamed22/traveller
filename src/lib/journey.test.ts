@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asJourney, cityPreset, createJourney, journeySchema, restoreJourney, stayDates, type CityStay } from "./journey";
+import { asJourney, cityPreset, createJourney, duplicateJourney, journeySchema, restoreJourney, stayDates, type CityStay } from "./journey";
 import { newStop, newTrip, persistedPlan, type Schedule } from "./trip";
 import { applyDayRecovery, newDayProgress } from "./day-recovery";
 
@@ -78,5 +78,17 @@ describe("multi-city journeys", () => {
     expect(restored.cities[0].stops[0]).toEqual(stop);
     expect(restored.plans[trip.id]).toEqual(plan);
     expect(journeySchema.safeParse({ ...legacy, cities: [trip, trip] }).success).toBe(false);
+  });
+
+  it("duplicates a trip with its places and itinerary but without what was done on the way", () => {
+    const stop = { ...newStop("Museum"), day: 0 };
+    const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", stops: [stop] };
+    const plan = { days: [{ day: 0, stopIds: [stop.id] }], omitted: [] };
+    const journey = { ...asJourney(trip, plan), title: "Paris", execution: { [trip.id]: { [trip.startDate]: newDayProgress(trip, 0, [stop.id]) } } };
+    const copy = duplicateJourney(journey);
+    expect(copy.id).not.toBe(journey.id);
+    expect(copy).toEqual({ id: copy.id, title: "Paris (copy)", cities: journey.cities, plans: journey.plans });
+    // The longest title still fits.
+    expect(duplicateJourney({ ...journey, title: "x".repeat(150) }).title).toHaveLength(150);
   });
 });

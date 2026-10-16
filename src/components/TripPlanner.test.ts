@@ -54,6 +54,26 @@ describe("My trips", () => {
     expect((container.querySelector(".trip-title") as HTMLInputElement).value).toBe("Spring");
     expect(container.textContent).toContain("Trip loaded");
   });
+
+  it("duplicates a trip as a new saved trip, listed first", async () => {
+    const open = saved("Christmas", "Paris");
+    const other = saved("Spring", "Rome");
+    const saves: { url: string; body: { journey: { id: string; title: string; cities: unknown[] }; revision: number } }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PUT") { saves.push({ url, body: JSON.parse(String(init.body)) }); return Response.json({ revision: 1 }); }
+      return Response.json({ trips: [open, other] });
+    }));
+    await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: open, initialList: null, config } as never)));
+    await act(async () => button("My trips").click());
+    await settle();
+    await act(async () => button("Duplicate Spring").click());
+    await settle();
+    expect(saves).toHaveLength(1);
+    const copy = saves[0].body.journey;
+    expect(saves[0]).toMatchObject({ url: `/api/trips/${copy.id}`, body: { revision: 0, journey: { title: "Spring (copy)", cities: other.data.cities } } });
+    expect(copy.id).not.toBe(other.data.id);
+    expect([...container.querySelectorAll(".saved-trip strong")].map((title) => title.textContent)).toEqual(["Spring (copy)", "Christmas", "Spring"]);
+  });
 });
 
 describe("native trip mode in the iPhone app", () => {

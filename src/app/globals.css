@@ -120,6 +120,7 @@ summary::-webkit-details-marker { display: none; }
 .stop-heading > span { color: var(--muted); font-size: 11px; }
 .dot-separator { padding: 0 3px; }
 .booking-icon { color: var(--amber); }
+.must-see-icon { color: var(--amber); fill: currentColor; margin-left: 5px; vertical-align: -1px; }
 .confirmed-icon { color: var(--green); }
 .unconfirmed-icon { color: var(--amber); }
 .stop-statuses { display: grid; grid-template-columns: repeat(2, 16px); gap: 6px; align-items: center; flex-shrink: 0; }

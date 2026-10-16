@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { exportNote } from "./export";
 import type { Journey } from "./journey";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { endpointKey, formatMinute, instantForMinute, tripDate, type Place, type TravelEdge, type Trip } from "./trip";
+import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type TravelEdge, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
@@ -17,7 +17,7 @@ export type NativeLeg = {
 };
 export type NativeVisit = {
   stopId: string; name: string; placeId?: string; location?: LatLng; start: number; end: number; startLabel: string; endLabel: string;
-  leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string;
+  leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
   alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number;
 };
 type Line = { title: string; detail: string; at?: number; leaveAt?: number };
@@ -96,15 +96,16 @@ function nativeDay(entry: TripModeDay, journey: Journey): NativeDay {
       const completed = entry.progress?.completed.find((done) => done.stopId === visit.stopId);
       const placeId = places[visit.stopId]?.id || stop?.placeId;
       const location = places[visit.stopId]?.location;
-      // From the city as it is now, so a note written after planning shows.
-      const note = entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId)?.note;
+      // From the city as it is now, so a note or must-see set after planning shows.
+      const current = entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId);
+      const note = current?.note;
       const sourceNote = stop?.source ? exportNote(stop.source) : "";
       return {
         stopId: visit.stopId, name: stopName(visit.stopId), ...(placeId ? { placeId } : {}), ...(location ? { location } : {}),
         start: visit.start, end: visit.end, startLabel: clock(trip, entry.day, visit.start), endLabel: clock(trip, entry.day, visit.end),
         leaveBy: leaveBy(visit), leaveLabel: clock(trip, entry.day, leaveBy(visit)), booked: Boolean(stop?.fixedTime), status: visitStatus(entry.progress, visit.stopId),
         ...(completed ? { doneLabel: `${clock(entry.cityTrip, entry.day, completed.start)}–${clock(entry.cityTrip, entry.day, completed.end)}` } : {}),
-        ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}),
+        ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}), ...(current && isMustSee(current) ? { mustSee: true } : {}),
         alternatives: stop?.alternativeGroup ? plan.visits.filter((other) => other.stopId !== visit.stopId && trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [],
         leg: leg(visit.leg, places),
         ...defined({

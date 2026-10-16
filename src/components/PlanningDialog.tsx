@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUpRight, Check, Footprints, LoaderCircle, LockKeyhole, Plus, Route, Search, Settings2, Sparkles, TrainFront, Trash2 } from "lucide-react";
+import { ArrowUpRight, Check, Footprints, LoaderCircle, LockKeyhole, Plus, Route, Search, Settings2, Sparkles, Star, TrainFront, Trash2 } from "lucide-react";
 import { ZodError } from "zod";
 import { Dialog } from "./Dialog";
 import { ConflictResolution, ProvisionalOutline } from "./ConflictResolution";
 import { VisitTimingFields } from "./VisitTiming";
-import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, groupAllowedDays, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningFix, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
+import { applyPlanningFixes, applyScheduleDurations, bookingConflicts, bookingTimeSuggestion, formatMinute, groupAllowedDays, isMustSee, mustSeePriority, planningPreferences, suggestDayTrips, tripSchema, type BookingTravelCheck, type DayGroup, type Place, type PlanningFix, type PlanningPreferences, type PlanningPreview, type PlanResult, type Stop, type Trip } from "@/lib/trip";
 import { validateSchedule } from "@/lib/schedule-validation";
 import { timingResultSchema, type TimingResult } from "@/lib/timing";
 import { alternativeGroups } from "@/lib/visit-slots";
@@ -173,7 +173,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
             const recommendation = timing?.recommendations.find((item) => item.stopId === stop.id);
             const suggestedTime = suggestions.get(stop.id);
             return <div className="planning-visit" key={stop.id}>
-              <div className="planning-visit-heading"><strong>{stop.name}</strong>{stop.fixedTime && <span className="booking-time"><LockKeyhole size={13} />Day {stop.day! + 1}, {stop.fixedTime}</span>}</div>
+              <div className="planning-visit-heading"><strong>{stop.name}{isMustSee(stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong>{stop.fixedTime && <span className="booking-time"><LockKeyhole size={13} />Day {stop.day! + 1}, {stop.fixedTime}</span>}</div>
               <div className="form-grid three">
                 <label className="field">Visit minutes<input aria-label={`Visit minutes for ${stop.name}`} type="number" min={5} max={480} value={stop.duration} onChange={(event) => editStop(stop.id, { duration: Number(event.target.value) })} /></label>
                 <label className="field">Day<select aria-label={`Day for ${stop.name}`} disabled={Boolean(stop.fixedTime)} value={stop.day ?? ""} onChange={(event) => editStop(stop.id, { day: event.target.value === "" ? null : Number(event.target.value) })}><option value="">Optimize</option>{Array.from({ length: draft.days }, (_, index) => <option key={index} value={index}>Day {index + 1}</option>)}</select></label>
@@ -182,7 +182,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
                 <label className="field">Arrival buffer (min)<input aria-label={`Arrival buffer for ${stop.name}`} type="number" min={0} max={120} value={stop.buffer} onChange={(event) => editStop(stop.id, { buffer: Number(event.target.value) })} /></label>
               </div>
               <VisitTimingFields trip={draft} stop={stop} place={places?.[stop.id]} groups={draftAlternatives} onChange={(patch) => editStop(stop.id, patch)} />
-              <div className="planning-visit-options"><label className="checkbox"><input type="checkbox" aria-label={`Any time slot for ${stop.name}`} checked={!stop.fixedTime} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: null } : { fixedTime: bookedTimes[stop.id] ?? draft.dailyStart, day: stop.day ?? 0, optional: false })} />Any time slot</label><label className="checkbox"><input type="checkbox" aria-label={`Optional ${stop.name}`} disabled={Boolean(stop.fixedTime)} checked={stop.optional} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional</label>
+              <div className="planning-visit-options"><label className="checkbox"><input type="checkbox" aria-label={`Any time slot for ${stop.name}`} checked={!stop.fixedTime} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: null } : { fixedTime: bookedTimes[stop.id] ?? draft.dailyStart, day: stop.day ?? 0, optional: false })} />Any time slot</label><label className="checkbox"><input type="checkbox" aria-label={`Optional ${stop.name}`} disabled={Boolean(stop.fixedTime)} checked={stop.optional} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional</label><label className="checkbox" title="Kept before other optional places when a day is full, and shortened last"><input type="checkbox" aria-label={`Must-see ${stop.name}`} checked={isMustSee(stop)} onChange={(event) => editStop(stop.id, { priority: event.target.checked ? mustSeePriority : 1 })} />Must-see</label>
                 {!stop.fixedTime && <label className="checkbox"><input type="checkbox" aria-label={`Research timing for ${stop.name}`} checked={researchIds.includes(stop.id)} disabled={!researchIds.includes(stop.id) && researchIds.length >= 5} onChange={(event) => { setResearchIds((current) => event.target.checked ? [...current, stop.id] : current.filter((id) => id !== stop.id)); setConsent(false); setTiming(null); }} />Research timing</label>}
               </div>
               {suggestedTime && <div className="planning-visit-options"><span className="quiet">Suggested time: {suggestedTime} (before travel)</span><button className="text-button" aria-label={`Use suggested time ${suggestedTime} for ${stop.name}`} onClick={() => editStop(stop.id, { fixedTime: suggestedTime })}><Check size={14} />Use {suggestedTime}</button></div>}

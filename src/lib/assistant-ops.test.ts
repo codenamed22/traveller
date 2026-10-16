@@ -48,6 +48,19 @@ describe("assistant operations", () => {
     expect(result.journey.cities[0].stops[2]).toMatchObject({ day: 0, optional: false });
   });
 
+  it("marks and unmarks a must-see, and tells the model which places are", () => {
+    const { journey, amsterdam, cake, coffee } = fixture();
+    const marked = apply(journey, [{ type: "update_stop", stopId: cake.id, mustSee: true }, { type: "add_stop", cityId: amsterdam.id, name: "Anne Frank House", mustSee: true }]);
+    expect(marked.changes).toEqual(["Rum Baba: must-see", "+ Anne Frank House · Flexible · 45 min · must-see · not on the map yet"]);
+    expect(marked.journey.cities[0].stops.map((stop) => stop.priority)).toEqual([1, 1, 5, 5]);
+    expect(marked.staleCities).toEqual([amsterdam.id]);
+    const places = assistantContext(marked.journey, { cityId: amsterdam.id }, christmasEve).cities[0].places;
+    expect(places.find((entry) => entry.id === cake.id)?.mustSee).toBe(true);
+    expect(places.find((entry) => entry.id === coffee.id)?.mustSee).toBeUndefined();
+    expect(apply(marked.journey, [{ type: "update_stop", stopId: cake.id, mustSee: false }]).changes).toEqual(["Rum Baba: no longer a must-see"]);
+    expect(apply(marked.journey, [{ type: "update_stop", stopId: cake.id, mustSee: true }]).warnings).toContain("Rum Baba: nothing to change.");
+  });
+
   it("writes and clears the traveller's own note without making the itinerary out of date", () => {
     const { journey: base, coffee, amsterdam } = fixture();
     // Start from the city exactly as it was planned.

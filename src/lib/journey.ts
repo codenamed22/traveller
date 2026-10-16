@@ -98,3 +98,11 @@ export function restoreJourney(value: unknown): Journey {
   const journey = "journey" in backup ? backup.journey : asJourney(backup.trip, backup.plan ?? null);
   return { ...journey, id: crypto.randomUUID() };
 }
+
+// A copy to plan another version of a trip: the same cities, places and itineraries, without what was done on the way.
+// City ids stay, as in a restored backup, so each itinerary still belongs to its city.
+export function duplicateJourney(journey: Journey): Journey {
+  const { execution: _execution, ...rest } = journey;
+  void _execution;
+  return journeySchema.parse({ ...rest, id: crypto.randomUUID(), title: `${journey.title.slice(0, 143)} (copy)` });
+}
