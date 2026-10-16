@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { APIProvider, AdvancedMarker, InfoWindow, Map as GoogleMap, useMap } from "@vis.gl/react-google-maps";
 import { decode } from "@googlemaps/polyline-codec";
 import { Hotel, LocateFixed, MapPinned } from "lucide-react";
@@ -13,7 +13,9 @@ type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | n
   // Trip mode: room for the floating bar and sheet, a refit on demand, no photo popup, a closer look at the selected stop,
   // a location dot that never moves the camera, progress on markers, and centring on the phone's location.
   padding?: google.maps.Padding; fitToken?: number; popup?: boolean; zoomOnSelect?: boolean; fitCurrentLocation?: boolean;
-  markerStatus?: Record<string, "done" | "skipped" | "next">; centerOn?: { lat: number; lng: number; token: number } };
+  markerStatus?: Record<string, "done" | "skipped" | "next">; centerOn?: { lat: number; lng: number; token: number };
+  // A click on the map itself, not on a marker.
+  onMapClick?: () => void };
 
 // Room for the city and day chip and the route legend along the top (stacked on narrow screens) and the assistant tab on
 // the right, so no marker is fitted underneath them.
@@ -29,8 +31,23 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   const fitLocation = fitCurrentLocation ? currentLocation : undefined;
   const locationKey = visiblePlaces.map(([id, place]) => `${id}:${place.location.lat},${place.location.lng}`).join("|") + (fitLocation ? `|current:${fitLocation.lat},${fitLocation.lng}` : "");
   const paddingKey = JSON.stringify(padding ?? overlayPadding);
+  // The place last brought into view (a selected stop, or a point to centre on such as the phone's location). While there
+  // is one, a change of room around the map (trip mode's sheet growing for photos, or shrinking) keeps it centred rather
+  // than zooming out to the whole day; a new day or a fit request clears it.
+  const focus = useRef<{ lat: number; lng: number } | null>(null);
+  const fitted = useRef<{ locationKey: string; fitToken?: number } | null>(null);
+  // Centres a point in the part of the map the padding leaves visible.
+  function centre(location: { lat: number; lng: number }) {
+    if (!map) return;
+    const room = padding ?? overlayPadding;
+    map.panTo(location);
+    map.panBy(((room.right ?? 0) - (room.left ?? 0)) / 2, ((room.bottom ?? 0) - (room.top ?? 0)) / 2);
+  }
   useEffect(() => {
     if (!map || !locationKey) return;
+    if (fitted.current?.locationKey !== locationKey || fitted.current.fitToken !== fitToken) focus.current = null;
+    fitted.current = { locationKey, fitToken };
+    if (focus.current) { centre(focus.current); return; }
     const bounds = new google.maps.LatLngBounds();
     visiblePlaces.forEach(([, place]) => bounds.extend(place.location));
     if (fitLocation) bounds.extend(fitLocation);
@@ -39,13 +56,16 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   }, [map, locationKey, paddingKey, fitToken]);
   useEffect(() => {
     if (!map || !selected || !places[selected]) return;
-    map.panTo(places[selected].location);
+    focus.current = places[selected].location;
     if (zoomOnSelect && (map.getZoom() ?? 0) < 16) map.setZoom(16);
+    centre(focus.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, selected, places, zoomOnSelect]);
   useEffect(() => {
     if (!map || !centerOn) return;
-    map.panTo(centerOn);
+    focus.current = { lat: centerOn.lat, lng: centerOn.lng };
     if ((map.getZoom() ?? 0) < 15) map.setZoom(15);
+    centre(focus.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, centerOn?.token]);
   useEffect(() => {
@@ -73,5 +93,5 @@ export function TripMap(props: Props) {
   const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   const [failed, setFailed] = useState(false);
   if (!key || failed) return <div className="map-unavailable"><div className="map-grid" aria-hidden="true" /><div className="map-unavailable-content"><MapPinned size={38} strokeWidth={1.3} /><h2>{failed ? "Map could not load" : "Map not connected"}</h2><p>{failed ? "Try again or check your connections." : "Map display has not been set up."}</p><span className="status-label">{failed ? "Connection error" : "Not set up"}</span></div></div>;
-  return <APIProvider apiKey={key} onError={() => setFailed(true)}><GoogleMap defaultCenter={{ lat: 30, lng: 10 }} defaultZoom={3} mapId={process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || "DEMO_MAP_ID"} disableDefaultUI gestureHandling="greedy" zoomControl mapTypeControl={false} style={{ height: "100%", width: "100%" }}><MapContents {...props} /></GoogleMap></APIProvider>;
+  return <APIProvider apiKey={key} onError={() => setFailed(true)}><GoogleMap defaultCenter={{ lat: 30, lng: 10 }} defaultZoom={3} mapId={process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || "DEMO_MAP_ID"} disableDefaultUI gestureHandling="greedy" zoomControl mapTypeControl={false} style={{ height: "100%", width: "100%" }} onClick={props.onMapClick && (() => props.onMapClick!())}><MapContents {...props} /></GoogleMap></APIProvider>;
 }

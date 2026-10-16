@@ -5,6 +5,15 @@ import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 
 type Session = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
+// One photo of a place, checked against the place and index asked for. Each request is charged, so callers ask once.
+export async function fetchPlacePhoto(placeId: string, index: number, signal?: AbortSignal) {
+  const response = await fetch("/api/place-photos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ placeId, index, operationId: crypto.randomUUID() }), signal });
+  if (!response.ok) throw new Error("The photo request failed.");
+  const photo = placePhotoResponseSchema.parse(await response.json());
+  if (photo.placeId !== placeId || photo.index !== index) throw new Error("The photo response did not match this place.");
+  return photo;
+}
+
 // Photos for one place at a time, fetched one by one as the carousel asks for them, starting with the first. `key`
 // names the place in its trip; changing it cancels requests for the previous place.
 export function usePlacePhotos(key: string | null, placeId: string | undefined, enabled: boolean) {
@@ -30,10 +39,7 @@ export function usePlacePhotos(key: string | null, placeId: string | undefined, 
     requests.current.set(requestKey, controller);
     update({ ...state, loading: [...new Set([...state.loading, index])], errors: state.errors.filter((entry) => entry !== index) });
     try {
-      const response = await fetch("/api/place-photos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ placeId, index, operationId: crypto.randomUUID() }), signal: controller.signal });
-      if (!response.ok) throw new Error("The photo request failed.");
-      const photo = placePhotoResponseSchema.parse(await response.json());
-      if (photo.placeId !== placeId || photo.index !== index) throw new Error("The photo response did not match this place.");
+      const photo = await fetchPlacePhoto(placeId, index, controller.signal);
       const latest = current.current;
       if (active.current !== key || controller.signal.aborted || latest?.key !== key) return;
       update({ ...latest, total: photo.total, frames: { ...latest.frames, [index]: photo.photo }, loading: latest.loading.filter((entry) => entry !== index) });

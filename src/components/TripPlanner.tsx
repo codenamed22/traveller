@@ -28,7 +28,11 @@ import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
 import { TripMode } from "./TripMode";
-import { tripModeDays } from "@/lib/trip-mode";
+import { markDone, markSkipped, minuteNow, tripModeDays } from "@/lib/trip-mode";
+import { inApp, postToApp } from "@/lib/native-bridge";
+import { saveFile } from "@/lib/save-file";
+import { nativeTripMode } from "./nativeTripMode";
+import { fetchPlacePhoto } from "./usePlacePhotos";
 import { applyOperations, type Operation } from "@/lib/assistant-ops";
 import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
 
@@ -94,6 +98,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   // Which saved trips are shared for viewing, by trip id.
   const [tripMode, setTripMode] = useState(false);
   const [tripExit, setTripExit] = useState(0);
+  const nativeOpen = useRef(false);
+  // The progress before the last Done or Skip in native trip mode, by city and date, for its Undo.
+  const nativeUndo = useRef(new globalThis.Map<string, DayProgress | undefined>());
   const replanAfterTrip = useRef<string | null>(null);
   // Assistant changes that can still be undone: the trip before, and the trip they produced.
   const assistantUndo = useRef(new globalThis.Map<string, { before: Journey; after: string }>());
@@ -119,7 +126,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   // On phones the day tabs scroll sideways; keep the chosen day, such as one just added, in view.
   useEffect(() => { dayTabs.current?.querySelector("[aria-pressed=true]")?.scrollIntoView?.({ block: "nearest", inline: "nearest" }); }, [day, trip.days]);
   // A reload on #trip reopens trip mode. The hash is only known in the browser, after hydration.
-  useEffect(() => { if (window.location.hash.startsWith("#trip") && journey.cities.some((city) => journey.plans[city.id]?.snapshot)) setTripMode(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (window.location.hash.startsWith("#trip") && journey.cities.some((city) => journey.plans[city.id]?.snapshot)) openTripMode(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!canUseServices || snapshot === savedFor || busy) return;
@@ -136,6 +143,38 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     }, 1500);
     return () => clearTimeout(timer);
   }, [snapshot, savedFor, busy, canUseServices, revision, journey]);
+  // Native trip mode redraws from a fresh snapshot whenever the trip changes, such as after Done.
+  useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // What native trip mode calls, with this render's trip; replaced on every render.
+  useEffect(() => {
+    if (!inApp()) return;
+    const target = window as unknown as { travellerNative?: Record<string, unknown> };
+    target.travellerNative = {
+      record(kind: "done" | "skip", cityId: string, targetDay: number, stopId: string) {
+        const now = Temporal.Now.instant();
+        const entry = tripModeDays(journey.cities, journey.plans, journey.execution, now).find((candidate) => candidate.cityId === cityId && candidate.day === targetDay);
+        const stop = entry?.trip.stops.find((candidate) => candidate.id === stopId);
+        if (!entry?.isToday || !stop) throw new Error("Only today's visits can be marked.");
+        nativeUndo.current.set(`${cityId}:${entry.date}`, entry.progress);
+        recordCityProgress(cityId, entry.date, kind === "done" ? markDone(entry, stopId, minuteNow(entry, now)) : markSkipped(entry, stop));
+        return kind === "done" ? `${stop.name} marked done` : `${stop.name} skipped`;
+      },
+      undo(cityId: string, progressDate: string) {
+        const key = `${cityId}:${progressDate}`;
+        if (!nativeUndo.current.has(key)) return false;
+        recordCityProgress(cityId, progressDate, nativeUndo.current.get(key));
+        nativeUndo.current.delete(key);
+        return true;
+      },
+      adjustToday(cityId: string, targetDay: number) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
+      closed() { nativeOpen.current = false; leaveTripMode(); },
+      photo(placeId: string, index: number) {
+        if (!canLoadPhotos) throw new Error("Photos are unavailable");
+        return fetchPlacePhoto(placeId, index);
+      },
+    };
+    return () => { delete target.travellerNative; };
+  });
   const baselineDay = result?.schedule.days.find((entry) => entry.day === day);
   const date = tripDate(trip, day);
   const execution = journey.execution?.[trip.id]?.[date];
@@ -454,6 +493,24 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     if (tripMode) { replanAfterTrip.current = cityId; setTripExit((count) => count + 1); } else openReplan(cityId);
   }
 
+  function leaveTripMode() {
+    const pending = replanAfterTrip.current;
+    replanAfterTrip.current = null;
+    if (pending) openReplan(pending);
+  }
+  function adjustToday(cityId: string, targetDay: number) {
+    if (cityId !== trip.id) switchCity(cityId);
+    setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
+  }
+  // In the iPhone app trip mode is native. It gets the trip as a snapshot and calls back here to record progress, so this
+  // page stays the only place that saves the trip.
+  const nativeSnapshot = () => nativeTripMode(journey, Temporal.Now.instant(), { start: { cityId: trip.id, day }, canTrack: true, photos: canLoadPhotos });
+  function openTripMode() {
+    if (!inApp()) { setTripMode(true); return; }
+    nativeOpen.current = true;
+    postToApp("travellerTripMode", { type: "open", snapshot: nativeSnapshot() });
+  }
+
   // A planning failure goes to the assistant as the traveller's own message, once the dialog is out of the way.
   function askAssistant(problem: string) {
     setPlanningOpen(false);
@@ -467,8 +524,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
 
   function download() {
-    const url = URL.createObjectURL(new Blob([JSON.stringify({ journey, ...(journey.cities.length === 1 ? { trip: { ...trip, title: journey.title }, plan: savedPlan } : {}) }, null, 2)], { type: "application/json" }));
-    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "traveller-trip.json"; anchor.click(); URL.revokeObjectURL(url);
+    void saveFile(JSON.stringify({ journey, ...(journey.cities.length === 1 ? { trip: { ...trip, title: journey.title }, plan: savedPlan } : {}) }, null, 2), "application/json", "traveller-trip.json");
   }
 
   return <div className="app-shell">
@@ -657,16 +713,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setLiveDay({ cityId: trip.id, version: next.version, planKey: next.planKey, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin });
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
-    {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => {
-      setTripMode(false);
-      const pending = replanAfterTrip.current;
-      replanAfterTrip.current = null;
-      if (pending) openReplan(pending);
-    }} onAdjustToday={(cityId, targetDay) => {
-      if (cityId !== trip.id) switchCity(cityId);
-      setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
-    }} />}
+    {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
     {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

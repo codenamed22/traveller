@@ -71,10 +71,10 @@ export function TransferFields({ trip, kind, onChange, onFind }: { trip: Trip; k
 export const transferIcons = { FLIGHT: Plane, TRAIN: TrainFront, BUS: Bus, CAR: Car, OTHER: MapPin };
 
 // The itinerary's arrival row on day 1 and departure row on the last day.
-export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
+// The arrival or departure as one line of the day: when it lands or leaves, and when that puts you at or away from the hotel.
+export function transferLineText(trip: Trip, kind: Kind) {
   const transfer = trip[kind];
   if (!transfer) return null;
-  const Icon = transferIcons[transfer.mode];
   const where = transfer.place || `the ${hub[transfer.mode]}`;
   const label = [transfer.reference, modes.find((mode) => mode.value === transfer.mode)?.label].filter(Boolean)[0];
   let detail = "";
@@ -82,8 +82,16 @@ export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
     if (kind === "arrival") { const times = arrivalTimes(trip)!; detail = `At ${trip.hotel || "the hotel"} about ${formatMinute(trip, 0, times.atHotel)}`; }
     else { const times = departureTimes(trip)!; detail = times.direct ? `Checked out; at ${where} by ${formatMinute(trip, times.day, times.end)}` : `Leave ${trip.hotel || "the hotel"} ${formatMinute(trip, times.day, times.leaveHotel)} · ${times.transfer} min to ${where}`; }
   } catch { /* An ambiguous local time is reported by the planner. */ }
+  const title = kind === "arrival" ? `${transfer.mode === "FLIGHT" ? "Land" : "Arrive"} at ${where} ${transfer.time}${transfer.reference ? ` · ${transfer.reference}` : ""}` : `${label} ${transfer.mode === "FLIGHT" ? "takes off" : "leaves"} ${where} ${transfer.time}`;
+  return { mode: transfer.mode, title, detail };
+}
+
+export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
+  const line = transferLineText(trip, kind);
+  if (!line) return null;
+  const Icon = transferIcons[line.mode];
   return <div className={`itinerary-start transfer-line ${kind}`} aria-label={kind === "arrival" ? "Arrival" : "Departure"}>
     <span className="hotel-marker small"><Icon size={15} /></span>
-    <div><strong>{kind === "arrival" ? `${transfer.mode === "FLIGHT" ? "Land" : "Arrive"} at ${where} ${transfer.time}` : `${label} ${transfer.mode === "FLIGHT" ? "takes off" : "leaves"} ${where} ${transfer.time}`}{kind === "arrival" && transfer.reference ? ` · ${transfer.reference}` : ""}</strong><span>{detail}</span></div>
+    <div><strong>{line.title}</strong><span>{line.detail}</span></div>
   </div>;
 }

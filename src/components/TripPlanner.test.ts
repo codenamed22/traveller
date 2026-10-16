@@ -2,7 +2,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseHTML } from "linkedom";
-import { newTrip } from "@/lib/trip";
+import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge } from "@/lib/trip";
+import type { NativeTripMode } from "./nativeTripMode";
 import { TripPlanner } from "./TripPlanner";
 
 vi.mock("next/link", () => ({ default: ({ href, children, ...props }: { href: string; children: unknown }) => createElement("a", { href, ...props }, children as never) }));
@@ -51,5 +52,48 @@ describe("My trips", () => {
     await act(async () => (container.querySelectorAll(".saved-trip")[1] as HTMLElement).click());
     expect((container.querySelector(".trip-title") as HTMLInputElement).value).toBe("Spring");
     expect(container.textContent).toContain("Trip loaded");
+  });
+});
+
+describe("native trip mode in the iPhone app", () => {
+  const place = (id: string, name: string): Place => ({ id, name, address: `${name} street`, location: { lat: 52.37, lng: 4.89 } });
+  const leg = (from: string, to: string, minutes: number): TravelEdge => ({ day: 0, from, to, mode: "WALK", minutes, meters: 900 });
+  function planned() {
+    const coffee = { ...newStop("Sango Coffee"), placeId: "g-sango", duration: 45 };
+    const amsterdam = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 1, timeZone: "Europe/Amsterdam", stops: [coffee] };
+    const schedule: Schedule = { generatedAt: "2026-10-14T06:00:00Z", warnings: [], omitted: [], days: [
+      { day: 0, date: "2026-12-24", visits: [{ stopId: coffee.id, start: minuteAt(amsterdam, 0, "09:30"), end: minuteAt(amsterdam, 0, "10:15"), leg: leg("hotel", coffee.id, 15) }], returnLeg: leg(coffee.id, "hotel", 15) },
+    ] };
+    const plans = { [amsterdam.id]: persistedPlan(schedule, amsterdam, { hotel: place("g-hotel", "Motel One"), [coffee.id]: place("g-sango", "Sango Coffee") }) };
+    return { coffee, amsterdam, entry: { data: { id: crypto.randomUUID(), title: "Christmas", cities: [amsterdam], plans }, revision: 1, plan: null, shared: false, updatedAt: "2026-10-15T16:00:00Z" } };
+  }
+
+  it("hands trip mode to the app and records Done and Undo it sends back", async () => {
+    // 10:00 in Amsterdam on Christmas Eve.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));
+    try {
+      const posted: { type: string; snapshot: NativeTripMode }[] = [];
+      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => posted.push(message) } } } });
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ revision: 2 })));
+      const { coffee, amsterdam, entry } = planned();
+      await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: entry, initialList: null, config } as never)));
+      await act(async () => (container.querySelector(".trip-mode-pill") as HTMLElement).click());
+      expect(container.querySelector(".trip-mode")).toBeNull();
+      expect(posted.map((message) => message.type)).toEqual(["open"]);
+      expect(posted[0].snapshot).toMatchObject({ title: "Christmas", startKey: `${amsterdam.id}:0`, canTrack: true, days: [{ visits: [{ name: "Sango Coffee", status: "pending" }] }] });
+
+      const native = (window as unknown as { travellerNative: { record: (...args: unknown[]) => string; undo: (...args: unknown[]) => boolean; closed: () => void } }).travellerNative;
+      let message = "";
+      await act(async () => { message = native.record("done", amsterdam.id, 0, coffee.id); });
+      expect(message).toBe("Sango Coffee marked done");
+      expect(posted.at(-1)).toMatchObject({ type: "update", snapshot: { days: [{ visits: [{ status: "done", doneLabel: "09:15–10:00" }] }] } });
+      await act(async () => { native.undo(amsterdam.id, "2026-12-24"); });
+      expect(posted.at(-1)?.snapshot.days[0].visits[0].status).toBe("pending");
+      expect(native.undo(amsterdam.id, "2026-12-24")).toBe(false);
+      // Once the app closes trip mode, trip changes stay here.
+      const count = posted.length;
+      await act(async () => { native.closed(); native.record("skip", amsterdam.id, 0, coffee.id); });
+      expect(posted).toHaveLength(count);
+    } finally { vi.useRealTimers(); }
   });
 });

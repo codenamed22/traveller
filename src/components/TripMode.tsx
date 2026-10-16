@@ -188,12 +188,18 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   }
 
   const firstLeave = entry.plan.visits[0] ? leaveBy(entry.plan.visits[0]) : undefined;
+  // Tapping the map closes an open place and brings the map to it, or lowers the day plan so the map shows.
+  function backToMap() {
+    const place = selected ? entry.places[selected] : undefined;
+    setSelected(null); setSnap("peek");
+    if (place) setCenterOn({ ...place.location, token: Date.now() });
+  }
   const sheetSizes = { half: Math.round(viewport.height * 0.52), full: viewport.height - 84 };
   const padding = { top: 92, bottom: Math.min(sheetHeight, sheetSizes.half) + 24, left: 36, right: 64 };
 
   return <div className="trip-mode" role="dialog" aria-modal="true" aria-label={`Trip mode, ${entry.label}`}>
     <div className="trip-mode-map">
-      <TripMap trip={entry.trip} places={entry.places} schedule={{ generatedAt: "", warnings: [], omitted: [], days: [entry.plan] }} day={entry.plan.day} markerOrder={entry.plan.visits.map((visit) => visit.stopId)} selected={selected} onSelect={(id) => { setSelected(id === "hotel" ? null : id); if (id) setSnap("peek"); }} currentLocation={location} fitCurrentLocation={false} padding={padding} fitToken={fitToken} popup={false} zoomOnSelect markerStatus={markerStatus} centerOn={centerOn} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} onPhotoRequest={() => {}} onPhotoRetry={() => {}} />
+      <TripMap trip={entry.trip} places={entry.places} schedule={{ generatedAt: "", warnings: [], omitted: [], days: [entry.plan] }} day={entry.plan.day} markerOrder={entry.plan.visits.map((visit) => visit.stopId)} selected={selected} onSelect={(id) => { setSelected(id === "hotel" ? null : id); if (id) setSnap("peek"); }} currentLocation={location} fitCurrentLocation={false} padding={padding} fitToken={fitToken} popup={false} zoomOnSelect markerStatus={markerStatus} centerOn={centerOn} onMapClick={backToMap} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} onPhotoRequest={() => {}} onPhotoRetry={() => {}} />
     </div>
 
     <header className="trip-mode-bar">

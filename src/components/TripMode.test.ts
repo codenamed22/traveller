@@ -7,6 +7,13 @@ import type { Journey } from "@/lib/journey";
 import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
 import { TripMode } from "./TripMode";
 
+// The map stands in as a surface to tap, remembering where it was last told to centre.
+const map = vi.hoisted(() => ({ centerOn: undefined as { lat: number; lng: number } | undefined }));
+vi.mock("./TripMap", async () => {
+  const { createElement: element } = await import("react");
+  return { TripMap: ({ onMapClick, centerOn }: { onMapClick?: () => void; centerOn?: { lat: number; lng: number } }) => { map.centerOn = centerOn; return element("button", { type: "button", className: "test-map", onClick: onMapClick }, "Map"); } };
+});
+
 let root: Root;
 let container: HTMLElement;
 let win: Window & typeof globalThis;
@@ -118,6 +125,17 @@ describe("trip mode", () => {
     expect(container.querySelector(".trip-card")?.textContent).toContain("A traveller");
     await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".itinerary-stop")].find((item) => item.textContent?.includes("Rijksmuseum"))!.click());
     expect(container.querySelector(".trip-card-note")?.textContent).toBe("See the Night Watch first (2 hours).");
+  });
+
+  it("goes back to the map, centred on the open place, when the map is tapped", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ placeId: "g-sango", index: 0, total: 0 })));
+    await act(async () => root.render(createElement(Harness, { canTrack: true, onClose: vi.fn(), record: vi.fn(), photos: true })));
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".itinerary-stop")].find((item) => item.textContent?.includes("Rijksmuseum"))!.click());
+    expect(container.querySelector(".trip-card-note")).not.toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>(".test-map")!.click());
+    expect(container.querySelector(".trip-card-note")).toBeNull();
+    expect(container.querySelector(".itinerary-stop.selected")).toBeNull();
+    expect(map.centerOn).toMatchObject({ lat: 52.37, lng: 4.89 });
   });
 
   it("switches days from the menu and the arrows, and back closes the menu before trip mode", async () => {

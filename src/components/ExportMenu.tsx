@@ -4,12 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { CalendarPlus, FileSpreadsheet, FileText, Share2 } from "lucide-react";
 import type { Journey } from "@/lib/journey";
 import { exportFilename, itineraryExport, itineraryHtml, itineraryIcs, itineraryXlsx } from "@/lib/export";
-
-function saveFile(data: BlobPart, type: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([data], { type }));
-  const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
+import { saveFile } from "@/lib/save-file";
 
 // Exports accepted itineraries only; an unaccepted preview is never shared by accident.
 export function ExportMenu({ journey }: { journey: Journey }) {
@@ -26,11 +21,11 @@ export function ExportMenu({ journey }: { journey: Journey }) {
   function run(format: "pdf" | "xlsx" | "ics") {
     setOpen(false);
     const data = itineraryExport(journey);
-    if (format === "xlsx") return saveFile(itineraryXlsx(data) as BlobPart, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", exportFilename(data, "xlsx"));
-    if (format === "ics") return saveFile(itineraryIcs(data), "text/calendar", exportFilename(data, "ics"));
+    if (format === "xlsx") return void saveFile(itineraryXlsx(data) as BlobPart, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", exportFilename(data, "xlsx"));
+    if (format === "ics") return void saveFile(itineraryIcs(data), "text/calendar", exportFilename(data, "ics"));
     // The printable page opens in a new tab and offers the browser's Save as PDF; if pop-ups are blocked, download it.
     const url = URL.createObjectURL(new Blob([itineraryHtml(data)], { type: "text/html" }));
-    if (!window.open(url, "_blank")) saveFile(itineraryHtml(data, false), "text/html", exportFilename(data, "html"));
+    if (!window.open(url, "_blank")) void saveFile(itineraryHtml(data, false), "text/html", exportFilename(data, "html"));
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
