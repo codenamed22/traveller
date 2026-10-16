@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseHTML } from "linkedom";
 import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge } from "@/lib/trip";
-import type { NativeTripMode } from "./nativeTripMode";
+import type { NativeTripMode } from "@/lib/native-trip-mode";
 import { TripPlanner } from "./TripPlanner";
 
 vi.mock("next/link", () => ({ default: ({ href, children, ...props }: { href: string; children: unknown }) => createElement("a", { href, ...props }, children as never) }));
@@ -19,7 +19,8 @@ beforeEach(() => {
   for (const [key, value] of Object.entries({ window, document, navigator: window.navigator, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(key, value);
   Object.defineProperty(window, "location", { value: { pathname: "/", search: "", hash: "" }, configurable: true });
   Object.defineProperty(window, "history", { value: { pushState() {}, replaceState() {}, back() {} }, configurable: true });
-  Object.defineProperty(window, "localStorage", { value: { getItem: () => null, setItem() {}, removeItem() {} }, configurable: true });
+  const stored = new globalThis.Map<string, string>();
+  Object.defineProperty(window, "localStorage", { value: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => void stored.set(key, value), removeItem: (key: string) => void stored.delete(key) }, configurable: true });
   Object.getPrototypeOf(document.createElement("dialog")).showModal = function (this: Element) { this.setAttribute("open", ""); };
   root = createRoot(container);
 });
@@ -82,17 +83,23 @@ describe("native trip mode in the iPhone app", () => {
       expect(posted.map((message) => message.type)).toEqual(["open"]);
       expect(posted[0].snapshot).toMatchObject({ title: "Christmas", startKey: `${amsterdam.id}:0`, canTrack: true, days: [{ visits: [{ name: "Sango Coffee", status: "pending" }] }] });
 
-      const native = (window as unknown as { travellerNative: { record: (...args: unknown[]) => string; undo: (...args: unknown[]) => boolean; closed: () => void } }).travellerNative;
+      // The app looks the calls up afresh each time, as they're rebuilt with every render.
+      type Native = { features: string[]; record: (...args: unknown[]) => string; undo: (...args: unknown[]) => boolean; closed: () => void };
+      const native = () => (window as unknown as { travellerNative: Native }).travellerNative;
+      expect(native().features).toContain("record-at");
       let message = "";
-      await act(async () => { message = native.record("done", amsterdam.id, 0, coffee.id); });
+      await act(async () => { message = native().record("done", amsterdam.id, 0, coffee.id); });
       expect(message).toBe("Sango Coffee marked done");
       expect(posted.at(-1)).toMatchObject({ type: "update", snapshot: { days: [{ visits: [{ status: "done", doneLabel: "09:15–10:00" }] }] } });
-      await act(async () => { native.undo(amsterdam.id, "2026-12-24"); });
+      await act(async () => { native().undo(amsterdam.id, "2026-12-24"); });
       expect(posted.at(-1)?.snapshot.days[0].visits[0].status).toBe("pending");
-      expect(native.undo(amsterdam.id, "2026-12-24")).toBe(false);
+      expect(native().undo(amsterdam.id, "2026-12-24")).toBe(false);
+      // A Done tapped without a connection arrives later with the time it was tapped.
+      await act(async () => { native().record("done", amsterdam.id, 0, coffee.id, Date.parse("2026-12-24T08:40:00Z")); });
+      expect(posted.at(-1)?.snapshot.days[0].visits[0]).toMatchObject({ status: "done", doneLabel: "08:55–09:40" });
       // Once the app closes trip mode, trip changes stay here.
       const count = posted.length;
-      await act(async () => { native.closed(); native.record("skip", amsterdam.id, 0, coffee.id); });
+      await act(async () => { native().closed(); native().record("skip", amsterdam.id, 0, coffee.id); });
       expect(posted).toHaveLength(count);
     } finally { vi.useRealTimers(); }
   });

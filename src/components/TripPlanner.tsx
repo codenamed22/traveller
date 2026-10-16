@@ -28,10 +28,11 @@ import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
 import { TripMode } from "./TripMode";
-import { markDone, markSkipped, minuteNow, tripModeDays } from "@/lib/trip-mode";
+import { tripModeDays } from "@/lib/trip-mode";
 import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
-import { nativeTripMode } from "./nativeTripMode";
+import { nativeTripMode } from "@/lib/native-trip-mode";
+import { createNativeApi, type NativeApi } from "./nativeApi";
 import { fetchPlacePhoto } from "./usePlacePhotos";
 import { applyOperations, type Operation } from "@/lib/assistant-ops";
 import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
@@ -99,8 +100,6 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [tripMode, setTripMode] = useState(false);
   const [tripExit, setTripExit] = useState(0);
   const nativeOpen = useRef(false);
-  // The progress before the last Done or Skip in native trip mode, by city and date, for its Undo.
-  const nativeUndo = useRef(new globalThis.Map<string, DayProgress | undefined>());
   const replanAfterTrip = useRef<string | null>(null);
   // Assistant changes that can still be undone: the trip before, and the trip they produced.
   const assistantUndo = useRef(new globalThis.Map<string, { before: Journey; after: string }>());
@@ -148,31 +147,13 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   // What native trip mode calls, with this render's trip; replaced on every render.
   useEffect(() => {
     if (!inApp()) return;
-    const target = window as unknown as { travellerNative?: Record<string, unknown> };
-    target.travellerNative = {
-      record(kind: "done" | "skip", cityId: string, targetDay: number, stopId: string) {
-        const now = Temporal.Now.instant();
-        const entry = tripModeDays(journey.cities, journey.plans, journey.execution, now).find((candidate) => candidate.cityId === cityId && candidate.day === targetDay);
-        const stop = entry?.trip.stops.find((candidate) => candidate.id === stopId);
-        if (!entry?.isToday || !stop) throw new Error("Only today's visits can be marked.");
-        nativeUndo.current.set(`${cityId}:${entry.date}`, entry.progress);
-        recordCityProgress(cityId, entry.date, kind === "done" ? markDone(entry, stopId, minuteNow(entry, now)) : markSkipped(entry, stop));
-        return kind === "done" ? `${stop.name} marked done` : `${stop.name} skipped`;
-      },
-      undo(cityId: string, progressDate: string) {
-        const key = `${cityId}:${progressDate}`;
-        if (!nativeUndo.current.has(key)) return false;
-        recordCityProgress(cityId, progressDate, nativeUndo.current.get(key));
-        nativeUndo.current.delete(key);
-        return true;
-      },
-      adjustToday(cityId: string, targetDay: number) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
+    const target = window as unknown as { travellerNative?: NativeApi };
+    target.travellerNative = createNativeApi({
+      journey, recordProgress: recordCityProgress,
+      adjustToday(cityId, targetDay) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
       closed() { nativeOpen.current = false; leaveTripMode(); },
-      photo(placeId: string, index: number) {
-        if (!canLoadPhotos) throw new Error("Photos are unavailable");
-        return fetchPlacePhoto(placeId, index);
-      },
-    };
+      ...(canLoadPhotos ? { photo: (placeId: string, index: number) => fetchPlacePhoto(placeId, index) } : {}),
+    });
     return () => { delete target.travellerNative; };
   });
   const baselineDay = result?.schedule.days.find((entry) => entry.day === day);

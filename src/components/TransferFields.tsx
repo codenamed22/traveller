@@ -3,10 +3,9 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { Bus, Car, Check, MapPin, Plane, Search, TrainFront } from "lucide-react";
 import { arrivalTimes, dayEnd, dayStart, departureTimes, directDeparture, formatMinute, minuteAt, transferDefaults, tripDate, type Transfer, type Trip } from "@/lib/trip";
+import { transferHub as hub, transferLineText, transferModes as modes } from "@/lib/transfers";
 
 type Kind = "arrival" | "departure";
-const modes: { value: Transfer["mode"]; label: string }[] = [{ value: "FLIGHT", label: "Flight" }, { value: "TRAIN", label: "Train" }, { value: "BUS", label: "Bus or coach" }, { value: "CAR", label: "Car" }, { value: "OTHER", label: "Other" }];
-const hub: Record<Transfer["mode"], string> = { FLIGHT: "airport", TRAIN: "station", BUS: "station", CAR: "parking", OTHER: "terminal" };
 const bufferLabel = (kind: Kind, mode: Transfer["mode"]) => mode === "CAR" ? kind === "arrival" ? "Parking (min)" : "Loading (min)" : kind === "arrival" ? mode === "FLIGHT" ? "Immigration & bags (min)" : `Leaving the ${hub[mode]} (min)` : mode === "FLIGHT" ? "At the airport before (min)" : `At the ${hub[mode]} before (min)`;
 const placeholder: Record<Transfer["mode"], string> = { FLIGHT: "e.g. Amsterdam Schiphol", TRAIN: "e.g. Amsterdam Centraal", BUS: "e.g. Sloterdijk bus station", CAR: "e.g. Parking garage", OTHER: "Where you arrive" };
 const reference: Record<Transfer["mode"], string> = { FLIGHT: "e.g. QR 273", TRAIN: "e.g. Eurostar 9114", BUS: "e.g. FlixBus N800", CAR: "", OTHER: "Booking reference" };
@@ -71,21 +70,6 @@ export function TransferFields({ trip, kind, onChange, onFind }: { trip: Trip; k
 export const transferIcons = { FLIGHT: Plane, TRAIN: TrainFront, BUS: Bus, CAR: Car, OTHER: MapPin };
 
 // The itinerary's arrival row on day 1 and departure row on the last day.
-// The arrival or departure as one line of the day: when it lands or leaves, and when that puts you at or away from the hotel.
-export function transferLineText(trip: Trip, kind: Kind) {
-  const transfer = trip[kind];
-  if (!transfer) return null;
-  const where = transfer.place || `the ${hub[transfer.mode]}`;
-  const label = [transfer.reference, modes.find((mode) => mode.value === transfer.mode)?.label].filter(Boolean)[0];
-  let detail = "";
-  try {
-    if (kind === "arrival") { const times = arrivalTimes(trip)!; detail = `At ${trip.hotel || "the hotel"} about ${formatMinute(trip, 0, times.atHotel)}`; }
-    else { const times = departureTimes(trip)!; detail = times.direct ? `Checked out; at ${where} by ${formatMinute(trip, times.day, times.end)}` : `Leave ${trip.hotel || "the hotel"} ${formatMinute(trip, times.day, times.leaveHotel)} · ${times.transfer} min to ${where}`; }
-  } catch { /* An ambiguous local time is reported by the planner. */ }
-  const title = kind === "arrival" ? `${transfer.mode === "FLIGHT" ? "Land" : "Arrive"} at ${where} ${transfer.time}${transfer.reference ? ` · ${transfer.reference}` : ""}` : `${label} ${transfer.mode === "FLIGHT" ? "takes off" : "leaves"} ${where} ${transfer.time}`;
-  return { mode: transfer.mode, title, detail };
-}
-
 export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
   const line = transferLineText(trip, kind);
   if (!line) return null;

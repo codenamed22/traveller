@@ -1,12 +1,14 @@
 import { Temporal } from "@js-temporal/polyfill";
-import { exportNote } from "@/lib/export";
-import type { Journey } from "@/lib/journey";
-import { endpointKey, formatMinute, instantForMinute, tripDate, type Place, type TravelEdge, type Trip } from "@/lib/trip";
-import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "@/lib/trip-mode";
-import { transferLineText } from "./TransferFields";
+import { exportNote } from "./export";
+import type { Journey } from "./journey";
+import { transferAt, transferLineText } from "./transfers";
+import { endpointKey, formatMinute, instantForMinute, tripDate, type Place, type TravelEdge, type Trip } from "./trip";
+import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
-// uses; the app only shows the result and keeps the clock (`startsAt` lets it count minutes as recoveryMinute does).
+// uses; the app only shows the result and keeps the clock.
+// `version` stays 1 so apps built before `level` 2 still open the snapshot; newer fields are optional to the app. Level 2
+// adds epoch times (`startAt`, `leaveAt`, the transfer lines' `at`), so the app needs no time zone rules for them.
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: TravelEdge["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -15,9 +17,9 @@ export type NativeLeg = {
 export type NativeVisit = {
   stopId: string; name: string; placeId?: string; location?: LatLng; start: number; end: number; startLabel: string; endLabel: string;
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string;
-  alternatives: string[]; leg: NativeLeg;
+  alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number;
 };
-type Line = { title: string; detail: string };
+type Line = { title: string; detail: string; at?: number };
 export type NativeDay = {
   key: string; cityId: string; city: string; day: number; date: string; label: string; timeZone: string; startsAt: number; endsAt: number;
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
@@ -25,12 +27,17 @@ export type NativeDay = {
   arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[];
 };
 export type NativeTripMode = {
-  version: 1; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
+  version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
   cities: { id: string; name: string; dates: string }[]; days: NativeDay[];
 };
 
 function clock(trip: Trip, day: number, minute: number) {
   try { return formatMinute(trip, day, minute); } catch { return ""; }
+}
+
+// The same minute as an instant, for the app's countdowns and reminders.
+function epoch(trip: Trip, day: number, minute: number) {
+  try { return instantForMinute(trip, day, minute).epochMilliseconds; } catch { return undefined; }
 }
 
 function leg(edge: TravelEdge, places: Record<string, Place>, toDeparture = false): NativeLeg {
@@ -45,6 +52,11 @@ function leg(edge: TravelEdge, places: Record<string, Place>, toDeparture = fals
     ...(edge.fare ? { fare: edge.fare } : {}),
     directions: directionsUrl(edge, places, { toDeparture }), directionsFromHere: directionsUrl(edge, places, { fromHere: true, toDeparture }),
   };
+}
+
+// Leaves out times that couldn't be worked out, so the JSON the app gets has no nulls.
+function defined<T extends Record<string, number | undefined>>(values: T) {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)) as { [K in keyof T]?: number };
 }
 
 function dayBounds(entry: TripModeDay) {
@@ -63,6 +75,7 @@ function nativeDay(entry: TripModeDay, journey: Journey): NativeDay {
   const departureName = trip.departure?.place || "the station";
   const arrival = entry.day === 0 ? transferLineText(trip, "arrival") : null;
   const departure = entry.day === trip.days - 1 ? transferLineText(trip, "departure") : null;
+  const line = (text: { title: string; detail: string }, at: number | undefined): Line => ({ title: text.title, detail: text.detail, ...(at !== undefined ? { at } : {}) });
   const omitted = journey.plans[entry.cityId]?.snapshot?.schedule.omitted ?? [];
   return {
     key: entry.key, cityId: entry.cityId, city: entry.city, day: entry.day, date: entry.date, label: entry.label, timeZone: entry.cityTrip.timeZone,
@@ -93,11 +106,15 @@ function nativeDay(entry: TripModeDay, journey: Journey): NativeDay {
         ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}),
         alternatives: stop?.alternativeGroup ? plan.visits.filter((other) => other.stopId !== visit.stopId && trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [],
         leg: leg(visit.leg, places),
+        ...defined({
+          startAt: epoch(trip, entry.day, visit.start), endAt: epoch(trip, entry.day, visit.end), leaveAt: epoch(trip, entry.day, leaveBy(visit)),
+          ...(completed ? { doneStartAt: epoch(entry.cityTrip, entry.day, completed.start), doneEndAt: epoch(entry.cityTrip, entry.day, completed.end) } : {}),
+        }),
       };
     }),
     ...(plan.returnLeg ? { returnLeg: leg(plan.returnLeg, places, toDeparture) } : {}),
-    ...(arrival ? { arrival: { title: arrival.title, detail: arrival.detail } } : {}),
-    ...(departure ? { departure: { title: departure.title, detail: departure.detail } } : {}),
+    ...(arrival ? { arrival: line(arrival, transferAt(trip, "arrival")) } : {}),
+    ...(departure ? { departure: line(departure, transferAt(trip, "departure")) } : {}),
     doneElsewhere: entry.progress?.completed.filter((visit) => !plan.visits.some((planned) => planned.stopId === visit.stopId))
       .map((visit) => ({ title: stopName(visit.stopId), detail: `${clock(entry.cityTrip, entry.day, visit.start)}–${clock(entry.cityTrip, entry.day, visit.end)}` })) ?? [],
     omitted: omitted.map((id) => trip.stops.find((stop) => stop.id === id)?.name ?? "").filter(Boolean),
@@ -107,7 +124,7 @@ function nativeDay(entry: TripModeDay, journey: Journey): NativeDay {
 export function nativeTripMode(journey: Journey, now: Temporal.Instant, options: { start?: { cityId: string; day: number }; canTrack: boolean; photos: boolean }): NativeTripMode {
   const days = tripModeDays(journey.cities, journey.plans, journey.execution, now);
   return {
-    version: 1, journeyId: journey.id, title: journey.title, generatedAt: now.toString(), startKey: startingDay(days, options.start)?.key ?? null,
+    version: 1, level: 2, journeyId: journey.id, title: journey.title, generatedAt: now.toString(), startKey: startingDay(days, options.start)?.key ?? null,
     canTrack: options.canTrack, photos: options.photos,
     cities: journey.cities.map((city) => ({
       id: city.id, name: city.city,
