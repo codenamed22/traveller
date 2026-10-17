@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { Journey } from "./journey";
-import { arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, squeezeInNote, tripDate, type Place, type Transfer, type TravelEdge, type Trip } from "./trip";
+import { arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type Transfer, type TravelEdge, type Trip } from "./trip";
 
 // Shareable exports of the accepted itinerary: a printable page (save as PDF), an Excel workbook and a calendar file.
 // Everything is built from the saved plan snapshots, so an export never calls Google or changes the trip.
@@ -117,7 +117,7 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
         };
       });
       const planned = new Set(snapshot.schedule.days.flatMap((day) => day.visits.map((visit) => visit.stopId)));
-      return { ...base, planned: true, outOfDate: planningKey(snapshot.trip) !== planningKey(current), generatedAt: snapshot.schedule.generatedAt, days, notScheduled: [...snapshot.schedule.omitted.map((id) => { const fit = snapshot.schedule.squeezeIns?.find((squeeze) => squeeze.stopId === id); return { name: name(id), ...(fit ? { fits: squeezeInNote(snapshot.trip, fit) } : {}) }; }), ...current.stops.filter((stop) => !planned.has(stop.id) && !snapshot.schedule.omitted.includes(stop.id)).map((stop) => ({ name: stop.name }))] };
+      return { ...base, planned: true, outOfDate: planningKey(snapshot.trip, plannedStopIds(snapshot.schedule.days)) !== planningKey(current, plannedStopIds(snapshot.schedule.days)), generatedAt: snapshot.schedule.generatedAt, days, notScheduled: [...snapshot.schedule.omitted.map((id) => { const fit = snapshot.schedule.squeezeIns?.find((squeeze) => squeeze.stopId === id); return { name: name(id), ...(fit ? { fits: squeezeInNote(snapshot.trip, fit) } : {}) }; }), ...current.stops.filter((stop) => !planned.has(stop.id) && !snapshot.schedule.omitted.includes(stop.id)).map((stop) => ({ name: stop.name }))] };
     }),
   };
 }

@@ -30,7 +30,7 @@ const christmasEve = Temporal.Instant.from("2026-12-24T09:00:00Z");
 
 describe("trip mode days", () => {
   it("lists planned days across cities and knows which one is today in the city's time zone", () => {
-    const { amsterdam, brussels, plans } = fixture();
+    const { amsterdam, brussels, coffee, plans } = fixture();
     const days = tripModeDays([amsterdam, brussels], plans, undefined, christmasEve);
     expect(days.map((entry) => [entry.label, entry.city, entry.isToday, entry.stale])).toEqual([["Day 1 · Thu 24 Dec", "Amsterdam", true, false], ["Day 2 · Fri 25 Dec", "Amsterdam", false, false]]);
     // 23:30 UTC on the 24th is already the 25th in Amsterdam.
@@ -38,6 +38,9 @@ describe("trip mode days", () => {
     expect(startingDay(days)?.day).toBe(0);
     expect(startingDay(tripModeDays([amsterdam], plans, undefined, Temporal.Instant.from("2026-11-01T09:00:00Z")), { cityId: amsterdam.id, day: 1 })?.day).toBe(1);
     expect(tripModeDays([{ ...amsterdam, dailyEnd: "20:00" }], plans, undefined, christmasEve)[0].stale).toBe(true);
+    // A must-see set on a planned place leaves the plan as it is.
+    const coffeeMustSee = { ...amsterdam, stops: amsterdam.stops.map((stop) => stop.id === coffee.id ? { ...stop, priority: 5 } : stop) };
+    expect(tripModeDays([coffeeMustSee], plans, undefined, christmasEve)[0].stale).toBe(false);
   });
 
   it("shows today's replan instead of the accepted day once there is one", () => {

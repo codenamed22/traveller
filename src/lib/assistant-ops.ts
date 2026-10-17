@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 import { cityTripSchema, journeySchema, type Journey } from "./journey";
-import { bookingConflicts, changeStartDate, lateBookings, formatMinute, isMustSee, maxStopsPerCity, mustSeePriority, newStop, planningKey, squeezeInNote, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
+import { bookingConflicts, changeStartDate, lateBookings, formatMinute, isMustSee, maxStopsPerCity, mustSeePriority, newStop, planningKey, plannedStopIds, squeezeInNote, timeSchema, tripDate, visitKindSchema, visitSlotSchema, type Stop, type Trip } from "./trip";
 import { dayLabel, markDone, markSkipped, minuteNow, tripModeDays } from "./trip-mode";
 
 // Small trip edits the assistant can propose. Nothing is applied until the traveller approves the proposal card, and the
@@ -68,6 +68,10 @@ export function checkedPlaces(operations: Operation[], known: KnownPlace[]): Ope
 export type ApplyResult = { journey: Journey; changes: string[]; warnings: string[]; staleCities: string[]; errors: string[] };
 
 const dayText = (value: number | null) => value === null ? "Flexible" : `Day ${value + 1}`;
+const outOfDate = (snapshot: { trip: Trip; schedule: { days: { visits: { stopId: string }[] }[] } }, trip: Trip) => {
+  const planned = plannedStopIds(snapshot.schedule.days);
+  return planningKey(snapshot.trip, planned) !== planningKey(trip, planned);
+};
 const modeText = { AUTO: "Auto", WALK: "Walk", TRANSIT: "Transit" } as const;
 const modes = { auto: "AUTO", walk: "WALK", transit: "TRANSIT" } as const;
 
@@ -238,7 +242,7 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
   const next: Journey = { ...journey, cities, ...(Object.keys(execution).length ? { execution } : {}) };
   const parsed = journeySchema.safeParse(next);
   if (!parsed.success) return { journey, changes: [], warnings: [], staleCities: [], errors: [parsed.error.issues[0]?.message ?? "That change isn't possible."] };
-  const staleCities = cities.filter((trip) => touched.has(trip.id) && journey.plans[trip.id]?.snapshot && planningKey(journey.plans[trip.id].snapshot!.trip) !== planningKey(trip)).map((trip) => trip.id);
+  const staleCities = cities.filter((trip) => touched.has(trip.id) && journey.plans[trip.id]?.snapshot && outOfDate(journey.plans[trip.id].snapshot!, trip)).map((trip) => trip.id);
   for (const cityId of staleCities) warnings.push(`${cities.find((trip) => trip.id === cityId)!.city}'s itinerary will need replanning.`);
   return { journey: next, changes, warnings, staleCities, errors: [] };
 }
@@ -276,7 +280,7 @@ export function assistantContext(journey: Journey, view: { cityId?: string; day?
           dayTrip: trip.dayGroups?.find((group) => group.stopIds.includes(stop.id))?.name,
         })),
         itinerary: snapshot ? {
-          outOfDate: planningKey(snapshot.trip) !== planningKey(trip) || undefined,
+          outOfDate: outOfDate(snapshot, trip) || undefined,
           days: snapshot.schedule.days.map((planned) => ({
             day: planned.day + 1, date: planned.date,
             visits: planned.visits.map((visit) => `${clock(snapshot.trip, planned.day, visit.start)}–${clock(snapshot.trip, planned.day, visit.end)} ${name(visit.stopId)} (${Math.round(visit.leg.minutes)} min ${visit.leg.mode === "WALK" ? "walk" : "transit"} before)`),

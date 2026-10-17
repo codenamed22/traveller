@@ -59,6 +59,10 @@ describe("assistant operations", () => {
     expect(places.find((entry) => entry.id === coffee.id)?.mustSee).toBeUndefined();
     expect(apply(marked.journey, [{ type: "update_stop", stopId: cake.id, mustSee: false }]).changes).toEqual(["Rum Baba: no longer a must-see"]);
     expect(apply(marked.journey, [{ type: "update_stop", stopId: cake.id, mustSee: true }]).warnings).toContain("Rum Baba: nothing to change.");
+    // Sango Coffee is already in the itinerary, so it stays current.
+    const planned = apply(journey, [{ type: "update_stop", stopId: coffee.id, mustSee: true }]);
+    expect(planned.changes).toEqual(["Sango Coffee: must-see"]);
+    expect(planned.staleCities).toEqual([]);
   });
 
   it("writes and clears the traveller's own note without making the itinerary out of date", () => {

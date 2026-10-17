@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { ArrowUpRight, CalendarDays, Compass, Eye, FolderOpen, Hotel, List, LockKeyhole, Map, MapPin, Navigation, Route } from "lucide-react";
 import type { SharedView } from "@/lib/shared-trips";
-import { dayStart, endpointKey, formatMinute, planningKey, tripDate } from "@/lib/trip";
+import { dayStart, endpointKey, formatMinute, planningKey, plannedStopIds, tripDate } from "@/lib/trip";
 import { ExportMenu } from "./ExportMenu";
 import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
@@ -30,7 +30,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
   const snapshot = view.plans[city.id]?.snapshot;
   const trip = snapshot?.trip ?? city;
   const currentDay = snapshot?.schedule.days.find((entry) => entry.day === day);
-  const changed = Boolean(snapshot && planningKey(snapshot.trip) !== planningKey(city));
+  const changed = Boolean(snapshot && planningKey(snapshot.trip, plannedStopIds(snapshot.schedule.days)) !== planningKey(city, plannedStopIds(snapshot.schedule.days)));
   const journey = { ...view, execution: undefined };
   // Notes come from the city as it is now: writing one doesn't replan.
   const note = (stopId: string) => city.stops.find((entry) => entry.id === stopId)?.note;

@@ -332,11 +332,23 @@ export function durationChoices(duration: number, rule: DurationRule): number[] 
 // What a plan depends on, for telling whether a city changed since it was planned. Notes are left out: writing one
 // doesn't make the itinerary out of date. The city is read through its schema first, so the same details in another
 // order (as a city has right after its first plan, before the database reorders them) still match.
-export function planningKey(trip: Trip | undefined) {
+// `planned` holds the places an itinerary already includes: making one of them a must-see, or not, leaves the
+// itinerary as it is. Marking a place it left out may change it, so that still counts.
+export function planningKey(trip: Trip | undefined, planned: ReadonlySet<string> = new Set()) {
   if (!trip) return "";
   const parsed = tripSchema.safeParse(trip);
   const canonical = parsed.success ? parsed.data : trip;
-  return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, ...stop }) => (void note, stop)) });
+  return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, ...stop }) => {
+    void note;
+    if (!planned.has(stop.id)) return stop;
+    const { priority, ...rest } = stop;
+    void priority;
+    return rest;
+  }) });
+}
+
+export function plannedStopIds(...days: ({ visits: { stopId: string }[] }[] | undefined)[]) {
+  return new Set(days.flatMap((list) => list ?? []).flatMap((day) => day.visits.map((visit) => visit.stopId)));
 }
 
 export function applyScheduleDurations(trip: Trip, schedule: Schedule): Trip {

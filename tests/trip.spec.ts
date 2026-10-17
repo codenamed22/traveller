@@ -816,6 +816,13 @@ test("itinerary persistence restores timings and complete routes without regener
   await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
   await page.getByRole("button", { name: /^Places/ }).click();
   await page.getByLabel("Notes").fill("");
+  // So does making a place already in it a must-see.
+  await page.getByRole("checkbox", { name: "Must-see", exact: true }).check();
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.locator(".itinerary-stop").first().getByRole("img", { name: "Must-see" })).toBeVisible();
+  await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Places/ }).click();
+  await page.getByRole("checkbox", { name: "Must-see", exact: true }).uncheck();
   await page.getByRole("button", { name: /^Itinerary/ }).click();
   await expect(page.locator(".itinerary-stop")).toHaveText(timings);
   await expect(page.locator(".confirmed-hotel")).toContainText("Private hotel");

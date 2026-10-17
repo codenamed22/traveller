@@ -23,7 +23,7 @@ import { asJourney, cityPreset, duplicateJourney, journeySchema, popularCities, 
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 import { alternativeGroups } from "@/lib/visit-slots";
-import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
+import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, plannedStopIds, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
@@ -168,7 +168,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const date = tripDate(trip, day);
   const execution = journey.execution?.[trip.id]?.[date];
   const savedRecovery = execution?.remaining?.snapshot;
-  const stale = savedRecovery ? planningKey(savedRecovery.trip) !== planningKey(trip) : Boolean(result && (plannedFor || planningKey(savedPlan?.snapshot?.trip)) !== planningKey(trip));
+  // The same places as when `plannedFor` was worked out: the itinerary's, and today's adjusted plan.
+  const planned = plannedStopIds(result?.schedule.days, savedRecovery ? [savedRecovery.day] : undefined);
+  const stale = savedRecovery ? planningKey(savedRecovery.trip, planned) !== planningKey(trip, planned) : Boolean(result && (plannedFor || planningKey(savedPlan?.snapshot?.trip, planned)) !== planningKey(trip, planned));
   const dayStopIds = savedPlan?.days.find((entry) => entry.day === day)?.stopIds ?? baselineDay?.visits.map((visit) => visit.stopId) ?? execution?.baselineStopIds;
   const progress = execution ?? newDayProgress(trip, day, dayStopIds ?? []);
   function formatActual(minute: number) {
@@ -653,7 +655,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
           if (refreshPreview.tripKey !== planningKey(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan) || validateSchedule(trip, refreshPreview.result.schedule).length) { setError("The trip changed. Refresh again before accepting new timings."); return; }
           const accepted = persistedPlan(refreshPreview.result.schedule, trip, refreshPreview.result.places);
           setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: accepted } }));
-          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(planningKey(trip));
+          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(planningKey(trip, plannedStopIds(refreshPreview.result.schedule.days)));
           setRefreshOpen(false); setRefreshPreview(null); setError(""); setNotice("Travel times updated.");
         }}><Check size={16} />Use refreshed times</button>}
         {!busy && !refreshPreview && <button className="button secondary" onClick={() => { setRefreshOpen(false); setPlanningOpen(true); }}><Route size={16} />Replan itinerary</button>}
@@ -665,7 +667,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const acceptedPlan = response ? persistedPlan(response.schedule, candidate, response.places) : undefined;
       editVersion.current += 1; setTrip(candidate);
       if (response) {
-        setResult(response); setPlaces(response.places); setPlannedFor(planningKey(candidate)); setTab("itinerary"); setDay(0);
+        setResult(response); setPlaces(response.places); setPlannedFor(planningKey(candidate, plannedStopIds(response.schedule.days))); setTab("itinerary"); setDay(0);
         setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: acceptedPlan! } }));
       }
       setPlanningOpen(false); setError(""); setNotice(response ? "Itinerary updated. Check venue hours and ticket conditions before departure." : "Planning preferences updated.");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyScheduleDurations, persistedPlan, planningKey, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -175,5 +175,16 @@ describe("planning key", () => {
     const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [newStop("Charminar")] };
     expect(planningKey({ ...city, stops: [{ ...city.stops[0], duration: 90 }] })).not.toBe(planningKey(city));
     expect(planningKey({ ...city, stops: [{ ...city.stops[0], note: "Go early" }] })).toBe(planningKey(city));
+  });
+
+  it("keeps an itinerary current when a place it includes becomes a must-see, but not one it left out", () => {
+    const [charminar, golconda] = [newStop("Charminar"), { ...newStop("Golconda Fort"), optional: true }];
+    const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [charminar, golconda] };
+    const planned = plannedStopIds([{ visits: [{ stopId: charminar.id }] }]);
+    const mustSee = (id: string) => ({ ...city, stops: city.stops.map((stop) => stop.id === id ? { ...stop, priority: 5 } : stop) });
+    expect(planningKey(mustSee(charminar.id), planned)).toBe(planningKey(city, planned));
+    expect(planningKey(mustSee(golconda.id), planned)).not.toBe(planningKey(city, planned));
+    // Anything else about an included place still counts.
+    expect(planningKey({ ...city, stops: [{ ...charminar, duration: 90 }, golconda] }, planned)).not.toBe(planningKey(city, planned));
   });
 });
