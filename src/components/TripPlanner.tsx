@@ -38,7 +38,7 @@ import { applyOperations, type Operation } from "@/lib/assistant-ops";
 import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
 
 // "Paris, France" reads as "Paris" inside a sentence.
-const offlineMessage = "Not saved yet: no connection. It saves when the connection is back.";
+const offlineMessage = "Offline, not saved yet";
 const cityName = (city: string, fallback: string) => city.split(",")[0].trim() || fallback;
 const shortDate = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" });
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; assistant?: { model: string } | null; email: string | null };

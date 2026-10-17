@@ -152,7 +152,7 @@ describe("native trip mode in the iPhone app", () => {
       await act(async () => { (window as unknown as { travellerNative: Native }).travellerNative.record("done", amsterdam.id, 0, coffee.id); });
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
       expect(puts).toBe(1);
-      expect(container.textContent).toContain("Not saved yet: no connection.");
+      expect(container.textContent).toContain("Offline, not saved yet");
       expect(messages.filter((message) => message.type === "sync").map((message) => message.saved)).toEqual([true, false]);
 
       await act(async () => { window.dispatchEvent(new window.Event("online")); });
@@ -160,7 +160,7 @@ describe("native trip mode in the iPhone app", () => {
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1700)); });
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
       expect(puts).toBe(2);
-      expect(container.textContent).not.toContain("Not saved yet");
+      expect(container.textContent).not.toContain("not saved yet");
       expect(messages.filter((message) => message.type === "sync").map((message) => message.saved)).toEqual([true, false, true]);
     } finally { vi.useRealTimers(); }
   }, 15_000);
