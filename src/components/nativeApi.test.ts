@@ -46,7 +46,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("the page's calls for the iPhone app", () => {
   it("says which calls it understands", async () => {
     const { journey } = fixture();
-    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset", "opened"]));
+    expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset", "opened", "send"]));
   });
 
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {
@@ -116,6 +116,19 @@ describe("the page's calls for the iPhone app", () => {
     expect(again.native.undo(amsterdam.id, "2026-12-24")).toBe(true);
     expect(again.recorded[0].next).toEqual(first.recorded[0].next);
     expect(api(await load(), journey).native.reset(amsterdam.id, 0, coffee.id)).toBe("Sango Coffee isn't marked");
+  });
+
+  it("sends changes saved on the phone for another trip to the site, for a real trip only", async () => {
+    const { journey } = fixture();
+    const sent: unknown[] = [];
+    const native = (await load())({ journey, recordProgress() {}, adjustToday() {}, opened() {}, closed() {}, send: async (journeyId, actions) => { sent.push({ journeyId, actions }); return { revision: 2 }; }, now: () => now });
+    const other = crypto.randomUUID();
+    await expect(native.send(other, [{ kind: "done" }])).resolves.toEqual({ revision: 2 });
+    expect(sent).toEqual([{ journeyId: other, actions: [{ kind: "done" }] }]);
+    expect(() => native.send("../plan", [])).toThrow("That trip isn't valid.");
+    // Not signed in: nothing to save to.
+    const withoutSend = api(await load(), journey).native;
+    expect(() => withoutSend.send(other, [])).toThrow("Saving is unavailable");
   });
 
   it("forgets Undo for days that have passed", async () => {

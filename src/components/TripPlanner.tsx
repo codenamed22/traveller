@@ -31,13 +31,14 @@ import { TripMode } from "./TripMode";
 import { tripModeDays } from "@/lib/trip-mode";
 import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
-import { nativeTripMode } from "@/lib/native-trip-mode";
+import { nativeStore, nativeTripMode } from "@/lib/native-trip-mode";
 import { createNativeApi, type NativeApi } from "./nativeApi";
 import { fetchPlacePhoto } from "./usePlacePhotos";
 import { applyOperations, type Operation } from "@/lib/assistant-ops";
 import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
 
 // "Paris, France" reads as "Paris" inside a sentence.
+const offlineMessage = "Not saved yet: no connection. It saves when the connection is back.";
 const cityName = (city: string, fallback: string) => city.split(",")[0].trim() || fallback;
 const shortDate = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" });
 export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; assistant?: { model: string } | null; email: string | null };
@@ -121,6 +122,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const saveBlocker = canUseServices && snapshot !== savedFor ? journeySchema.safeParse(journey).error?.issues[0]?.message : undefined;
   const canPlan = canUseServices && config.routes;
   const saving = useRef(false);
+  const [offlineSave, setOfflineSave] = useState(false);
+  const [saveRetry, setSaveRetry] = useState(0);
+  const heldJourney = useRef(journey.id);
   useEffect(() => { const timer = setInterval(() => setNow(Temporal.Now.instant()), 60_000); return () => clearInterval(timer); }, []);
   // On phones the day tabs scroll sideways; keep the chosen day, such as one just added, in view.
   useEffect(() => { dayTabs.current?.querySelector("[aria-pressed=true]")?.scrollIntoView?.({ block: "nearest", inline: "nearest" }); }, [day, trip.days]);
@@ -137,20 +141,54 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       try {
         const response = await requestJson(`/api/trips/${journey.id}`, { journey: parsed.data, revision }, "PUT");
         setRevision(response.revision); setSavedFor(snapshot);
-      } catch (cause) { setError(cause instanceof Error ? cause.message : "Autosave failed."); }
+        if (offlineSave) { setOfflineSave(false); setError((current) => current === offlineMessage ? "" : current); }
+      } catch (cause) {
+        // fetch fails with a TypeError when there's no connection; that save is tried again (below).
+        if (cause instanceof TypeError) { setOfflineSave(true); setError(offlineMessage); }
+        else setError(cause instanceof Error ? cause.message : "Autosave failed.");
+      }
       finally { saving.current = false; }
     }, 1500);
     return () => clearTimeout(timer);
-  }, [snapshot, savedFor, busy, canUseServices, revision, journey]);
+  }, [snapshot, savedFor, busy, canUseServices, revision, journey, saveRetry, offlineSave]);
+  // A save that failed for want of a connection, such as on the street, is tried again every 20 seconds and as soon as
+  // the connection is back.
+  useEffect(() => {
+    if (!offlineSave) return;
+    const retry = () => setSaveRetry((value) => value + 1);
+    const timer = setInterval(retry, 20_000);
+    window.addEventListener("online", retry);
+    return () => { clearInterval(timer); window.removeEventListener("online", retry); };
+  }, [offlineSave]);
   // Native trip mode redraws from a fresh snapshot whenever the trip changes, such as after Done.
   useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey]); // eslint-disable-line react-hooks/exhaustive-deps
   // The app keeps each trip it's seen, for leave reminders, and needs to know which trip this page holds; it gets the
   // trip shortly after each change, planned or not.
+  // `saved` says the trip as sent is saved, so the app can let go of changes it kept on the phone until then.
   useEffect(() => {
     if (!inApp()) return;
-    const timer = setTimeout(() => postToApp("travellerTripMode", { type: "sync", snapshot: nativeSnapshot() }), 2000);
+    const saved = !canUseServices || snapshot === savedFor;
+    const timer = setTimeout(() => postToApp("travellerTripMode", { type: "sync", snapshot: nativeSnapshot(), saved }), 2000);
     return () => clearTimeout(timer);
-  }, [journey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [journey, savedFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The app also keeps every other trip still to come, so trip mode and reminders work for it without a connection or
+  // opening it here first. Sent on load and again when the page comes back into view, at most every 10 minutes.
+  useEffect(() => { heldJourney.current = journey.id; }, [journey.id]);
+  useEffect(() => {
+    if (!inApp() || !canUseServices) return;
+    let last = 0;
+    const store = async () => {
+      if (document.visibilityState === "hidden" || Date.now() - last < 600_000) return;
+      last = Date.now();
+      try {
+        const list: SavedTrip[] = (await requestJson("/api/trips", undefined, "GET")).trips;
+        postToApp("travellerTripMode", { type: "store", ...nativeStore(list, heldJourney.current, Temporal.Now.instant()) });
+      } catch { last = 0; }
+    };
+    void store();
+    document.addEventListener("visibilitychange", store);
+    return () => document.removeEventListener("visibilitychange", store);
+  }, [canUseServices]);
   // What native trip mode calls, with this render's trip; replaced on every render.
   useEffect(() => {
     if (!inApp()) return;
@@ -161,6 +199,11 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       opened() { nativeOpen.current = true; },
       closed() { nativeOpen.current = false; leaveTripMode(); },
       ...(canLoadPhotos ? { photo: (placeId: string, index: number) => fetchPlacePhoto(placeId, index) } : {}),
+      // The status too, so the app tells a refusal (keep no longer) from no connection (fetch throws; try again later).
+      ...(canUseServices ? { send: async (journeyId: string, actions: unknown[]) => {
+        const response = await fetch(`/api/trips/${journeyId}/progress`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actions }) });
+        return { status: response.status, body: await response.json().catch(() => null) };
+      } } : {}),
     });
     return () => { delete target.travellerNative; };
   });

@@ -1,11 +1,11 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
-import { markDone, markPending, markSkipped, minuteNow, tripModeDays, visitStatus } from "@/lib/trip-mode";
+import { applyNativeAction, type NativeAction } from "@/lib/native-actions";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send"];
 
 type Deps = {
   journey: Journey;
@@ -14,6 +14,7 @@ type Deps = {
   opened: () => void;
   closed: () => void;
   photo?: (placeId: string, index: number) => Promise<unknown>;
+  send?: (journeyId: string, actions: unknown[]) => Promise<unknown>;
   now?: () => Temporal.Instant;
 };
 
@@ -57,39 +58,32 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, now: clock = () => Temporal.Now.instant() }: Deps) {
+  function apply(action: NativeAction) {
+    const change = applyNativeAction(journey, action, clock());
+    if (!change.changed) return change.message;
+    pruneUndo(change.date);
+    writeUndo(undoKey(journey.id, change.cityId, change.date), { before: change.before ?? null, afterVersion: change.next!.version });
+    recordProgress(change.cityId, change.date, change.next);
+    return change.message;
+  }
   return {
     features: nativeFeatures,
+    // The trip these calls change, so the app never records a visit against another one.
+    journeyId: journey.id,
     // `at` (epoch ms) is when the app recorded it, for Done tapped without a connection and sent later; without it, now.
     record(kind: "done" | "skip", cityId: string, day: number, stopId: string, at?: number) {
-      const now = clock();
-      if (at !== undefined && at !== null && !Number.isFinite(at)) throw new Error("The time of that visit isn't valid.");
-      const when = typeof at === "number" ? Temporal.Instant.fromEpochMilliseconds(Math.round(at)) : now;
-      if (when.epochMilliseconds > now.epochMilliseconds + 60_000) throw new Error("A visit can't be marked ahead of time.");
-      const entry = tripModeDays(journey.cities, journey.plans, journey.execution, now).find((candidate) => candidate.cityId === cityId && candidate.day === day);
-      const stop = entry?.trip.stops.find((candidate) => candidate.id === stopId);
-      let onDay = Boolean(entry?.isToday);
-      if (entry && typeof at === "number") {
-        try { onDay = when.toZonedDateTimeISO(entry.cityTrip.timeZone).toPlainDate().toString() === entry.date; } catch { onDay = false; }
-      }
-      if (!entry || !stop || !onDay) throw new Error("Only today's visits can be marked.");
-      const next = kind === "done" ? markDone(entry, stopId, minuteNow(entry, when)) : markSkipped(entry, stop);
-      pruneUndo(entry.date);
-      writeUndo(undoKey(journey.id, cityId, entry.date), { before: entry.progress ?? null, afterVersion: next.version });
-      recordProgress(cityId, entry.date, next);
-      return kind === "done" ? `${stop.name} marked done` : `${stop.name} skipped`;
+      return apply({ kind, cityId, day, stopId, ...(at === undefined || at === null ? {} : { at }) });
     },
     // Undo on the visit itself, any time that day: back to not done, whatever was recorded after it.
-    reset(cityId: string, day: number, stopId: string) {
-      const entry = tripModeDays(journey.cities, journey.plans, journey.execution, clock()).find((candidate) => candidate.cityId === cityId && candidate.day === day);
-      const stop = entry?.trip.stops.find((candidate) => candidate.id === stopId);
-      if (!entry?.isToday || !stop) throw new Error("Only today's visits can be changed.");
-      const status = visitStatus(entry.progress, stopId);
-      if (status === "pending") return `${stop.name} isn't marked`;
-      const next = markPending(entry, stopId);
-      writeUndo(undoKey(journey.id, cityId, entry.date), { before: entry.progress ?? null, afterVersion: next.version });
-      recordProgress(cityId, entry.date, next);
-      return status === "done" ? `${stop.name} no longer marked done` : `${stop.name} no longer skipped`;
+    reset(cityId: string, day: number, stopId: string, at?: number) {
+      return apply({ kind: "reset", cityId, day, stopId, ...(at === undefined || at === null ? {} : { at }) });
+    },
+    // Changes saved on the phone for a trip this page doesn't hold: the site saves them straight to that trip.
+    send(journeyId: string, actions: unknown[]) {
+      if (!send) throw new Error("Saving is unavailable");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(journeyId)) throw new Error("That trip isn't valid.");
+      return send(journeyId, actions);
     },
     // Only while the day is still as that Done or Skip left it; anything recorded since would be lost.
     undo(cityId: string, date: string) {

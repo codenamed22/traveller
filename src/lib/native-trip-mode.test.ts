@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Journey } from "@/lib/journey";
 import { minuteAt, mustSeePriority, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
 import { markDone, markSkipped, tripModeDays } from "@/lib/trip-mode";
-import { nativeTripMode } from "./native-trip-mode";
+import { nativeStore, nativeTripMode } from "./native-trip-mode";
 
 const place = (id: string, name: string, lat = 52.37): Place => ({ id, name, address: `${name} street`, location: { lat, lng: 4.89 } });
 const leg = (from: string, to: string, minutes: number, extra: Partial<TravelEdge> = {}): TravelEdge => ({ day: 0, from, to, mode: "WALK", minutes, meters: 900, ...extra });
@@ -70,6 +70,18 @@ describe("native trip mode snapshot", () => {
     const marked = { ...journey, cities: [{ ...amsterdam, stops: amsterdam.stops.map((stop) => stop.id === museum.id ? { ...stop, priority: mustSeePriority } : stop) }] };
     const [today] = nativeTripMode(marked, christmasEve, { canTrack: true, photos: false }).days;
     expect(today.visits.map((visit) => visit.mustSee)).toEqual([undefined, true]);
+  });
+
+  it("gives the app every other saved trip still to come, and the ids of all of them", () => {
+    const { journey } = fixture();
+    const held = { ...fixture().journey, title: "Open in the page" };
+    const past = { ...fixture().journey, title: "Last year", cities: fixture().journey.cities.map((city) => ({ ...city, startDate: "2025-12-24" })) };
+    const unplanned = { ...journey, id: crypto.randomUUID(), plans: {} };
+    const entries = [journey, held, past, unplanned].map((data) => ({ data, plan: null }));
+    const { snapshots, ids } = nativeStore(entries, held.id, christmasEve);
+    expect(snapshots.map((snapshot) => snapshot.journeyId)).toEqual([journey.id]);
+    expect(snapshots[0].photos).toBe(false);
+    expect(ids).toEqual([journey.id, held.id, past.id, unplanned.id]);
   });
 
   it("shows progress recorded with the trip mode rules", () => {

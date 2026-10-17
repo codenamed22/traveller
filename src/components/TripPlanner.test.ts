@@ -126,6 +126,45 @@ describe("native trip mode in the iPhone app", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("tells the app when the trip is saved, saves again once the connection is back, and sends every other trip", async () => {
+    // 10:00 in Amsterdam on Christmas Eve.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));
+    try {
+      const messages: { type: string; saved?: boolean; snapshots?: NativeTripMode[]; ids?: string[] }[] = [];
+      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });
+      const { coffee, amsterdam, entry } = planned();
+      const other = { ...planned().entry, data: { ...planned().entry.data, title: "Boxing Day" } };
+      let puts = 0;
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method !== "PUT") return Response.json({ trips: [entry, other] });
+        // The first save finds no connection.
+        if (++puts === 1) throw new TypeError("Load failed");
+        return Response.json({ revision: 2 });
+      }));
+      await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: entry, initialList: null, config } as never)));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+      const store = messages.find((message) => message.type === "store")!;
+      expect(store.snapshots!.map((snapshot) => snapshot.journeyId)).toEqual([other.data.id]);
+      expect(store.ids).toEqual([entry.data.id, other.data.id]);
+      expect(messages.filter((message) => message.type === "sync").map((message) => message.saved)).toEqual([true]);
+
+      type Native = { record: (...args: unknown[]) => string };
+      await act(async () => { (window as unknown as { travellerNative: Native }).travellerNative.record("done", amsterdam.id, 0, coffee.id); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+      expect(puts).toBe(1);
+      expect(container.textContent).toContain("Not saved yet: no connection.");
+      expect(messages.filter((message) => message.type === "sync").map((message) => message.saved)).toEqual([true, false]);
+
+      await act(async () => { window.dispatchEvent(new window.Event("online")); });
+      // 1.5 s to save, then the copy for the app 2 s after that.
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1700)); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+      expect(puts).toBe(2);
+      expect(container.textContent).not.toContain("Not saved yet");
+      expect(messages.filter((message) => message.type === "sync").map((message) => message.saved)).toEqual([true, false, true]);
+    } finally { vi.useRealTimers(); }
+  }, 15_000);
+
   it("gives the app a copy of the trip shortly after it loads or changes, and says when it's deleted", async () => {
     const messages: { type: string; snapshot?: NativeTripMode; journeyId?: string }[] = [];
     Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });

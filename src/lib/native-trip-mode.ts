@@ -1,8 +1,8 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { exportNote } from "./export";
-import type { Journey } from "./journey";
+import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type TravelEdge, type Trip } from "./trip";
+import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type TravelEdge, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
@@ -134,4 +134,22 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
     })),
     days: days.map((entry) => nativeDay(entry, journey)),
   };
+}
+
+// Saved trips for the app to keep: a snapshot of each one planned and not over yet, except `held`, the trip the page has
+// open, which it sends itself; and every saved trip's id, so the app can let go of deleted ones.
+export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null }[], held: string, now: Temporal.Instant) {
+  const snapshots: NativeTripMode[] = [];
+  const ids: string[] = [];
+  for (const entry of entries) {
+    const parsed = journeySchema.safeParse(asJourney(entry.data, entry.plan));
+    const id = parsed.success ? parsed.data.id : (entry.data as { id?: unknown }).id;
+    if (typeof id === "string") ids.push(id);
+    if (!parsed.success || parsed.data.id === held) continue;
+    try {
+      const snapshot = nativeTripMode(parsed.data, now, { canTrack: true, photos: false });
+      if (snapshot.days.some((day) => day.endsAt > now.epochMilliseconds - 86_400_000)) snapshots.push(snapshot);
+    } catch { /* A trip that can't be laid out stays on the site. */ }
+  }
+  return { snapshots, ids };
 }
