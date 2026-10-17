@@ -1,6 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { exportNote } from "./export";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
+import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
 import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type TravelEdge, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
@@ -9,7 +10,8 @@ import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDa
 // uses; the app only shows the result and keeps the clock.
 // `version` stays 1 so apps built before `level` 2 still open the snapshot; newer fields are optional to the app. Level 2
 // adds epoch times (`startAt`, `leaveAt`, the transfer lines' `at` and the departure's `leaveAt`), so the app needs no
-// time zone rules for its countdowns and reminders.
+// time zone rules for its countdowns and reminders. `tickets` lists the trip's tickets without their files; the app
+// fetches and keeps each one so it opens without a connection.
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: TravelEdge["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -29,8 +31,9 @@ export type NativeDay = {
 };
 export type NativeTripMode = {
   version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
-  cities: { id: string; name: string; dates: string }[]; days: NativeDay[];
+  cities: { id: string; name: string; dates: string }[]; days: NativeDay[]; tickets?: NativeTicket[];
 };
+export type NativeTicket = Omit<Ticket, "tripId" | "stopId"> & { stopId?: string };
 
 function clock(trip: Trip, day: number, minute: number) {
   try { return formatMinute(trip, day, minute); } catch { return ""; }
@@ -123,8 +126,10 @@ function nativeDay(entry: TripModeDay, journey: Journey): NativeDay {
   };
 }
 
-export function nativeTripMode(journey: Journey, now: Temporal.Instant, options: { start?: { cityId: string; day: number }; canTrack: boolean; photos: boolean }): NativeTripMode {
+export function nativeTripMode(journey: Journey, now: Temporal.Instant, options: { start?: { cityId: string; day: number }; canTrack: boolean; photos: boolean; tickets?: Ticket[] }): NativeTripMode {
   const days = tripModeDays(journey.cities, journey.plans, journey.execution, now);
+  const tickets = (options.tickets ?? []).filter((ticket) => ticket.tripId === journey.id)
+    .map(({ tripId: _tripId, stopId, ...ticket }) => { void _tripId; return { ...ticket, ...(stopId ? { stopId } : {}) }; });
   return {
     version: 1, level: 2, journeyId: journey.id, title: journey.title, generatedAt: now.toString(), startKey: startingDay(days, options.start)?.key ?? null,
     canTrack: options.canTrack, photos: options.photos,
@@ -133,12 +138,13 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
       dates: city.startDate ? city.days > 1 ? `${dayLabel(city.startDate)} – ${dayLabel(tripDate(city, city.days - 1))}` : dayLabel(city.startDate) : "",
     })),
     days: days.map((entry) => nativeDay(entry, journey)),
+    ...(tickets.length ? { tickets } : {}),
   };
 }
 
 // Saved trips for the app to keep: a snapshot of each one planned and not over yet, except `held`, the trip the page has
 // open, which it sends itself; and every saved trip's id, so the app can let go of deleted ones.
-export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null }[], held: string, now: Temporal.Instant) {
+export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null }[], held: string, now: Temporal.Instant, tickets: Ticket[] = []) {
   const snapshots: NativeTripMode[] = [];
   const ids: string[] = [];
   for (const entry of entries) {
@@ -147,7 +153,7 @@ export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null 
     if (typeof id === "string") ids.push(id);
     if (!parsed.success || parsed.data.id === held) continue;
     try {
-      const snapshot = nativeTripMode(parsed.data, now, { canTrack: true, photos: false });
+      const snapshot = nativeTripMode(parsed.data, now, { canTrack: true, photos: false, tickets });
       if (snapshot.days.some((day) => day.endsAt > now.epochMilliseconds - 86_400_000)) snapshots.push(snapshot);
     } catch { /* A trip that can't be laid out stays on the site. */ }
   }

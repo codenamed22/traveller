@@ -15,6 +15,13 @@
       "when": 1791988615352,
       "tag": "0001_tricky_fantastic_four",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792256432333,
+      "tag": "0002_simple_ravenous",
+      "breakpoints": true
     }
   ]
 }

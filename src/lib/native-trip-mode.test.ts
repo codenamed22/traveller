@@ -78,10 +78,14 @@ describe("native trip mode snapshot", () => {
     const past = { ...fixture().journey, title: "Last year", cities: fixture().journey.cities.map((city) => ({ ...city, startDate: "2025-12-24" })) };
     const unplanned = { ...journey, id: crypto.randomUUID(), plans: {} };
     const entries = [journey, held, past, unplanned].map((data) => ({ data, plan: null }));
-    const { snapshots, ids } = nativeStore(entries, held.id, christmasEve);
+    const ticket = { id: crypto.randomUUID(), tripId: journey.id, cityId: journey.cities[0].id, target: "departure" as const, stopId: null, name: "Eurostar.pdf", mime: "application/pdf" as const, size: 9, sha256: "a" };
+    const { snapshots, ids } = nativeStore(entries, held.id, christmasEve, [ticket, { ...ticket, id: crypto.randomUUID(), tripId: held.id }]);
     expect(snapshots.map((snapshot) => snapshot.journeyId)).toEqual([journey.id]);
     expect(snapshots[0].photos).toBe(false);
     expect(ids).toEqual([journey.id, held.id, past.id, unplanned.id]);
+    // Each trip's own tickets, without the trip id or an empty visit.
+    expect(snapshots[0].tickets).toEqual([{ id: ticket.id, cityId: ticket.cityId, target: "departure", name: "Eurostar.pdf", mime: "application/pdf", size: 9, sha256: "a" }]);
+    expect(nativeTripMode(journey, christmasEve, { canTrack: true, photos: false })).not.toHaveProperty("tickets");
   });
 
   it("shows progress recorded with the trip mode rules", () => {

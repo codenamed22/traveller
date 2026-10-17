@@ -1,6 +1,7 @@
 "use client";
 
 import { Temporal } from "@js-temporal/polyfill";
+import type { ReactNode } from "react";
 import { Bus, Car, Check, MapPin, Plane, Search, TrainFront } from "lucide-react";
 import { arrivalTimes, dayEnd, dayStart, departureTimes, directDeparture, formatMinute, minuteAt, transferDefaults, tripDate, type Transfer, type Trip } from "@/lib/trip";
 import { transferHub as hub, transferLineText, transferModes as modes } from "@/lib/transfers";
@@ -38,7 +39,8 @@ export function transferSummary(trip: Trip, kind: Kind) {
   }
 }
 
-export function TransferFields({ trip, kind, onChange, onFind }: { trip: Trip; kind: Kind; onChange: (transfer: Transfer | undefined) => void; onFind?: () => void }) {
+// `children`, such as its tickets, go below the fields once there is an arrival or departure.
+export function TransferFields({ trip, kind, onChange, onFind, children }: { trip: Trip; kind: Kind; onChange: (transfer: Transfer | undefined) => void; onFind?: () => void; children?: ReactNode }) {
   const transfer = trip[kind];
   const defaults = transferDefaults[kind];
   const patch = (next: Partial<Transfer>) => transfer && onChange({ ...transfer, ...next });
@@ -63,6 +65,7 @@ export function TransferFields({ trip, kind, onChange, onFind }: { trip: Trip; k
         {!(directDeparture(trip) && kind === "departure") && <label className="field">{kind === "arrival" ? "To the hotel (min)" : `Hotel to ${hub[transfer.mode]} (min)`}<input type="number" min={0} max={360} step={5} value={transfer.transferMinutes ?? ""} placeholder={String(defaults.transfer[transfer.mode])} onChange={(event) => patch({ transferMinutes: minutes(event.target.value) })} /></label>}
       </div>
       <p className="quiet" role="status">{transferSummary(trip, kind)}</p>
+      {children}
     </>}
   </fieldset>;
 }

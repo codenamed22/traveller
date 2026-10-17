@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, customType, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import type { SavedPlan } from "@/lib/trip";
 import type { StoredTrip } from "@/lib/journey";
 
@@ -12,6 +12,24 @@ export const trips = pgTable("trips", {
   shared: boolean("shared").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
+
+// A ticket or booking document kept with a trip: for a visit, or for arriving in or leaving a city.
+export const tickets = pgTable("tickets", {
+  id: uuid("id").primaryKey(),
+  owner: text("owner").notNull(),
+  tripId: uuid("trip_id").notNull().references(() => trips.id, { onDelete: "cascade" }),
+  cityId: uuid("city_id").notNull(),
+  target: text("target", { enum: ["stop", "arrival", "departure"] }).notNull(),
+  stopId: uuid("stop_id"),
+  name: text("name").notNull(),
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  sha256: text("sha256").notNull(),
+  data: bytea("data").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [index("tickets_owner_trip").on(table.owner, table.tripId)]);
 
 export const usage = pgTable("usage", {
   owner: text("owner").notNull(),

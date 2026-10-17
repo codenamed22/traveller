@@ -76,6 +76,52 @@ describe("My trips", () => {
   });
 });
 
+describe("tickets", () => {
+  it("keeps tickets for a visit and for leaving the city, and gives them to the app", async () => {
+    const messages: { type: string; snapshot?: NativeTripMode }[] = [];
+    Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } }, confirm: () => true });
+    const museum = newStop("Rijksmuseum");
+    const amsterdam = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 1, timeZone: "Europe/Amsterdam", stops: [museum], departure: { mode: "TRAIN" as const, time: "18:00", place: "Amsterdam Centraal" } };
+    const entry = { data: { id: crypto.randomUUID(), title: "Christmas", cities: [amsterdam], plans: {} }, revision: 2, plan: null, shared: false, updatedAt: "2026-10-15T16:00:00Z" };
+    const meta = { tripId: entry.data.id, cityId: amsterdam.id, size: 9, sha256: "a".repeat(64) };
+    const train = { ...meta, id: crypto.randomUUID(), target: "departure", stopId: null, name: "Eurostar.pdf", mime: "application/pdf" };
+    const calls: { url: string; method: string; body?: unknown }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body });
+      if (url.endsWith("/tickets") && init?.method === "POST") {
+        const form = init.body as FormData;
+        return Response.json({ ticket: { ...meta, id: crypto.randomUUID(), target: form.get("target"), stopId: form.get("stopId"), name: (form.get("file") as File).name, mime: "image/jpeg" } }, { status: 201 });
+      }
+      if (url.endsWith("/tickets")) return Response.json({ tickets: [train] });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return Response.json({ trips: [] });
+    }));
+    await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: entry, initialList: null, config } as never)));
+    await settle();
+    const links = () => [...container.querySelectorAll(".ticket a")].map((link) => [link.textContent, link.getAttribute("href")]);
+    expect(links()).toEqual([["Eurostar.pdf", `/api/trips/${entry.data.id}/tickets/${train.id}`]]);
+    expect(container.querySelector(".transfer-fields:last-of-type .ticket")).not.toBeNull();
+
+    await act(async () => (container.querySelector(".stop-summary") as HTMLElement).click());
+    const input = container.querySelector(".stop-details input[type=file]") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File(["\xff\xd8\xff"], "Museum.jpg", { type: "image/jpeg" })], configurable: true });
+    await act(async () => { input.dispatchEvent(new window.Event("change", { bubbles: true })); });
+    await settle();
+    const form = calls.find((call) => call.method === "POST")!.body as FormData;
+    expect([form.get("cityId"), form.get("target"), form.get("stopId")]).toEqual([amsterdam.id, "stop", museum.id]);
+    expect(container.querySelector(".stop-details .ticket a")?.textContent).toBe("Museum.jpg");
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+    const sent = messages.filter((message) => message.type === "sync").at(-1)!.snapshot!;
+    expect(sent.tickets?.map((ticket) => [ticket.name, ticket.target, ticket.stopId])).toEqual([["Eurostar.pdf", "departure", undefined], ["Museum.jpg", "stop", museum.id]]);
+
+    await act(async () => button("Delete Eurostar.pdf").click());
+    await settle();
+    expect(calls.at(-1)).toMatchObject({ url: `/api/trips/${entry.data.id}/tickets/${train.id}`, method: "DELETE" });
+    expect(links().map(([name]) => name)).toEqual(["Museum.jpg"]);
+  });
+});
+
 describe("native trip mode in the iPhone app", () => {
   const place = (id: string, name: string): Place => ({ id, name, address: `${name} street`, location: { lat: 52.37, lng: 4.89 } });
   const leg = (from: string, to: string, minutes: number): TravelEdge => ({ day: 0, from, to, mode: "WALK", minutes, meters: 900 });

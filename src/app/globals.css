@@ -577,3 +577,9 @@ body.trip-mode-open { overflow: hidden; }
 .review-transfer .checkbox { align-items: center; }
 .review-transfer .checkbox span { overflow-wrap: anywhere; }
 .review-transfer p, .review-transfer blockquote { margin: 0 0 0 26px; }
+.tickets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.tickets .notice { flex-basis: 100%; margin: 0; }
+.ticket { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 5px; padding-left: 8px; font-size: 12px; }
+.ticket a { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink); text-decoration: none; }
+.ticket a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ticket .icon-button { width: 26px; height: 26px; }

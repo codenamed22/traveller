@@ -11,6 +11,8 @@ import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
 import { PlacePhotos } from "./PlacePhotos";
 import { TransferFields, TransferLine } from "./TransferFields";
+import { Tickets } from "./Tickets";
+import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import { VisitTimingFields } from "./VisitTiming";
 import { NewTripDialog } from "./NewTripDialog";
 import { PlanningDialog } from "./PlanningDialog";
@@ -118,6 +120,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const cityViews = useRef<Record<string, { places: Record<string, Place>; result: PlanResult | null; plannedFor: string }>>({});
   const snapshot = JSON.stringify(journey);
   const canUseServices = Boolean(config.email && config.database);
+  // Tickets are kept with the saved trip, so they need it saved once.
+  const ticketsSaved = canUseServices && revision > 0;
+  const [tickets, setTickets] = useState<{ tripId: string; list: Ticket[] }>({ tripId: "", list: [] });
+  const tripTickets = tickets.tripId === journey.id ? tickets.list : [];
   // Autosave skips a trip that doesn't check out; say why, or edits quietly stop being saved.
   const saveBlocker = canUseServices && snapshot !== savedFor ? journeySchema.safeParse(journey).error?.issues[0]?.message : undefined;
   const canPlan = canUseServices && config.routes;
@@ -161,7 +167,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     return () => { clearInterval(timer); window.removeEventListener("online", retry); };
   }, [offlineSave]);
   // Native trip mode redraws from a fresh snapshot whenever the trip changes, such as after Done.
-  useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey, tickets]); // eslint-disable-line react-hooks/exhaustive-deps
   // The app keeps each trip it's seen, for leave reminders, and needs to know which trip this page holds; it gets the
   // trip shortly after each change, planned or not.
   // `saved` says the trip as sent is saved, so the app can let go of changes it kept on the phone until then.
@@ -170,7 +176,14 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     const saved = !canUseServices || snapshot === savedFor;
     const timer = setTimeout(() => postToApp("travellerTripMode", { type: "sync", snapshot: nativeSnapshot(), saved }), 2000);
     return () => clearTimeout(timer);
-  }, [journey, savedFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [journey, savedFor, tickets]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!ticketsSaved) return;
+    const tripId = journey.id;
+    let current = true;
+    requestJson(`/api/trips/${tripId}/tickets`, undefined, "GET").then((data) => { if (current) setTickets({ tripId, list: data.tickets ?? [] }); }).catch(() => undefined);
+    return () => { current = false; };
+  }, [journey.id, ticketsSaved]);
   // The app also keeps every other trip still to come, so trip mode and reminders work for it without a connection or
   // opening it here first. Sent on load and again when the page comes back into view, at most every 10 minutes.
   useEffect(() => { heldJourney.current = journey.id; }, [journey.id]);
@@ -181,8 +194,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       if (document.visibilityState === "hidden" || Date.now() - last < 600_000) return;
       last = Date.now();
       try {
-        const list: SavedTrip[] = (await requestJson("/api/trips", undefined, "GET")).trips;
-        postToApp("travellerTripMode", { type: "store", ...nativeStore(list, heldJourney.current, Temporal.Now.instant()) });
+        const response: { trips: SavedTrip[]; tickets?: Ticket[] } = await requestJson("/api/trips", undefined, "GET");
+        postToApp("travellerTripMode", { type: "store", ...nativeStore(response.trips, heldJourney.current, Temporal.Now.instant(), response.tickets) });
       } catch { last = 0; }
     };
     void store();
@@ -538,7 +551,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
   // In the iPhone app trip mode is native. It gets the trip as a snapshot and calls back here to record progress, so this
   // page stays the only place that saves the trip.
-  const nativeSnapshot = () => nativeTripMode(journey, Temporal.Now.instant(), { start: { cityId: trip.id, day }, canTrack: true, photos: canLoadPhotos });
+  const nativeSnapshot = () => nativeTripMode(journey, Temporal.Now.instant(), { start: { cityId: trip.id, day }, canTrack: true, photos: canLoadPhotos, tickets: tripTickets });
+  const ticketField = (place: TicketPlace) => ticketsSaved && <Tickets tripId={journey.id} place={place} tickets={ticketsFor(tripTickets, place)}
+    onAdd={(ticket) => setTickets((current) => ({ tripId: ticket.tripId, list: [...(current.tripId === ticket.tripId ? current.list : []), ticket] }))}
+    onRemove={(id) => setTickets((current) => ({ ...current, list: current.list.filter((ticket) => ticket.id !== id) }))} />;
   function openTripMode() {
     if (!inApp()) { setTripMode(true); return; }
     nativeOpen.current = true;
@@ -611,8 +627,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
               <p className="quiet">The last visit ends by this time; getting back to the hotel may take up to {hotelReturnAllowance / 60} hours longer.</p>
               <label className="field">City timezone<input value={trip.timeZone} maxLength={100} placeholder="Europe/Paris" onChange={(event) => edit({ timeZone: event.target.value })} /></label>
               <label className="checkbox"><input type="checkbox" checked={trip.returnToHotel} onChange={(event) => edit({ returnToHotel: event.target.checked })} />Return to hotel each day</label>
-              <TransferFields trip={trip} kind="arrival" onChange={(arrival) => edit({ arrival })} onFind={busy ? undefined : () => openSearch("arrival", trip.arrival?.place ?? "")} />
-              <TransferFields trip={trip} kind="departure" onChange={(departure) => edit({ departure })} onFind={busy ? undefined : () => openSearch("departure", trip.departure?.place ?? "")} />
+              <TransferFields trip={trip} kind="arrival" onChange={(arrival) => edit({ arrival })} onFind={busy ? undefined : () => openSearch("arrival", trip.arrival?.place ?? "")}>{ticketField({ cityId: trip.id, target: "arrival", stopId: null })}</TransferFields>
+              <TransferFields trip={trip} kind="departure" onChange={(departure) => edit({ departure })} onFind={busy ? undefined : () => openSearch("departure", trip.departure?.place ?? "")}>{ticketField({ cityId: trip.id, target: "departure", stopId: null })}</TransferFields>
             </div>
           </details>
 
@@ -650,6 +666,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
                 <label className="checkbox"><input type="checkbox" checked={stop.optional} disabled={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional if the day is full</label>
                 <label className="checkbox" title="Kept before other optional places when a day is full, and shortened last"><input type="checkbox" checked={isMustSee(stop)} onChange={(event) => editStop(stop.id, { priority: event.target.checked ? mustSeePriority : 1 })} /><Star size={13} />Must-see</label>
                 <label className="field">Notes<textarea rows={2} maxLength={500} placeholder="Anything to remember about this place" value={stop.note ?? ""} onChange={(event) => editStop(stop.id, { note: event.target.value || undefined })} /></label>
+                {ticketField({ cityId: trip.id, target: "stop", stopId: stop.id })}
                 {stop.source && <blockquote>{stop.source}</blockquote>}
                 {stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}
                 <div className="stop-detail-actions"><div className="row">{[-1, 1].map((direction) => <button key={direction} className="icon-button" aria-label={direction < 0 ? "Move place up" : "Move place down"} title={direction < 0 ? "Move up" : "Move down"} disabled={index + direction < 0 || index + direction >= trip.stops.length} onClick={() => { const next = [...trip.stops]; [next[index], next[index + direction]] = [next[index + direction], next[index]]; edit({ stops: next }); }}>{direction < 0 ? <ArrowUp size={15} /> : <ArrowDown size={15} />}</button>)}</div><button className="text-button danger" onClick={() => { edit({ stops: trip.stops.filter((entry) => entry.id !== stop.id) }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }}><Trash2 size={14} />Remove</button></div>
