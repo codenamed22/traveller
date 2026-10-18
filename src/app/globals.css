@@ -583,3 +583,4 @@ body.trip-mode-open { overflow: hidden; }
 .ticket a { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink); text-decoration: none; }
 .ticket a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ticket .icon-button { width: 26px; height: 26px; }
+.transfer-line > a { margin-left: auto; flex-shrink: 0; }

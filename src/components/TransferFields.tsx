@@ -73,12 +73,13 @@ export function TransferFields({ trip, kind, onChange, onFind, children }: { tri
 export const transferIcons = { FLIGHT: Plane, TRAIN: TrainFront, BUS: Bus, CAR: Car, OTHER: MapPin };
 
 // The itinerary's arrival row on day 1 and departure row on the last day.
-export function TransferLine({ trip, kind }: { trip: Trip; kind: Kind }) {
+export function TransferLine({ trip, kind, children }: { trip: Trip; kind: Kind; children?: ReactNode }) {
   const line = transferLineText(trip, kind);
   if (!line) return null;
   const Icon = transferIcons[line.mode];
   return <div className={`itinerary-start transfer-line ${kind}`} aria-label={kind === "arrival" ? "Arrival" : "Departure"}>
     <span className="hotel-marker small"><Icon size={15} /></span>
     <div><strong>{line.title}</strong><span>{line.detail}</span></div>
+    {children}
   </div>;
 }

@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, TrainFront, Undo2, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
+import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import type { Journey } from "@/lib/journey";
 import { endpointKey, formatMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
@@ -25,14 +26,18 @@ type Props = {
   exitSignal?: number;
   // Owners can load Google photos of a tapped place; shared viewers cannot.
   photos?: boolean;
+  // The owner's tickets, opened from the visit or the arrival or departure they're for.
+  tickets?: Ticket[];
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
 const noPhotos = {};
+const noTickets: Ticket[] = [];
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets }: Props) {
+  const ticketLinks = (place: TicketPlace) => ticketsFor(tickets, place).map((ticket, _index, all) => <a key={ticket.id} className="button secondary small" href={`/api/trips/${ticket.tripId}/tickets/${ticket.id}`} target="_blank" rel="noopener"><TicketIcon size={15} />{all.length === 1 ? "Ticket" : ticket.name}</a>);
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
   const [key, setKey] = useState(() => startingDay(days, start)?.key);
@@ -181,6 +186,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           <a className="button primary small" href={directionsUrl(focus.leg, entry.places, { fromHere: entry.isToday && status === "pending" })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>
           {tracking && status === "pending" && <><button type="button" className="button secondary small" onClick={() => record("done", focus)}><Check size={15} />Done</button><button type="button" className="button secondary small" onClick={() => record("skip", focus)}><SkipForward size={15} />Skip</button></>}
           {tracking && status !== "pending" && <button type="button" className="button secondary small" onClick={() => reset(focus)}><Undo2 size={15} />Undo</button>}
+          {ticketLinks({ cityId: entry.cityId, target: "stop", stopId: focus.stopId })}
         </div>
       </div>;
     }
@@ -236,7 +242,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     </>}>
       <div className="trip-timeline">
         {entry.replanned && <p className="trip-mode-note">Today was replanned; showing the updated day.</p>}
-        {entry.day === 0 && entry.trip.arrival && <TransferLine trip={entry.trip} kind="arrival" />}
+        {entry.day === 0 && entry.trip.arrival && <TransferLine trip={entry.trip} kind="arrival">{ticketLinks({ cityId: entry.cityId, target: "arrival", stopId: null })}</TransferLine>}
         {entry.progress?.completed.filter((visit) => !entry.plan.visits.some((planned) => planned.stopId === visit.stopId)).map((visit) => <p className="trip-timeline-done" key={visit.stopId}><Check size={14} />{stopName(visit.stopId)} · {formatMinute(entry.cityTrip, entry.day, visit.start)}–{formatMinute(entry.cityTrip, entry.day, visit.end)}</p>)}
         {entry.plan.visits.length > 0 && <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{entry.trip.hotel}</strong><span>Leave {firstLeave !== undefined ? formatMinute(entry.trip, entry.day, firstLeave) : ""}</span></div></div>}
         {entry.plan.visits.map((visit, index) => {
@@ -253,7 +259,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           </div>;
         })}
         {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
-        {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure" />}
+        {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure">{ticketLinks({ cityId: entry.cityId, target: "departure", stopId: null })}</TransferLine>}
         {plans[entry.cityId]?.snapshot && <OmittedPlaces trip={entry.trip} schedule={plans[entry.cityId].snapshot!.schedule} />}
       </div>
     </BottomSheet>

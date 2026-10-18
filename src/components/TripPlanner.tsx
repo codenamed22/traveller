@@ -770,7 +770,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
     {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

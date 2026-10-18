@@ -110,6 +110,19 @@ describe("trip mode", () => {
     expect(container.querySelector(".trip-card")?.textContent).toContain("Sango Coffee");
   });
 
+  it("opens a visit's ticket from its card and the train's from the timeline", async () => {
+    const { amsterdam, cities, plans } = journey();
+    const arriving = [{ ...amsterdam, arrival: { mode: "TRAIN" as const, time: "08:00", place: "Amsterdam Centraal" } }, cities[1]];
+    // Planned with the train, as trip mode shows the day as planned.
+    const planned = { ...plans, [amsterdam.id]: { ...plans[amsterdam.id], snapshot: { ...plans[amsterdam.id].snapshot!, trip: arriving[0] } } };
+    const ticket = (target: "stop" | "arrival", stopId: string | null, name: string) => ({ id: crypto.randomUUID(), tripId: "6f1c2b7e-4d0a-4c5e-9a43-2f6b8d1e7c90", cityId: amsterdam.id, target, stopId, name, mime: "application/pdf" as const, size: 1, sha256: "" });
+    const coffee = ticket("stop", amsterdam.stops[0].id, "Sango.pdf"), train = ticket("arrival", null, "Eurostar.pdf");
+    await act(async () => root.render(createElement(TripMode, { title: "Amsterdam", cities: arriving, plans: planned, canTrack: true, onClose: vi.fn(), tickets: [coffee, train, ticket("stop", amsterdam.stops[1].id, "Rijks.pdf")] })));
+    const link = (selector: string) => container.querySelector<HTMLAnchorElement>(`${selector} a[href^="/api/trips/"]`);
+    expect([link(".trip-card")?.textContent, link(".trip-card")?.getAttribute("href")]).toEqual(["Ticket", `/api/trips/${coffee.tripId}/tickets/${coffee.id}`]);
+    expect(link(".transfer-line.arrival")?.getAttribute("href")).toBe(`/api/trips/${train.tripId}/tickets/${train.id}`);
+  });
+
   it("undoes a visit from its card, after the quick Undo has gone", async () => {
     const record = vi.fn();
     await act(async () => root.render(createElement(Harness, { canTrack: true, onClose: vi.fn(), record })));
