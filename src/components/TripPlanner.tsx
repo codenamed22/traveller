@@ -133,6 +133,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const tripTickets = tickets.tripId === journey.id ? tickets.list : [];
   const forecasts = useForecasts(journey.cities, journey.plans);
   const canSwap = Boolean(canUseServices && config.assistant);
+  const assistantModel = config.assistant?.model;
   // Autosave skips a trip that doesn't check out; say why, or edits quietly stop being saved.
   const saveBlocker = canUseServices && snapshot !== savedFor ? journeySchema.safeParse(journey).error?.issues[0]?.message : undefined;
   const canPlan = canUseServices && config.routes;
@@ -228,6 +229,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       ...(canUseServices ? { send: async (journeyId: string, actions: unknown[]) => {
         const response = await fetch(`/api/trips/${journeyId}/progress`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actions }) });
         return { status: response.status, body: await response.json().catch(() => null) };
+      } } : {}),
+      ...(canUseServices && assistantModel ? { captions: async (summary: unknown) => {
+        const response = await fetch("/api/captions", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ summary, consent: true, provider: { provider: "openrouter", model: assistantModel }, operationId: crypto.randomUUID() }) });
+        const body = await response.json().catch(() => null);
+        return response.ok ? body : { error: body?.error ?? "Couldn't suggest captions." };
       } } : {}),
     });
     return () => { delete target.travellerNative; };

@@ -5,6 +5,7 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, getToolName, isToolUIPart, type UIMessage } from "ai";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, LoaderCircle, RotateCcw, Route, Search, ShieldCheck, Sparkles, Square, SquarePen } from "lucide-react";
 import { proposalOutputSchema, type Operation, type ProposalOutput } from "@/lib/assistant-ops";
+import { giveConsent, hasConsent } from "@/lib/assistant-consent";
 import type { Journey } from "@/lib/journey";
 
 export type AssistantView = { cityId: string; day: number; tripMode: boolean; today: boolean };
@@ -22,12 +23,6 @@ type Props = {
 // `ask` sends at once; `prefill` opens with the text in the box, for the traveller to send or change.
 export type AssistantHandle = { ask: (text: string) => void; prefill: (text: string) => void };
 
-// Bump the version when what the assistant shares changes, so everyone is asked again.
-const consentKey = "traveller.assistant.consent";
-const consentVersion = "1";
-function hasConsent() {
-  try { return window.localStorage.getItem(consentKey) === consentVersion; } catch { return false; }
-}
 function errorText(error: Error) {
   try { const parsed = JSON.parse(error.message); if (typeof parsed?.error === "string") return parsed.error; } catch { /* not a JSON error body */ }
   return "The assistant couldn't answer. Try again.";
@@ -81,7 +76,7 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
   const context = () => ({ body: { journey, view: { cityId: view.cityId, day: view.day, tripMode: view.tripMode }, consent: true, provider: { provider: "openrouter", model } } });
 
   function show() {
-    setConsented(hasConsent()); setOpen(true);
+    setConsented(hasConsent("assistant")); setOpen(true);
     if (window.location.hash !== "#assistant") { window.history.pushState(null, "", "#assistant"); pushed.current = true; }
   }
   function hide(then?: () => void) {
@@ -89,7 +84,7 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
     setOpen(false); then?.();
   }
   function accept() {
-    try { window.localStorage.setItem(consentKey, consentVersion); } catch { /* consent then lasts for this visit only */ }
+    giveConsent("assistant");
     setConsented(true);
     const waiting = pending.current; pending.current = null;
     if (waiting) send(waiting);
@@ -103,7 +98,7 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
   useImperativeHandle(ref, () => ({
     ask(text: string) {
       show();
-      if (hasConsent()) send(text); else pending.current = text;
+      if (hasConsent("assistant")) send(text); else pending.current = text;
     },
     prefill(text: string) {
       show(); setInput(text.slice(0, 2000));

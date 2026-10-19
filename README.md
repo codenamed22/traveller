@@ -185,6 +185,7 @@ From the first day of a trip the owner can keep a note for each day and mark fav
 - **Recap** (the book icon in the trip heading, and in My trips for trips that have started): every day so far, each visit's planned time against when it was done, what was skipped or not visited, distance on foot and time by transit on the planned routes to the visits made, and the day's note and favourites to change.
 - The iPhone app's trip mode has the heart and the day note too, kept on the phone without a connection and sent like Done.
 - In the iPhone app the recap has **Photos**, which opens the trip's memories: the photos taken at each visit, suggested from the phone's library and kept there, and an album of them. The site never sees the photos. The app keeps each trip for 60 days after it ends for this, and the copy the page sends says how far each day was walked and ridden.
+- From memories the app makes posts of the trip (a carousel, a story for each day, a route card for each city) and can ask the agent for captions: **Suggest captions** sends the trip in words (title, cities, month, each day's places visited, favourites, note and distance on foot; never photos) through the page to `POST /api/captions`, owner only, after its own consent screen (kept in the browser, apart from the assistant's). Each request uses 1 unit of the daily allowance. The agent is told to leave out people's names, addresses and booking references.
 
 ### Trip Assistant
 

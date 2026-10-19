@@ -1,4 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
+import { giveConsent, hasConsent } from "@/lib/assistant-consent";
 import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
 import { applyJournalAction, journalActionSchema, type JournalAction } from "@/lib/journal";
@@ -6,7 +7,7 @@ import { applyNativeAction, type NativeAction } from "@/lib/native-actions";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap", "journal"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap", "journal", "captions"];
 
 type Deps = {
   journey: Journey;
@@ -18,6 +19,7 @@ type Deps = {
   send?: (journeyId: string, actions: unknown[]) => Promise<unknown>;
   swap?: (cityId: string, day: number, stopId: string) => void;
   recordJournal?: (action: JournalAction) => void;
+  captions?: (summary: unknown) => Promise<unknown>;
   now?: () => Temporal.Instant;
 };
 
@@ -61,7 +63,7 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, recordJournal, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, recordJournal, captions, now: clock = () => Temporal.Now.instant() }: Deps) {
   function apply(action: NativeAction) {
     const change = applyNativeAction(journey, action, clock());
     if (!change.changed) return change.message;
@@ -116,6 +118,13 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
       if (!swap) return false;
       swap(cityId, day, stopId);
       return true;
+    },
+    // Captions from the agent for the posts the app makes, from what they show in words (never the photos). Asks for
+    // consent as the assistant does: `{consent: false}` until the app has shown it and passes `agreed`.
+    async captions(summary: unknown, agreed?: boolean) {
+      if (!captions) throw new Error("Captions are unavailable");
+      if (agreed === true) giveConsent("captions"); else if (!hasConsent("captions")) return { consent: false };
+      return captions(summary);
     },
     // Trip mode opened by the app itself, such as from a reminder; the page sends it updates from now on.
     opened,

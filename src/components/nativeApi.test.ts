@@ -77,6 +77,24 @@ describe("the page's calls for the iPhone app", () => {
     expect(() => api(createNativeApi, journey).native.journal(amsterdam.id, 0, { note: "x" })).toThrow("Saving is unavailable");
   });
 
+  it("asks the agent for captions only once the traveller has agreed, and remembers it", async () => {
+    const { journey } = fixture();
+    const createNativeApi = await load();
+    const captions = vi.fn(async () => ({ captions: [{ caption: "Snow on the canals.", hashtags: ["Amsterdam"] }] }));
+    const native = createNativeApi({ journey, recordProgress() {}, adjustToday() {}, opened() {}, closed() {}, captions });
+    const summary = { title: "Christmas", cities: ["Amsterdam"], days: [] };
+    expect(native.features).toContain("captions");
+    expect(await native.captions(summary)).toEqual({ consent: false });
+    expect(captions).not.toHaveBeenCalled();
+    expect(await native.captions(summary, true)).toEqual({ captions: [{ caption: "Snow on the canals.", hashtags: ["Amsterdam"] }] });
+    expect(await native.captions(summary)).toEqual({ captions: [{ caption: "Snow on the canals.", hashtags: ["Amsterdam"] }] });
+    expect(captions).toHaveBeenCalledTimes(2);
+    expect(captions).toHaveBeenCalledWith(summary);
+    // Agreeing to captions isn't agreeing to the assistant.
+    expect(store.get("traveller.assistant.consent")).toBeUndefined();
+    await expect(api(createNativeApi, journey).native.captions(summary, true)).rejects.toThrow("Captions are unavailable");
+  });
+
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {
     const { journey, amsterdam, coffee } = fixture();
     const { native, recorded } = api(await load(), journey);
