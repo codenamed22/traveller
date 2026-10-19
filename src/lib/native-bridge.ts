@@ -1,6 +1,7 @@
 // The iPhone app's web view adds message handlers under `window.webkit`; in a browser they are missing.
 type AppHandler = { postMessage(message: unknown): void };
-export type AppMessage = "travellerSave" | "travellerTripMode";
+// travellerMemories opens a trip's memories (its photos by day and visit); only app builds that have them handle it.
+export type AppMessage = "travellerSave" | "travellerTripMode" | "travellerMemories";
 
 function handler(name: AppMessage): AppHandler | undefined {
   if (typeof window === "undefined") return undefined;

@@ -226,6 +226,7 @@ summary::-webkit-details-marker { display: none; }
 .day-note textarea { resize: vertical; min-height: 54px; }
 .day-note-text { margin: 14px 0 0; font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
 .recap-summary { margin: -8px 0 6px; color: var(--muted); font-size: 13px; }
+.recap-photos { margin-bottom: 12px; }
 .recap-day { border-top: 1px solid var(--line); padding: 14px 0 4px; }
 .recap-day h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; }
 .recap-day h3 small { color: var(--muted); font-size: 12px; font-weight: 400; }

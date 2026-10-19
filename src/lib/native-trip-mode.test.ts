@@ -73,6 +73,16 @@ describe("native trip mode snapshot", () => {
     expect(today.visits.map((visit) => visit.mustSee)).toEqual([undefined, true]);
   });
 
+  it("says how far the traveller walked and rode on each day that has started", () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const day = tripModeDays(journey.cities, journey.plans, journey.execution, christmasEve)[0];
+    const done = { ...journey, execution: { [amsterdam.id]: { "2026-12-24": markDone(day, coffee.id, 600) } } };
+    const [today, tomorrow] = nativeTripMode(done, christmasEve, { canTrack: true, photos: false }).days;
+    // The walk to the coffee; the day isn't over, so not the way back yet.
+    expect(today.travel).toEqual({ walkKm: 0.9, walkMinutes: 15, transitMinutes: 0 });
+    expect(tomorrow).not.toHaveProperty("travel");
+  });
+
   it("carries the day's note and favourites, and says the traveller can keep them", () => {
     const { journey, amsterdam, coffee } = fixture();
     const kept = { ...journey, journal: { [amsterdam.id]: { "2026-12-24": { note: "Snow on the canals", favourites: [coffee.id] } } } };
@@ -109,13 +119,16 @@ describe("native trip mode snapshot", () => {
     const { journey } = fixture();
     const held = { ...fixture().journey, title: "Open in the page" };
     const past = { ...fixture().journey, title: "Last year", cities: fixture().journey.cities.map((city) => ({ ...city, startDate: "2025-12-24" })) };
+    // Over a month ago: kept for its memories.
+    const november = fixture().journey;
+    const recent = { ...november, title: "November", cities: november.cities.map((city) => ({ ...city, startDate: "2026-11-20" })) };
     const unplanned = { ...journey, id: crypto.randomUUID(), plans: {} };
-    const entries = [journey, held, past, unplanned].map((data) => ({ data, plan: null }));
+    const entries = [journey, held, past, recent, unplanned].map((data) => ({ data, plan: null }));
     const ticket = { id: crypto.randomUUID(), tripId: journey.id, cityId: journey.cities[0].id, target: "departure" as const, stopId: null, name: "Eurostar.pdf", mime: "application/pdf" as const, size: 9, sha256: "a" };
     const { snapshots, ids } = nativeStore(entries, held.id, christmasEve, [ticket, { ...ticket, id: crypto.randomUUID(), tripId: held.id }]);
-    expect(snapshots.map((snapshot) => snapshot.journeyId)).toEqual([journey.id]);
+    expect(snapshots.map((snapshot) => snapshot.journeyId)).toEqual([journey.id, recent.id]);
     expect(snapshots[0].photos).toBe(false);
-    expect(ids).toEqual([journey.id, held.id, past.id, unplanned.id]);
+    expect(ids).toEqual([journey.id, held.id, past.id, recent.id, unplanned.id]);
     // Each trip's own tickets, without the trip id or an empty visit.
     expect(snapshots[0].tickets).toEqual([{ id: ticket.id, cityId: ticket.cityId, target: "departure", name: "Eurostar.pdf", mime: "application/pdf", size: 9, sha256: "a" }]);
     expect(nativeTripMode(journey, christmasEve, { canTrack: true, photos: false })).not.toHaveProperty("tickets");

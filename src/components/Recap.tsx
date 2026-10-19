@@ -2,9 +2,10 @@
 
 import { useMemo } from "react";
 import type { Temporal } from "@js-temporal/polyfill";
-import { Heart, Star } from "lucide-react";
+import { Heart, Images, Star } from "lucide-react";
 import type { JournalAction } from "@/lib/journal";
 import type { Journey } from "@/lib/journey";
+import { appHandles, postToApp } from "@/lib/native-bridge";
 import { tripRecap, type RecapTravel, type RecapVisit } from "@/lib/recap";
 import { durationLabel } from "@/lib/trip-mode";
 import { Dialog } from "./Dialog";
@@ -28,6 +29,7 @@ export function RecapDialog({ journey, now, onJournal, onClose }: { journey: Jou
   const summary = [plural(totals.days, "day"), plural(totals.done, "visit"), totals.skipped ? `${totals.skipped} skipped` : "", totals.missed ? `${totals.missed} not visited` : "", travelText(totals), totals.favourites ? plural(totals.favourites, "favourite") : ""].filter(Boolean).join(" · ");
   return <Dialog title="Recap" className="recap-dialog" onClose={onClose}>
     <p className="recap-summary">{summary}</p>
+    {appHandles("travellerMemories") && <button type="button" className="button secondary small recap-photos" onClick={() => postToApp("travellerMemories", { journeyId: journey.id })}><Images size={15} />Photos</button>}
     {recap.days.map((day) => <section key={day.key} className="recap-day" aria-label={`${day.label}, ${day.city}`}>
       <h3>{day.label}<small>{day.city}</small></h3>
       {travelText(day.travel) && <p className="recap-travel">{travelText(day.travel)}</p>}

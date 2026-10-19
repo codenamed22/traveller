@@ -6,6 +6,7 @@ import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
 import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type TravelEdge, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
+import { tripRecap, type RecapTravel } from "./recap";
 import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
@@ -16,7 +17,8 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // fetches and keeps each one so it opens without a connection. `weather` is the day's forecast and `rain` the chance of
 // rain during an outdoor visit, when it's worth a warning; `swap` says the page can ask the agent to swap such a visit
 // (`travellerNative.swap`). `journal` says the traveller can keep a note for each day (`note`) and mark visits as
-// favourites (`favourite`), through `travellerNative.journal` or the progress route.
+// favourites (`favourite`), through `travellerNative.journal` or the progress route. `travel` is how far the traveller
+// walked and rode on a day that has started, on the planned routes to the visits made (as the recap counts it).
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: TravelEdge["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -32,7 +34,7 @@ export type NativeDay = {
   key: string; cityId: string; city: string; day: number; date: string; label: string; timeZone: string; startsAt: number; endsAt: number;
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
   summary: { stops: number; travel: string; leaveLabel?: string; backLabel?: string }; visits: NativeVisit[]; returnLeg?: NativeLeg;
-  arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather; note?: string;
+  arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather; note?: string; travel?: RecapTravel;
 };
 export type NativeTripMode = {
   version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
@@ -75,7 +77,7 @@ function dayBounds(entry: TripModeDay) {
   } catch { return { startsAt: 0, endsAt: 0 }; }
 }
 
-function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast): NativeDay {
+function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, travel?: RecapTravel): NativeDay {
   const { trip, places, plan } = entry;
   const stopName = (id: string) => trip.stops.find((stop) => stop.id === id)?.name ?? places[id]?.name ?? "Removed place";
   const toDeparture = endpointKey(trip, entry.day, "hotel", "to") === "departure";
@@ -133,12 +135,13 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast): N
     doneElsewhere: entry.progress?.completed.filter((visit) => !plan.visits.some((planned) => planned.stopId === visit.stopId))
       .map((visit) => ({ title: stopName(visit.stopId), detail: `${clock(entry.cityTrip, entry.day, visit.start)}–${clock(entry.cityTrip, entry.day, visit.end)}` })) ?? [],
     omitted: omitted.map((id) => trip.stops.find((stop) => stop.id === id)?.name ?? "").filter(Boolean),
-    ...(weather ? { weather } : {}), ...(journal.note ? { note: journal.note } : {}),
+    ...(weather ? { weather } : {}), ...(journal.note ? { note: journal.note } : {}), ...(travel ? { travel } : {}),
   };
 }
 
 export function nativeTripMode(journey: Journey, now: Temporal.Instant, options: { start?: { cityId: string; day: number }; canTrack: boolean; photos: boolean; tickets?: Ticket[]; forecasts?: Record<string, Forecast>; swap?: boolean }): NativeTripMode {
   const days = tripModeDays(journey.cities, journey.plans, journey.execution, now);
+  const travel = Object.fromEntries(tripRecap(journey, now).days.map((day) => [day.key, day.travel]));
   const tickets = (options.tickets ?? []).filter((ticket) => ticket.tripId === journey.id)
     .map(({ tripId: _tripId, stopId, ...ticket }) => { void _tripId; return { ...ticket, ...(stopId ? { stopId } : {}) }; });
   return {
@@ -148,14 +151,17 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
       id: city.id, name: city.city,
       dates: city.startDate ? city.days > 1 ? `${dayLabel(city.startDate)} – ${dayLabel(tripDate(city, city.days - 1))}` : dayLabel(city.startDate) : "",
     })),
-    days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId])),
+    days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId], travel[entry.key])),
     ...(tickets.length ? { tickets } : {}),
     ...(options.swap ? { swap: true } : {}), ...(options.canTrack ? { journal: true } : {}),
   };
 }
 
-// Saved trips for the app to keep: a snapshot of each one planned and not over yet, except `held`, the trip the page has
-// open, which it sends itself; and every saved trip's id, so the app can let go of deleted ones.
+// Saved trips for the app to keep: a snapshot of each one planned and not over yet, or over in the last 60 days for its
+// memories, except `held`, the trip the page has open, which it sends itself; and every saved trip's id, so the app can
+// let go of deleted ones.
+const keptAfterTrip = 60 * 86_400_000;
+
 export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null }[], held: string, now: Temporal.Instant, tickets: Ticket[] = [], forecasts: Record<string, Forecast> = {}) {
   const snapshots: NativeTripMode[] = [];
   const ids: string[] = [];
@@ -166,7 +172,7 @@ export function nativeStore(entries: { data: StoredTrip; plan: SavedPlan | null 
     if (!parsed.success || parsed.data.id === held) continue;
     try {
       const snapshot = nativeTripMode(parsed.data, now, { canTrack: true, photos: false, tickets, forecasts });
-      if (snapshot.days.some((day) => day.endsAt > now.epochMilliseconds - 86_400_000)) snapshots.push(snapshot);
+      if (snapshot.days.some((day) => day.endsAt > now.epochMilliseconds - keptAfterTrip)) snapshots.push(snapshot);
     } catch { /* A trip that can't be laid out stays on the site. */ }
   }
   return { snapshots, ids };
