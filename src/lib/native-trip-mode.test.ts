@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Journey } from "@/lib/journey";
 import { minuteAt, mustSeePriority, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
 import { markDone, markSkipped, tripModeDays } from "@/lib/trip-mode";
+import { parseForecast } from "./weather";
 import { nativeStore, nativeTripMode } from "./native-trip-mode";
 
 const place = (id: string, name: string, lat = 52.37): Place => ({ id, name, address: `${name} street`, location: { lat, lng: 4.89 } });
@@ -70,6 +71,26 @@ describe("native trip mode snapshot", () => {
     const marked = { ...journey, cities: [{ ...amsterdam, stops: amsterdam.stops.map((stop) => stop.id === museum.id ? { ...stop, priority: mustSeePriority } : stop) }] };
     const [today] = nativeTripMode(marked, christmasEve, { canTrack: true, photos: false }).days;
     expect(today.visits.map((visit) => visit.mustSee)).toEqual([undefined, true]);
+  });
+
+  it("carries the day's forecast and the chance of rain during outdoor visits", () => {
+    const { journey, amsterdam, coffee, museum } = fixture();
+    // The museum's garden, say: a park. Rain is likely all morning.
+    const plan = journey.plans[amsterdam.id];
+    const outdoors = { ...journey, plans: { [amsterdam.id]: { ...plan, snapshot: { ...plan.snapshot!, places: { ...plan.snapshot!.places, [museum.id]: { ...plan.snapshot!.places[museum.id], types: ["park"] } } } } } };
+    const hours = ["09", "10", "11", "12"].map((hour) => `2026-12-24T${hour}:00`);
+    const forecast = parseForecast({
+      daily: { time: ["2026-12-24"], weather_code: [63], temperature_2m_max: [6], temperature_2m_min: [2], precipitation_probability_max: [80] },
+      hourly: { time: hours, precipitation_probability: [80, 80, 80, 80] },
+    }, "Europe/Amsterdam", 1);
+    const snapshot = nativeTripMode(outdoors, christmasEve, { canTrack: true, photos: false, forecasts: { [amsterdam.id]: forecast }, swap: true });
+    const [today, tomorrow] = snapshot.days;
+    expect(today.weather).toEqual({ label: "Rain", icon: "rain", max: 6, min: 2, rain: 80 });
+    expect(tomorrow.weather).toBeUndefined();
+    // The coffee is indoors.
+    expect(today.visits.map((visit) => [visit.stopId, visit.rain])).toEqual([[coffee.id, undefined], [museum.id, 80]]);
+    expect(snapshot.swap).toBe(true);
+    expect(nativeTripMode(journey, christmasEve, { canTrack: true, photos: false })).not.toHaveProperty("swap");
   });
 
   it("gives the app every other saved trip still to come, and the ids of all of them", () => {

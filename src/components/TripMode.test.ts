@@ -5,6 +5,7 @@ import { parseHTML } from "linkedom";
 import type { DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
 import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "@/lib/trip";
+import { parseForecast } from "@/lib/weather";
 import { TripMode } from "./TripMode";
 
 // The map stands in as a surface to tap, remembering where it was last told to centre.
@@ -108,6 +109,29 @@ describe("trip mode", () => {
     await click("Undo");
     expect(record).toHaveBeenLastCalledWith(expect.any(String), "2026-12-24", undefined);
     expect(container.querySelector(".trip-card")?.textContent).toContain("Sango Coffee");
+  });
+
+  it("shows the day's weather and offers to swap a visit rain threatens", async () => {
+    const { amsterdam, cities, plans } = journey();
+    const museum = amsterdam.stops[1];
+    const snapshot = plans[amsterdam.id].snapshot!;
+    // The museum as a park, with rain likely from 11:00.
+    const outdoors = { ...plans, [amsterdam.id]: { ...plans[amsterdam.id], snapshot: { ...snapshot, places: { ...snapshot.places, [museum.id]: { ...snapshot.places[museum.id], types: ["park"] } } } } };
+    const forecast = parseForecast({
+      daily: { time: ["2026-12-24"], weather_code: [63], temperature_2m_max: [6], temperature_2m_min: [2], precipitation_probability_max: [70] },
+      hourly: { time: ["09", "10", "11", "12"].map((hour) => `2026-12-24T${hour}:00`), precipitation_probability: [10, 10, 70, 70] },
+    }, "Europe/Amsterdam", 1);
+    const onSwap = vi.fn();
+    await act(async () => root.render(createElement(TripMode, { title: "Amsterdam", cities, plans: outdoors, canTrack: true, onClose: vi.fn(), forecasts: { [amsterdam.id]: forecast }, onSwap })));
+    expect(container.querySelector(".trip-mode-day .weather")?.textContent).toBe("6°2°");
+    // The coffee comes first, indoors; the timeline shows the rain on the museum.
+    expect(container.querySelector(".trip-card .rain-warning")).toBeNull();
+    expect(container.querySelector(".trip-timeline .rain-warning")?.textContent).toBe("70% rain");
+    expect(text()).toContain("Weather: Open-Meteo");
+    await act(async () => container.querySelectorAll<HTMLButtonElement>(".trip-timeline .itinerary-stop")[1].click());
+    expect(container.querySelector(".trip-card .rain-warning")?.textContent).toBe("70% rainSwap?");
+    await click("Swap?");
+    expect(onSwap).toHaveBeenCalledWith(amsterdam.id, 0, museum.id);
   });
 
   it("opens a visit's ticket from its card and the train's from the timeline", async () => {

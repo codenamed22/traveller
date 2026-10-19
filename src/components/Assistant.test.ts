@@ -124,6 +124,23 @@ describe("trip assistant panel", () => {
     expect(body.messages.at(-1).parts).toEqual([{ type: "text", text: "Plan my days failed for Amsterdam: Day 2 is full." }]);
   });
 
+  it("opens with a message filled in but not sent, such as swapping a visit rain threatens", async () => {
+    const fetch = vi.fn(async () => new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" } }));
+    vi.stubGlobal("fetch", fetch);
+    const handle = createRef<AssistantHandle>();
+    await renderAssistant({ ref: handle });
+    await act(async () => handle.current!.prefill("Rain is likely at Vondelpark on Day 1 (80%). Swap it for something indoors?"));
+    expect(container.querySelector(".assistant-panel")?.className).toContain("open");
+    await click(button("I agree, start chatting"));
+    await settle();
+    expect(fetch).not.toHaveBeenCalled();
+    // Sent as it stands once the traveller sends it.
+    await act(async () => (container.querySelector(".assistant-input") as HTMLFormElement).dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    const body = JSON.parse(String((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body));
+    expect(body.messages.at(-1).parts).toEqual([{ type: "text", text: "Rain is likely at Vondelpark on Day 1 (80%). Swap it for something indoors?" }]);
+  });
+
   it("says so when a reply ends with nothing to show", async () => {
     stored["traveller.assistant.consent"] = "1";
     const chunks = [{ type: "start" }, { type: "tool-input-available", toolCallId: "c", toolName: "propose_changes", input: {} }, { type: "tool-output-available", toolCallId: "c", output: { ...proposal, ok: false, errors: ["Nope"] } }, { type: "finish" }];

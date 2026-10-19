@@ -25,7 +25,7 @@ import { asJourney, cityPreset, duplicateJourney, journeySchema, popularCities, 
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 import { alternativeGroups } from "@/lib/visit-slots";
-import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, plannedStopIds, provisionalPlanSchema, tripDate, tripSchema, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
+import { changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, plannedStopIds, provisionalPlanSchema, tripDate, tripSchema, instantForMinute, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
@@ -35,6 +35,9 @@ import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
 import { nativeStore, nativeTripMode } from "@/lib/native-trip-mode";
 import { createNativeApi, type NativeApi } from "./nativeApi";
+import { loadForecasts, useForecasts } from "./useForecasts";
+import { RainWarning, WeatherBadge, WeatherCredit } from "./Weather";
+import { rainWarningFor, swapPrompt } from "@/lib/weather";
 import { fetchPlacePhoto } from "./usePlacePhotos";
 import { applyOperations, type Operation } from "@/lib/assistant-ops";
 import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant";
@@ -124,6 +127,8 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const ticketsSaved = canUseServices && revision > 0;
   const [tickets, setTickets] = useState<{ tripId: string; list: Ticket[] }>({ tripId: "", list: [] });
   const tripTickets = tickets.tripId === journey.id ? tickets.list : [];
+  const forecasts = useForecasts(journey.cities, journey.plans);
+  const canSwap = Boolean(canUseServices && config.assistant);
   // Autosave skips a trip that doesn't check out; say why, or edits quietly stop being saved.
   const saveBlocker = canUseServices && snapshot !== savedFor ? journeySchema.safeParse(journey).error?.issues[0]?.message : undefined;
   const canPlan = canUseServices && config.routes;
@@ -167,7 +172,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     return () => { clearInterval(timer); window.removeEventListener("online", retry); };
   }, [offlineSave]);
   // Native trip mode redraws from a fresh snapshot whenever the trip changes, such as after Done.
-  useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey, tickets]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (nativeOpen.current) postToApp("travellerTripMode", { type: "update", snapshot: nativeSnapshot() }); }, [journey, tickets, forecasts]); // eslint-disable-line react-hooks/exhaustive-deps
   // The app keeps each trip it's seen, for leave reminders, and needs to know which trip this page holds; it gets the
   // trip shortly after each change, planned or not.
   // `saved` says the trip as sent is saved, so the app can let go of changes it kept on the phone until then.
@@ -176,7 +181,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     const saved = !canUseServices || snapshot === savedFor;
     const timer = setTimeout(() => postToApp("travellerTripMode", { type: "sync", snapshot: nativeSnapshot(), saved }), 2000);
     return () => clearTimeout(timer);
-  }, [journey, savedFor, tickets]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [journey, savedFor, tickets, forecasts]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!ticketsSaved) return;
     const tripId = journey.id;
@@ -195,7 +200,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       last = Date.now();
       try {
         const response: { trips: SavedTrip[]; tickets?: Ticket[] } = await requestJson("/api/trips", undefined, "GET");
-        postToApp("travellerTripMode", { type: "store", ...nativeStore(response.trips, heldJourney.current, Temporal.Now.instant(), response.tickets) });
+        const journeys = response.trips.flatMap((entry) => { const parsed = journeySchema.safeParse(asJourney(entry.data, entry.plan)); return parsed.success ? [parsed.data] : []; });
+        const forecasts = Object.assign({}, ...await Promise.all(journeys.map((stored) => loadForecasts(stored.cities, stored.plans))));
+        postToApp("travellerTripMode", { type: "store", ...nativeStore(response.trips, heldJourney.current, Temporal.Now.instant(), response.tickets, forecasts) });
       } catch { last = 0; }
     };
     void store();
@@ -210,6 +217,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       journey, recordProgress: recordCityProgress,
       adjustToday(cityId, targetDay) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
       opened() { nativeOpen.current = true; },
+      ...(canSwap ? { swap(cityId: string, targetDay: number, stopId: string) { nativeOpen.current = false; swapVisit(cityId, targetDay, stopId); } } : {}),
       closed() { nativeOpen.current = false; leaveTripMode(); },
       ...(canLoadPhotos ? { photo: (placeId: string, index: number) => fetchPlacePhoto(placeId, index) } : {}),
       // The status too, so the app tells a refusal (keep no longer) from no connection (fetch throws; try again later).
@@ -260,6 +268,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const itineraryPlaces = savedRecovery?.places ?? savedPlan?.snapshot?.places ?? places;
   const recoveryOrigin = checkedDay?.origin ?? savedRecovery?.origin;
   const recoveryPlaces = recoveryOrigin ? { ...(checkedDay ? places : itineraryPlaces), current: { id: recoveryOrigin.location ? "" : itineraryPlaces[recoveryOrigin.id]?.id ?? "", name: recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name ?? "Current location", address: "", location: recoveryOrigin.location ?? itineraryPlaces[recoveryOrigin.id]?.location ?? { lat: 0, lng: 0 } } } : itineraryPlaces;
+  // Rain likely during an outdoor visit on the day shown.
+  const rainAt = (stop: Stop, visit: { start: number; end: number }) => {
+    try { return rainWarningFor(forecasts[trip.id], itineraryTrip, stop, recoveryPlaces[stop.id], instantForMinute(itineraryTrip, day, visit.start).epochMilliseconds, instantForMinute(itineraryTrip, day, visit.end).epochMilliseconds); } catch { return undefined; }
+  };
   const photoPlaces = tab === "itinerary" ? recoveryPlaces : places;
   const photoTrip = tab === "itinerary" ? itineraryTrip : trip;
   const photoStop = selected ? photoTrip.stops.find((stop) => stop.id === selected) : undefined;
@@ -551,7 +563,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
   // In the iPhone app trip mode is native. It gets the trip as a snapshot and calls back here to record progress, so this
   // page stays the only place that saves the trip.
-  const nativeSnapshot = () => nativeTripMode(journey, Temporal.Now.instant(), { start: { cityId: trip.id, day }, canTrack: true, photos: canLoadPhotos, tickets: tripTickets });
+  const nativeSnapshot = () => nativeTripMode(journey, Temporal.Now.instant(), { start: { cityId: trip.id, day }, canTrack: true, photos: canLoadPhotos, tickets: tripTickets, forecasts, swap: canSwap });
   const ticketField = (place: TicketPlace) => ticketsSaved && <Tickets tripId={journey.id} place={place} tickets={ticketsFor(tripTickets, place)}
     onAdd={(ticket) => setTickets((current) => ({ tripId: ticket.tripId, list: [...(current.tripId === ticket.tripId ? current.list : []), ticket] }))}
     onRemove={(id) => setTickets((current) => ({ ...current, list: current.list.filter((ticket) => ticket.id !== id) }))} />;
@@ -559,6 +571,21 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     if (!inApp()) { setTripMode(true); return; }
     nativeOpen.current = true;
     postToApp("travellerTripMode", { type: "open", snapshot: nativeSnapshot() });
+  }
+
+  // Rain on an outdoor visit: the agent opens on that day with the swap asked for, not yet sent.
+  function swapVisit(cityId: string, targetDay: number, stopId: string) {
+    const city = journey.cities.find((entry) => entry.id === cityId);
+    const snapshot = journey.plans[cityId]?.snapshot;
+    const planned = snapshot?.trip ?? city;
+    const stop = planned?.stops.find((entry) => entry.id === stopId);
+    if (!city || !planned || !stop) return;
+    const visit = snapshot?.schedule.days.find((entry) => entry.day === targetDay)?.visits.find((entry) => entry.stopId === stopId);
+    let chance: number | undefined;
+    try { if (visit) chance = rainWarningFor(forecasts[cityId], planned, stop, snapshot?.places[stopId], instantForMinute(planned, targetDay, visit.start).epochMilliseconds, instantForMinute(planned, targetDay, visit.end).epochMilliseconds); } catch { chance = undefined; }
+    if (cityId !== trip.id) switchCity(cityId);
+    setDay(targetDay); setTab("itinerary");
+    assistant.current?.prefill(swapPrompt(stop.name, `Day ${targetDay + 1}${journey.cities.length > 1 ? ` in ${city.city}` : ""}`, chance));
   }
 
   // A planning failure goes to the assistant as the traveller's own message, once the dialog is out of the way.
@@ -605,7 +632,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
         delete cityViews.current[trip.id];
       }}><Trash2 size={15} /></button>}</div></div>
 
-      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day" ref={dayTabs}>{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => setDay(index)}><span>Day {index + 1}</span><small>{trip.startDate ? shortDate(tripDate(trip, index)) : ""}</small></button>)}{trip.days < 7 && <button className="add-day" aria-label="Add a day" title={trip.startDate ? `Add ${shortDate(tripDate(trip, trip.days))}` : "Add a day"} disabled={Boolean(busy)} onClick={addDay}><span><Plus size={14} />Add day</span></button>}</div><div className="toolbar-right">{tripModeReady && <button className="button secondary small trip-mode-button" onClick={() => setTripMode(true)}><Navigation size={15} />Trip mode</button>}<span className="quiet desktop-only">{trip.stops.length} places · {trip.stops.filter((stop) => stop.fixedTime).length} bookings</span><div className="segmented mobile-tabs"><button aria-pressed={view === "list"} onClick={() => setView("list")}><List size={16} />List</button><button aria-pressed={view === "map"} onClick={() => setView("map")}><Map size={16} />Map</button></div></div></div>
+      <div className="workspace-toolbar"><div className="day-tabs" aria-label="Sightseeing day" ref={dayTabs}>{Array.from({ length: trip.days }, (_, index) => <button key={index} aria-pressed={day === index} onClick={() => setDay(index)}><span>Day {index + 1}</span><small>{trip.startDate ? shortDate(tripDate(trip, index)) : ""}{trip.startDate && forecasts[trip.id]?.days[tripDate(trip, index)] && <WeatherBadge weather={forecasts[trip.id].days[tripDate(trip, index)]} />}</small></button>)}{trip.days < 7 && <button className="add-day" aria-label="Add a day" title={trip.startDate ? `Add ${shortDate(tripDate(trip, trip.days))}` : "Add a day"} disabled={Boolean(busy)} onClick={addDay}><span><Plus size={14} />Add day</span></button>}</div><div className="toolbar-right">{tripModeReady && <button className="button secondary small trip-mode-button" onClick={() => setTripMode(true)}><Navigation size={15} />Trip mode</button>}<span className="quiet desktop-only">{trip.stops.length} places · {trip.stops.filter((stop) => stop.fixedTime).length} bookings</span><div className="segmented mobile-tabs"><button aria-pressed={view === "list"} onClick={() => setView("list")}><List size={16} />List</button><button aria-pressed={view === "map"} onClick={() => setView("map")}><Map size={16} />Map</button></div></div></div>
 
       <div className={`workspace mobile-view-${view}`}>
         <section className="planning-panel" aria-label="Trip editor">
@@ -685,13 +712,13 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
                 const stop = itineraryTrip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
                 const alternatives = stop.alternativeGroup ? currentDay.visits.filter((other) => other.stopId !== stop.id && itineraryTrip.stops.find((entry) => entry.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => itineraryTrip.stops.find((entry) => entry.id === other.stopId)!.name) : [];
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(trip.stops.find((entry) => entry.id === stop.id) ?? stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}{trip.stops.find((entry) => entry.id === stop.id)?.note && <span className="stop-note">{trip.stops.find((entry) => entry.id === stop.id)!.note}</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}</div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(trip.stops.find((entry) => entry.id === stop.id) ?? stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}{trip.stops.find((entry) => entry.id === stop.id)?.note && <span className="stop-note">{trip.stops.find((entry) => entry.id === stop.id)!.note}</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{rainAt(stop, visit) !== undefined && <RainWarning chance={rainAt(stop, visit)!} onSwap={canSwap ? () => assistant.current?.prefill(swapPrompt(stop.name, `Day ${day + 1}`, rainAt(stop, visit))) : undefined} />}{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}</div>;
               })}
               {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={recoveryPlaces} endpointToDeparture={endpointKey(itineraryTrip, day, "hotel", "to") === "departure"} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{endpointKey(itineraryTrip, day, "hotel", "to") === "departure" ? `At ${itineraryTrip.departure!.place || "the station"}` : `Back to ${itineraryTrip.hotel}`}</strong><span>{formatMinute(itineraryTrip, day, (currentDay.visits.at(-1)?.end ?? (checkedDay || savedRecovery ? recoveryMinute(itineraryTrip, day, checkedDay?.departureAt ?? savedRecovery!.departureAt) : dayStart(itineraryTrip, day))) + currentDay.returnLeg.minutes)}</span></div></div></>}
               {day === itineraryTrip.days - 1 && itineraryTrip.departure && <TransferLine trip={itineraryTrip} kind="departure" />}
               {!currentDay?.visits.length && <p className="notice">No sights assigned to this day.</p>}
               {!checkedDay && result && <OmittedPlaces trip={trip} schedule={result.schedule} />}
-              <div className="route-notices">{!checkedDay && result?.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>Walking routes may lack clear sidewalks or pedestrian paths. Use caution.</p><span>Route information: Google Maps</span></div>
+              <div className="route-notices">{!checkedDay && result?.schedule.warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>Walking routes may lack clear sidewalks or pedestrian paths. Use caution.</p><span>Route information: Google Maps</span>{forecasts[trip.id] && <span><WeatherCredit /></span>}</div>
             </>}
           </div>}
         </section>
@@ -770,7 +797,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
     {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

@@ -172,6 +172,44 @@ describe("native trip mode in the iPhone app", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("shows each day's forecast and rain on outdoor visits, and gives both to the app", async () => {
+    // 10:00 in Amsterdam on Christmas Eve.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));
+    try {
+      const messages: { type: string; snapshot?: NativeTripMode }[] = [];
+      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });
+      const forecast = {
+        daily: { time: ["2026-12-24"], weather_code: [63], temperature_2m_max: [6.2], temperature_2m_min: [1.8], precipitation_probability_max: [80] },
+        hourly: { time: ["2026-12-24T09:00", "2026-12-24T10:00"], precipitation_probability: [80, 60] },
+      };
+      const asked: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url.startsWith("https://api.open-meteo.com/")) { asked.push(url); return Response.json(forecast); }
+        return Response.json({ revision: 2, trips: [] });
+      }));
+      const { coffee, amsterdam, entry } = planned();
+      // A walk in the park instead of coffee.
+      const park = { ...coffee, name: "Vondelpark" };
+      const outdoors = { ...entry, data: { ...entry.data, cities: [{ ...amsterdam, stops: [park] }], plans: Object.fromEntries(Object.entries(entry.data.plans).map(([id, plan]) => [id, { ...plan, snapshot: { ...plan.snapshot!, trip: { ...plan.snapshot!.trip, stops: [park] } } }])) } };
+      await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: outdoors, initialList: null, config } as never)));
+      await settle();
+      // Asked once, at the hotel, in the city's time zone.
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("latitude=52.370&longitude=4.890&timezone=Europe%2FAmsterdam");
+      expect(container.querySelector(".day-tabs .weather")?.textContent).toBe("6°");
+      await act(async () => [...container.querySelectorAll("button")].find((candidate) => candidate.textContent?.startsWith("Itinerary"))!.click());
+      // No agent here, so no Swap.
+      expect(container.querySelector(".itinerary-content .rain-warning")?.textContent).toBe("80% rain");
+      expect(container.querySelector(".route-notices")?.textContent).toContain("Weather: Open-Meteo");
+
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+      const sent = messages.filter((message) => message.type === "sync").at(-1)!.snapshot!;
+      expect(sent.days[0].weather).toEqual({ label: "Rain", icon: "rain", max: 6, min: 2, rain: 80 });
+      expect(sent.days[0].visits[0].rain).toBe(80);
+      expect(sent.swap).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("tells the app when the trip is saved, saves again once the connection is back, and sends every other trip", async () => {
     // 10:00 in Amsterdam on Christmas Eve.
     vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));

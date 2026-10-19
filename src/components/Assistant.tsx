@@ -19,7 +19,8 @@ type Props = {
   ref?: Ref<AssistantHandle>;
 };
 // Sends a message for the traveller, such as a planning failure: it opens the panel and sends once consent is given.
-export type AssistantHandle = { ask: (text: string) => void };
+// `ask` sends at once; `prefill` opens with the text in the box, for the traveller to send or change.
+export type AssistantHandle = { ask: (text: string) => void; prefill: (text: string) => void };
 
 // Bump the version when what the assistant shares changes, so everyone is asked again.
 const consentKey = "traveller.assistant.consent";
@@ -99,10 +100,15 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
     clearError(); setInput("");
     void sendMessage({ text: message.slice(0, 2000) }, context());
   }
-  useImperativeHandle(ref, () => ({ ask(text: string) {
-    show();
-    if (hasConsent()) send(text); else pending.current = text;
-  } }));
+  useImperativeHandle(ref, () => ({
+    ask(text: string) {
+      show();
+      if (hasConsent()) send(text); else pending.current = text;
+    },
+    prefill(text: string) {
+      show(); setInput(text.slice(0, 2000));
+    },
+  }));
   function submit(event: FormEvent) { event.preventDefault(); send(input); }
   function apply(id: string, proposal: ProposalOutput) {
     const outcome = onApply(proposal.operations);

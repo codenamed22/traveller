@@ -169,6 +169,15 @@ Notes copied from an original itinerary drop their own clock-time lines (for exa
 - The phone's back button or gesture closes the menu first, then trip mode; ✕ and **Exit trip mode** do the same. Adding `#trip` to a link opens it straight into trip mode, including shared trips (`/shared/<trip id>#trip`); viewers of a shared trip get everything except Done and Skip.
 - Tapping a place shows its Google photos, one at a time as you swipe, as in the planner (owners only; each photo is a paid Places call that counts toward the daily allowance). Otherwise trip mode makes no paid calls; route lines and times are the accepted plan's. A city edited since its plan is marked out of date, and a day replanned through Today shows the updated day.
 
+### Weather
+
+Each city with a day in the next 16 days gets a forecast from [Open-Meteo](https://open-meteo.com/) (free, no key), asked about at the hotel, or the middle of the city's places when there's no hotel yet. The browser fetches it directly, at most once an hour per city (kept in session storage), so the server never calls Open-Meteo and nothing is saved with the trip.
+- Day tabs and the trip mode header show the day's icon and high (and low in trip mode).
+- An outdoor visit with a 50% or higher chance of rain during its hours shows "70% rain". Outdoor means a walk, or a sight or activity whose Google place type or name says park, garden, zoo, market, viewpoint, beach, fort, boat, bike or walking tour; meals, coffee and nightlife never count.
+- **Swap?** (signed-in editors with the assistant) opens the assistant on that day with "Rain is likely at … Swap it for something indoors?" filled in, not sent.
+- "Weather: Open-Meteo" is credited under the itinerary and at the end of trip mode's day. Open-Meteo's free tier is for non-commercial use.
+- The iPhone app gets the same forecast and rain warnings in its snapshots, so they show without a connection (as of the last time the page sent the trip).
+
 ### Trip Assistant
 
 Editors with OpenRouter configured get a small tab on the right edge of the planner and of trip mode. Tap it, or drag it left, to open a chat that answers questions about the trip ("What's next?", "What could I still fit in?") and suggests small changes ("Fit Rum Baba in on day 3", "Move dinner to 20:00", "I've finished the museum").

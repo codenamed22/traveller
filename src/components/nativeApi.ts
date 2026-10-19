@@ -5,7 +5,7 @@ import { applyNativeAction, type NativeAction } from "@/lib/native-actions";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap"];
 
 type Deps = {
   journey: Journey;
@@ -15,6 +15,7 @@ type Deps = {
   closed: () => void;
   photo?: (placeId: string, index: number) => Promise<unknown>;
   send?: (journeyId: string, actions: unknown[]) => Promise<unknown>;
+  swap?: (cityId: string, day: number, stopId: string) => void;
   now?: () => Temporal.Instant;
 };
 
@@ -58,7 +59,7 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, now: clock = () => Temporal.Now.instant() }: Deps) {
   function apply(action: NativeAction) {
     const change = applyNativeAction(journey, action, clock());
     if (!change.changed) return change.message;
@@ -98,6 +99,13 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
       return true;
     },
     adjustToday,
+    // Rain on an outdoor visit: the agent, with a swap for something indoors asked for but not sent. The app closes
+    // trip mode first, as for adjustToday.
+    swap(cityId: string, day: number, stopId: string) {
+      if (!swap) return false;
+      swap(cityId, day, stopId);
+      return true;
+    },
     // Trip mode opened by the app itself, such as from a reminder; the page sends it updates from now on.
     opened,
     closed,

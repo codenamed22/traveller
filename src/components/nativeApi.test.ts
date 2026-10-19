@@ -49,6 +49,17 @@ describe("the page's calls for the iPhone app", () => {
     expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset", "opened", "send"]));
   });
 
+  it("asks the agent to swap a visit when the page can", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const createNativeApi = await load();
+    const swap = vi.fn();
+    const native = createNativeApi({ journey, recordProgress() {}, adjustToday() {}, opened() {}, closed() {}, swap });
+    expect(native.features).toContain("swap");
+    expect(native.swap(amsterdam.id, 0, coffee.id)).toBe(true);
+    expect(swap).toHaveBeenCalledWith(amsterdam.id, 0, coffee.id);
+    expect(api(createNativeApi, journey).native.swap(amsterdam.id, 0, coffee.id)).toBe(false);
+  });
+
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {
     const { journey, amsterdam, coffee } = fixture();
     const { native, recorded } = api(await load(), journey);
