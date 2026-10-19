@@ -35,6 +35,11 @@ input::placeholder, textarea::placeholder { color: #959e96; }
 textarea { resize: vertical; line-height: 1.6; }
 input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; min-height: 15px; flex: 0 0 15px; }
 input[type="date"], input[type="time"] { color-scheme: light; }
+/* iOS draws date and time inputs taller and wider than their column, with the value centred; size them like the rest. */
+@supports (-webkit-touch-callout: none) {
+	input[type="date"], input[type="time"] { -webkit-appearance: none; appearance: none; display: block; }
+	input::-webkit-date-and-time-value { text-align: left; margin: 0; }
+}
 .app-header { height: 68px; padding: 0 32px; display: flex; align-items: center; gap: 52px; background: var(--paper); border-bottom: 1px solid var(--line); }
 .brand { color: var(--ink); display: inline-flex; align-items: center; text-decoration: none; font-size: 24px; font-weight: 600; gap: 9px; white-space: nowrap; }
 .brand-mark { display: flex; align-items: center; color: var(--green); }
