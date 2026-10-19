@@ -2,6 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 import { newTrip, savedPlanSchema, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
 import { dayProgressSchema } from "./day-recovery";
+import { journalSchema } from "./journal";
 
 export { savedPlanSchema } from "./trip";
 
@@ -32,6 +33,7 @@ export const journeySchema = z.object({
   cities: z.array(cityTripSchema).min(1).max(10),
   plans: z.record(z.uuid(), savedPlanSchema).default({}),
   execution: z.record(z.uuid(), z.record(z.iso.date(), dayProgressSchema)).optional(),
+  journal: journalSchema.optional(),
 }).strict().superRefine((journey, context) => {
   if (new Set(journey.cities.map((city) => city.id)).size !== journey.cities.length) context.addIssue({ code: "custom", message: "City visit identifiers must be unique.", path: ["cities"] });
   journey.cities.forEach((city, index) => {
@@ -99,10 +101,10 @@ export function restoreJourney(value: unknown): Journey {
   return { ...journey, id: crypto.randomUUID() };
 }
 
-// A copy to plan another version of a trip: the same cities, places and itineraries, without what was done on the way.
-// City ids stay, as in a restored backup, so each itinerary still belongs to its city.
+// A copy to plan another version of a trip: the same cities, places and itineraries, without what was done or written on
+// the way. City ids stay, as in a restored backup, so each itinerary still belongs to its city.
 export function duplicateJourney(journey: Journey): Journey {
-  const { execution: _execution, ...rest } = journey;
-  void _execution;
+  const { execution: _execution, journal: _journal, ...rest } = journey;
+  void _execution; void _journal;
   return journeySchema.parse({ ...rest, id: crypto.randomUUID(), title: `${journey.title.slice(0, 143)} (copy)` });
 }

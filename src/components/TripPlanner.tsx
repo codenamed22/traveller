@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowDown, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, Compass, Copy, Download, Eye, FileInput, Navigation, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Star, Trash2, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, Compass, Copy, Download, Eye, FileInput, Navigation, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Star, Trash2, UserRound, X } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
@@ -21,6 +21,7 @@ import { ExportMenu } from "./ExportMenu";
 import { applyDayRecovery, newDayProgress, recoveryMinute, recoveryPlanKey, remainingIds, validateDayRecovery, type CheckedNextRoute, type DayProgress, type RecoveryRequest } from "@/lib/day-recovery";
 import { duplicateStopPairs, mergeReviewedDuplicate } from "@/lib/duplicates";
 import type { ExtractionServices } from "@/lib/import";
+import { applyJournalAction, withJournal, type JournalAction } from "@/lib/journal";
 import { asJourney, cityPreset, duplicateJourney, journeySchema, popularCities, restoreJourney, type Journey, type StoredTrip } from "@/lib/journey";
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
@@ -30,6 +31,8 @@ import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { ShareTrip } from "./ShareTrip";
 import { TripMode } from "./TripMode";
+import { RecapDialog } from "./Recap";
+import { hasRecap } from "@/lib/recap";
 import { tripModeDays } from "@/lib/trip-mode";
 import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
@@ -104,6 +107,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [savedTrips, setSavedTrips] = useState<SavedTrip[] | null>(initialList);
   // Which saved trips are shared for viewing, by trip id.
   const [tripMode, setTripMode] = useState(false);
+  const [recapOpen, setRecapOpen] = useState(false);
   const [tripExit, setTripExit] = useState(0);
   const nativeOpen = useRef(false);
   const replanAfterTrip = useRef<string | null>(null);
@@ -214,7 +218,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     if (!inApp()) return;
     const target = window as unknown as { travellerNative?: NativeApi };
     target.travellerNative = createNativeApi({
-      journey, recordProgress: recordCityProgress,
+      journey, recordProgress: recordCityProgress, recordJournal,
       adjustToday(cityId, targetDay) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
       opened() { nativeOpen.current = true; },
       ...(canSwap ? { swap(cityId: string, targetDay: number, stopId: string) { nativeOpen.current = false; swapVisit(cityId, targetDay, stopId); } } : {}),
@@ -257,7 +261,14 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       return { ...current, execution: { ...current.execution, [cityId]: city } };
     });
   }
+  // A note or favourite from trip mode, the recap or the app, applied to the trip as it is by then.
+  function recordJournal(action: JournalAction) {
+    setJourney((current) => {
+      try { const change = applyJournalAction(current, action); return withJournal(current, change.cityId, change.date, change.entry); } catch { return current; }
+    });
+  }
   const tripModeReady = journey.cities.some((city) => journey.plans[city.id]?.snapshot);
+  const recapReady = useMemo(() => tripModeReady && hasRecap(journey, now), [tripModeReady, journey, now]);
   const todayInTrip = useMemo(() => tripModeReady && tripModeDays(journey.cities, journey.plans, journey.execution, now).some((entry) => entry.isToday), [tripModeReady, journey, now]);
   const mapSchedule = tab === "places" ? null : checkedDay ? { generatedAt: checkedDay.checkedAt, warnings: [], omitted: [], days: [checkedDay.day] } : savedRecovery ? { generatedAt: savedRecovery.checkedAt, warnings: [], omitted: [], days: [savedRecovery.day] } : execution ? null : result?.schedule ?? null;
   const markerOrder = tab === "places"
@@ -595,9 +606,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
 
   function loadSaved(entry: SavedTrip) {
-    if (!confirmDiscard()) return;
+    if (!confirmDiscard()) return false;
     openJourney(journeySchema.parse(asJourney(entry.data, entry.plan)), entry.revision, true);
     setNotice("Trip loaded. Saved routes are not a live travel check.");
+    return true;
   }
 
   function download() {
@@ -619,7 +631,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     <main className="planner-main">
       <section className="trip-heading">
         <div className="trip-identity"><span className="eyebrow">{journey.cities.length > 1 ? "MULTI-CITY TRIP" : "CITY ITINERARY"}</span><input className="trip-title" aria-label="Trip name" value={journey.title} maxLength={150} onChange={(event) => setJourney((current) => ({ ...current, title: event.target.value }))} /><div className="trip-meta"><span><MapPin size={13} />{journey.cities.length > 1 ? `${journey.cities.length} cities` : trip.city || "Choose a city"}</span><span><CalendarDays size={13} />{journey.cities.reduce((sum, city) => sum + city.days, 0)} city days</span><span className={`save-state ${snapshot === savedFor ? "saved" : saveBlocker ? "blocked" : ""}`} title={saveBlocker}>{snapshot === savedFor ? "Saved" : saveBlocker ? "Not saved" : "Unsaved draft"}</span></div></div>
-        <div className="trip-actions"><button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} />{canUseServices && <ShareTrip tripId={journey.id} shared={Boolean(shared[journey.id])} disabled={Boolean(busy) || revision === 0} onChange={(value) => setShared((current) => ({ ...current, [journey.id]: value }))} />}<button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
+        <div className="trip-actions">{recapReady && <button className="icon-button" title="Recap" aria-label="Trip recap" onClick={() => setRecapOpen(true)}><BookOpen size={18} /></button>}<button className="icon-button" title="Download trip backup" aria-label="Download trip backup" onClick={download}><Download size={18} /></button><ExportMenu journey={journey} />{canUseServices && <ShareTrip tripId={journey.id} shared={Boolean(shared[journey.id])} disabled={Boolean(busy) || revision === 0} onChange={(value) => setShared((current) => ({ ...current, [journey.id]: value }))} />}<button className="button secondary" disabled={Boolean(busy)} onClick={() => void save()}><Save size={16} /><span>Save trip</span></button><button className="button primary" disabled={Boolean(busy) || !trip.stops.length} onClick={() => setPlanningOpen(true)}>{busy === "Planning your days" ? <LoaderCircle size={16} className="spin" /> : <Route size={16} />}<span>{busy === "Planning your days" ? "Planning..." : "Plan my days"}</span></button></div>
       </section>
 
       {saveBlocker && <div className="banner warning" role="status"><span>Not saved: {saveBlocker}</span></div>}
@@ -628,7 +640,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       <div className="journey-cities"><div className="city-tabs" aria-label="Trip cities">{journey.cities.map((city) => <button key={city.id} disabled={Boolean(busy)} aria-pressed={trip.id === city.id} onClick={() => switchCity(city.id)}><MapPin size={15} /><span><strong>{city.city || "First city"}</strong><small>{city.startDate} to {tripDate(city, city.days - 1)}</small></span></button>)}</div><div className="row"><button className="text-button" disabled={Boolean(busy) || journey.cities.length >= 10} onClick={() => setSetup(journey.cities.length === 1 && !trip.city.trim() ? "new" : "add")}><Plus size={15} />Add cities</button>{journey.cities.length > 1 && <button className="icon-button danger" title="Remove current city" aria-label="Remove current city" disabled={Boolean(busy)} onClick={() => {
         if (!window.confirm(`Remove ${trip.city} and its places from this trip?`)) return;
         const nextCity = journey.cities.find((city) => city.id !== trip.id)!; switchCity(nextCity.id);
-        setJourney((current) => { const plans = { ...current.plans }; const execution = { ...current.execution }; delete plans[trip.id]; delete execution[trip.id]; return { ...current, cities: current.cities.filter((city) => city.id !== trip.id), plans, execution }; });
+        setJourney((current) => { const plans = { ...current.plans }; const execution = { ...current.execution }; const journal = { ...current.journal }; delete plans[trip.id]; delete execution[trip.id]; delete journal[trip.id]; return { ...current, cities: current.cities.filter((city) => city.id !== trip.id), plans, execution, journal }; });
         delete cityViews.current[trip.id];
       }}><Trash2 size={15} /></button>}</div></div>
 
@@ -774,7 +786,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     }} />}
     {search && <Dialog title={search.id === "hotel" ? "Find your hotel" : search.id === "departure" || search.id === "arrival" ? "Find your airport or station" : "Confirm location"} onClose={() => setSearch(null)}><form className="search-form" onSubmit={(event) => { event.preventDefault(); void findPlaces(search.query); }}><label className="field grow">Place or address<input autoFocus disabled={Boolean(busy)} maxLength={350} value={search.query} onChange={(event) => { setSearch({ ...search, query: event.target.value }); setMatches([]); setHasSearched(false); }} /></label><button type="submit" className="button primary" disabled={Boolean(busy)}>{busy ? <LoaderCircle size={17} className="spin" /> : <Search size={17} />}Search</button></form>{error && <p className="notice error" role="alert">{error}</p>}{hasSearched && !matches.length && !error && <p className="notice">No matching places found. {search.id === "hotel" ? "Try the hotel's address or a more specific name." : "Add the street or neighbourhood, or a more specific name."}</p>}<div className="place-matches">{matches.map((place) => <button key={place.id} disabled={Boolean(busy)} onClick={() => void confirmPlace(place)}><MapPin size={19} /><span><strong>{place.name}</strong><small>{place.address}</small>{place.closed && <small className="place-closed">{place.closed === "permanently" ? "Permanently closed" : "Temporarily closed"}</small>}</span><ArrowUpRight size={17} /></button>)}</div><p className="provider-attribution">Google Maps</p></Dialog>}
     {settingsOpen && <Dialog title="Connections" onClose={() => setSettingsOpen(false)}><div className="connection-list">{[{ label: "Google sign-in", ready: config.auth }, { label: "Trip storage", ready: config.database }, { label: "Google Maps", ready: config.maps }, { label: "Place search and routes", ready: config.routes }, { label: "AI import", ready: config.ai }].map((service) => <div key={service.label}><span>{service.label}</span><span className={`service-state ${service.ready ? "ready" : ""}`}>{service.ready ? "Enabled" : "Not set up"}</span></div>)}</div><p className="notice">Do not include passwords or API keys in trips or uploaded documents.</p><div className="connection-limits"><ShieldCheck size={17} /><span>Restricted access · Usage limits apply</span></div><div className="dialog-actions"><button className="button secondary" disabled={Boolean(busy)} onClick={() => backupInput.current?.click()}><FileInput size={16} />Open backup</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => { setSettingsOpen(false); setSetup("new"); }}><Plus size={16} />New trip</button>{!config.email && <button className="button primary" disabled={!config.auth} onClick={() => void signIn("google")}><UserRound size={16} />Sign in</button>}</div></Dialog>}
-    {savedTrips && <Dialog title="My trips" onClose={() => setSavedTrips(null)}><div className="saved-trips">{savedTrips.length ? savedTrips.map((entry) => <div key={entry.data.id}><button className="saved-trip" disabled={Boolean(busy)} aria-current={entry.data.id === journey.id || undefined} onClick={() => entry.data.id === journey.id ? setSavedTrips(null) : loadSaved(entry)}><span className="saved-trip-icon"><MapPin size={22} /></span><span><strong>{entry.data.title}</strong><small>{asJourney(entry.data).cities.map((city) => city.city).join(" / ")} · {asJourney(entry.data).cities[0].startDate}</small></span>{entry.data.id === journey.id ? <span className="saved-trip-current">Open now</span> : <ArrowUpRight size={17} />}</button><button className="icon-button" title={`Duplicate ${entry.data.title}`} aria-label={`Duplicate ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => void perform("Duplicating trip", async () => {
+    {savedTrips && <Dialog title="My trips" onClose={() => setSavedTrips(null)}><div className="saved-trips">{savedTrips.length ? savedTrips.map((entry) => <div key={entry.data.id}><button className="saved-trip" disabled={Boolean(busy)} aria-current={entry.data.id === journey.id || undefined} onClick={() => entry.data.id === journey.id ? setSavedTrips(null) : loadSaved(entry)}><span className="saved-trip-icon"><MapPin size={22} /></span><span><strong>{entry.data.title}</strong><small>{asJourney(entry.data).cities.map((city) => city.city).join(" / ")} · {asJourney(entry.data).cities[0].startDate}</small></span>{entry.data.id === journey.id ? <span className="saved-trip-current">Open now</span> : <ArrowUpRight size={17} />}</button>{hasRecap(asJourney(entry.data, entry.plan), now) && <button className="icon-button" title={`Recap of ${entry.data.title}`} aria-label={`Recap of ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => { if (entry.data.id === journey.id) { setSavedTrips(null); setRecapOpen(true); } else if (loadSaved(entry)) setRecapOpen(true); }}><BookOpen size={17} /></button>}<button className="icon-button" title={`Duplicate ${entry.data.title}`} aria-label={`Duplicate ${entry.data.title}`} disabled={Boolean(busy)} onClick={() => void perform("Duplicating trip", async () => {
       const copy = duplicateJourney(journeySchema.parse(asJourney(entry.data, entry.plan)));
       const response = await requestJson(`/api/trips/${copy.id}`, { journey: copy, revision: 0 }, "PUT");
       setSavedTrips((current) => [{ data: copy, revision: response.revision, plan: null, updatedAt: new Date().toISOString() }, ...(current ?? [])]);
@@ -796,8 +808,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       setLiveDay({ cityId: trip.id, version: next.version, planKey: next.planKey, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin });
       setNotice("Today's plan updated. Other days are unchanged.");
     }} />}
+    {recapOpen && <RecapDialog journey={journey} now={now} onJournal={recordJournal} onClose={() => setRecapOpen(false)} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} journal={journey.journal} onJournal={recordJournal} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
     {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

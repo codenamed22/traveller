@@ -54,6 +54,19 @@ describe("changes saved on the phone, sent later", () => {
     expect(new PgDialect().sqlToQuery(mocks.where.mock.calls[0][0]).params).toEqual([journey.id, "owner@example.com", 4]);
   });
 
+  it("keeps the day's note and favourites written on the phone", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    mocks.limit.mockResolvedValue([{ data: journey, plan: null, revision: 4 }]);
+    mocks.returning.mockResolvedValue([{ revision: 5 }]);
+    const response = await send(journey.id, { actions: [
+      { kind: "note", cityId: amsterdam.id, day: 0, text: "Snow on the canals" },
+      { kind: "favourite", cityId: amsterdam.id, day: 0, stopId: coffee.id, on: true },
+      { kind: "favourite", cityId: amsterdam.id, day: 0, stopId: crypto.randomUUID(), on: true },
+    ] });
+    expect(await response.json()).toEqual({ revision: 5, results: [{ ok: true, message: "Note saved" }, { ok: true, message: "Sango Coffee added to favourites" }, { ok: false, message: "That visit isn't in this trip." }] });
+    expect(mocks.set.mock.calls[0][0].data.journal).toEqual({ [amsterdam.id]: { "2026-12-24": { note: "Snow on the canals", favourites: [coffee.id] } } });
+  });
+
   it("says which it couldn't keep, and saves nothing when nothing changed", async () => {
     const { journey, amsterdam, coffee } = fixture();
     mocks.limit.mockResolvedValue([{ data: journey, plan: null, revision: 4 }]);

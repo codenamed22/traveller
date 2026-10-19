@@ -60,6 +60,23 @@ describe("the page's calls for the iPhone app", () => {
     expect(api(createNativeApi, journey).native.swap(amsterdam.id, 0, coffee.id)).toBe(false);
   });
 
+  it("keeps the day's note and favourites from the app's day sheet", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const createNativeApi = await load();
+    const recordJournal = vi.fn();
+    const native = createNativeApi({ journey, recordProgress() {}, adjustToday() {}, opened() {}, closed() {}, recordJournal });
+    expect(native.features).toContain("journal");
+    expect(native.journal(amsterdam.id, 0, { note: "Snow on the canals" })).toBe("Note saved");
+    expect(native.journal(amsterdam.id, 0, { stopId: coffee.id, favourite: true })).toBe("Sango Coffee added to favourites");
+    expect(recordJournal.mock.calls).toEqual([
+      [{ kind: "note", cityId: amsterdam.id, day: 0, text: "Snow on the canals" }],
+      [{ kind: "favourite", cityId: amsterdam.id, day: 0, stopId: coffee.id, on: true }],
+    ]);
+    expect(() => native.journal(amsterdam.id, 0, { stopId: coffee.id })).toThrow("That couldn't be saved.");
+    expect(() => native.journal(amsterdam.id, 3, { note: "x" })).toThrow("That day isn't in this trip.");
+    expect(() => api(createNativeApi, journey).native.journal(amsterdam.id, 0, { note: "x" })).toThrow("Saving is unavailable");
+  });
+
   it("records Done at the time the app tapped it, for a tap made without a connection", async () => {
     const { journey, amsterdam, coffee } = fixture();
     const { native, recorded } = api(await load(), journey);

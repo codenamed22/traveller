@@ -1,5 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { exportNote } from "./export";
+import { journalEntry } from "./journal";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
@@ -14,7 +15,8 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // time zone rules for its countdowns and reminders. `tickets` lists the trip's tickets without their files; the app
 // fetches and keeps each one so it opens without a connection. `weather` is the day's forecast and `rain` the chance of
 // rain during an outdoor visit, when it's worth a warning; `swap` says the page can ask the agent to swap such a visit
-// (`travellerNative.swap`).
+// (`travellerNative.swap`). `journal` says the traveller can keep a note for each day (`note`) and mark visits as
+// favourites (`favourite`), through `travellerNative.journal` or the progress route.
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: TravelEdge["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -23,18 +25,18 @@ export type NativeLeg = {
 export type NativeVisit = {
   stopId: string; name: string; placeId?: string; location?: LatLng; start: number; end: number; startLabel: string; endLabel: string;
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
-  alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number;
+  alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
 };
 type Line = { title: string; detail: string; at?: number; leaveAt?: number };
 export type NativeDay = {
   key: string; cityId: string; city: string; day: number; date: string; label: string; timeZone: string; startsAt: number; endsAt: number;
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
   summary: { stops: number; travel: string; leaveLabel?: string; backLabel?: string }; visits: NativeVisit[]; returnLeg?: NativeLeg;
-  arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather;
+  arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather; note?: string;
 };
 export type NativeTripMode = {
   version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
-  cities: { id: string; name: string; dates: string }[]; days: NativeDay[]; tickets?: NativeTicket[]; swap?: boolean;
+  cities: { id: string; name: string; dates: string }[]; days: NativeDay[]; tickets?: NativeTicket[]; swap?: boolean; journal?: boolean;
 };
 export type NativeTicket = Omit<Ticket, "tripId" | "stopId"> & { stopId?: string };
 
@@ -85,6 +87,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast): N
   const line = (text: { title: string; detail: string }, times: { at?: number; leaveAt?: number }): Line => ({ title: text.title, detail: text.detail, ...defined(times) });
   const omitted = journey.plans[entry.cityId]?.snapshot?.schedule.omitted ?? [];
   const weather = forecast?.days[entry.date];
+  const journal = journalEntry(journey, entry.cityId, entry.date);
   return {
     key: entry.key, cityId: entry.cityId, city: entry.city, day: entry.day, date: entry.date, label: entry.label, timeZone: entry.cityTrip.timeZone,
     ...dayBounds(entry), stale: entry.stale, replanned: entry.replanned,
@@ -115,7 +118,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast): N
         leaveBy: leaveBy(visit), leaveLabel: clock(trip, entry.day, leaveBy(visit)), booked: Boolean(stop?.fixedTime), status: visitStatus(entry.progress, visit.stopId),
         ...(completed ? { doneLabel: `${clock(entry.cityTrip, entry.day, completed.start)}–${clock(entry.cityTrip, entry.day, completed.end)}` } : {}),
         ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}), ...(current && isMustSee(current) ? { mustSee: true } : {}),
-        ...(rain !== undefined ? { rain } : {}),
+        ...(rain !== undefined ? { rain } : {}), ...(journal.favourites?.includes(visit.stopId) ? { favourite: true } : {}),
         alternatives: stop?.alternativeGroup ? plan.visits.filter((other) => other.stopId !== visit.stopId && trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [],
         leg: leg(visit.leg, places),
         ...defined({
@@ -130,7 +133,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast): N
     doneElsewhere: entry.progress?.completed.filter((visit) => !plan.visits.some((planned) => planned.stopId === visit.stopId))
       .map((visit) => ({ title: stopName(visit.stopId), detail: `${clock(entry.cityTrip, entry.day, visit.start)}–${clock(entry.cityTrip, entry.day, visit.end)}` })) ?? [],
     omitted: omitted.map((id) => trip.stops.find((stop) => stop.id === id)?.name ?? "").filter(Boolean),
-    ...(weather ? { weather } : {}),
+    ...(weather ? { weather } : {}), ...(journal.note ? { note: journal.note } : {}),
   };
 }
 
@@ -147,7 +150,7 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
     })),
     days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId])),
     ...(tickets.length ? { tickets } : {}),
-    ...(options.swap ? { swap: true } : {}),
+    ...(options.swap ? { swap: true } : {}), ...(options.canTrack ? { journal: true } : {}),
   };
 }
 

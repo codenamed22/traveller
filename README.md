@@ -178,6 +178,13 @@ Each city with a day in the next 16 days gets a forecast from [Open-Meteo](https
 - "Weather: Open-Meteo" is credited under the itinerary and at the end of trip mode's day. Open-Meteo's free tier is for non-commercial use.
 - The iPhone app gets the same forecast and rain warnings in its snapshots, so they show without a connection (as of the last time the page sent the trip).
 
+### Journal And Recap
+
+From the first day of a trip the owner can keep a note for each day and mark favourite visits. Both are saved with the trip (`journey.journal`, by city and date like day progress), never make an itinerary stale, and stay out of shared views and duplicates.
+- Web trip mode: a heart on the visit card, and a day note at the end of the day.
+- **Recap** (the book icon in the trip heading, and in My trips for trips that have started): every day so far, each visit's planned time against when it was done, what was skipped or not visited, distance on foot and time by transit on the planned routes to the visits made, and the day's note and favourites to change.
+- The iPhone app's trip mode has the heart and the day note too, kept on the phone without a connection and sent like Done.
+
 ### Trip Assistant
 
 Editors with OpenRouter configured get a small tab on the right edge of the planner and of trip mode. Tap it, or drag it left, to open a chat that answers questions about the trip ("What's next?", "What could I still fit in?") and suggests small changes ("Fit Rum Baba in on day 3", "Move dinner to 20:00", "I've finished the museum").

@@ -134,6 +134,24 @@ describe("trip mode", () => {
     expect(onSwap).toHaveBeenCalledWith(amsterdam.id, 0, museum.id);
   });
 
+  it("marks a favourite from the card and shows the day's note, read only for shared trips", async () => {
+    const { amsterdam, cities, plans } = journey();
+    const coffee = amsterdam.stops[0];
+    const onJournal = vi.fn();
+    const journal = { [amsterdam.id]: { "2026-12-24": { note: "Snow on the canals", favourites: [coffee.id] } } };
+    await act(async () => root.render(createElement(TripMode, { title: "Amsterdam", cities, plans, canTrack: true, onClose: vi.fn(), journal, onJournal })));
+    expect(container.querySelectorAll(".trip-timeline .favourite-icon")).toHaveLength(1);
+    expect(container.querySelector(".trip-timeline .day-note textarea")).not.toBeNull();
+    const favourite = button("Favourite Sango Coffee");
+    expect(favourite.getAttribute("aria-pressed")).toBe("true");
+    await click("Favourite Sango Coffee");
+    expect(onJournal).toHaveBeenCalledWith({ kind: "favourite", cityId: amsterdam.id, day: 0, stopId: coffee.id, on: false });
+
+    await act(async () => root.render(createElement(TripMode, { title: "Amsterdam", cities, plans, canTrack: false, onClose: vi.fn(), journal })));
+    expect(button("Favourite Sango Coffee")).toBeUndefined();
+    expect(container.querySelector(".day-note-text")?.textContent).toBe("Snow on the canals");
+  });
+
   it("opens a visit's ticket from its card and the train's from the timeline", async () => {
     const { amsterdam, cities, plans } = journey();
     const arriving = [{ ...amsterdam, arrival: { mode: "TRAIN" as const, time: "08:00", place: "Amsterdam Centraal" } }, cities[1]];

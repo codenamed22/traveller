@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { newStop, newTrip, persistedPlan, tripDate, type Trip, type PlanResult } from "../src/lib/trip";
-import { liveRouteKey, recoveryContext, recoveryMinute, remainingIds, type RecoveryRequest, type RecoveryResult } from "../src/lib/day-recovery";
+import { liveRouteKey, newDayProgress, recoveryContext, recoveryMinute, remainingIds, type RecoveryRequest, type RecoveryResult } from "../src/lib/day-recovery";
 
 test("edit bookings, preserve calendar dates, and export a draft", async ({ page }, testInfo) => {
   const errors: string[] = [];
@@ -1692,4 +1692,50 @@ test("adds a day to a city up to the next city's first day", async ({ page }, te
   while (await tabs.getByRole("button", { name: /^Day/ }).count() < 7) await tabs.getByRole("button", { name: "Add a day" }).click();
   await expect(tabs.getByRole("button", { name: "Add a day" })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("the recap sets planned times against done ones and keeps the day's note and favourites", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-10-14T12:00:00Z") });
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", startDate: "2026-10-13", timeZone: "UTC", days: 2, stops: [newStop("Coffee"), newStop("Canal walk"), newStop("Tomorrow's park")] };
+  const [coffee, canal, park] = trip.stops;
+  const walk = (from: string, to: string) => ({ day: 0, from, to, mode: "WALK" as const, minutes: 15, meters: 1200 });
+  const schedule = { generatedAt: "2026-10-01T06:00:00Z", warnings: [], omitted: [], days: [
+    { day: 0, date: "2026-10-13", visits: [{ stopId: coffee.id, start: 540, end: 600, leg: walk("hotel", coffee.id) }, { stopId: canal.id, start: 630, end: 690, leg: walk(coffee.id, canal.id) }], returnLeg: walk(canal.id, "hotel") },
+    { day: 1, date: "2026-10-14", visits: [{ stopId: park.id, start: 900, end: 960, leg: walk("hotel", park.id) }] },
+  ] };
+  const progress = { ...newDayProgress(trip, 0, [coffee.id, canal.id]), version: 1, completed: [{ stopId: coffee.id, start: 555, end: 620 }], originId: coffee.id, readyAt: 620 };
+  const journey = { id: crypto.randomUUID(), title: "Amsterdam", cities: [{ ...trip, hotel: "Hotel" }], plans: { [trip.id]: persistedPlan(schedule, trip, {}) }, execution: { [trip.id]: { "2026-10-13": progress } } };
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "recap.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ journey })) });
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Trip recap" }).click();
+  const recap = page.getByRole("dialog", { name: "Recap" });
+  await expect(recap.locator(".recap-summary")).toHaveText("2 days · 1 visit · 1 not visited · 2.4 km on foot");
+  const first = recap.getByRole("region", { name: "Day 1 · Tue 13 Oct, Amsterdam" });
+  await expect(first.locator(".recap-visit")).toHaveText(["CoffeePlanned 09:00–10:00 · Done 09:15–10:20", "Canal walkPlanned 10:30–11:30 · Not visited"]);
+  await expect(recap.getByRole("region", { name: "Day 2 · Wed 14 Oct, Amsterdam" }).locator(".recap-visit")).toHaveText(["Tomorrow's parkPlanned 15:00–16:00 · Later today"]);
+  await first.getByRole("button", { name: "Favourite Coffee" }).click();
+  await expect(first.getByRole("button", { name: "Favourite Coffee" })).toHaveAttribute("aria-pressed", "true");
+  await first.getByLabel("Day note").fill("Rain all morning, sun by the canal");
+  await recap.getByRole("heading", { name: "Recap" }).click();
+  await expect(recap.locator(".recap-summary")).toContainText("1 favourite");
+  await recap.getByRole("button", { name: "Close dialog" }).click();
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("recap-backup.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.journey.journal).toEqual({ [trip.id]: { "2026-10-13": { note: "Rain all morning, sun by the canal", favourites: [coffee.id] } } });
+
+  // Trip mode, on phones, shows the favourite and the note on that day.
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "Today's plan" }).click();
+    await page.getByRole("button", { name: "Previous day" }).click();
+    await expect(page.locator(".trip-timeline .favourite-icon")).toHaveCount(1);
+    await expect(page.locator(".trip-timeline").getByLabel("Day note")).toHaveValue("Rain all morning, sun by the canal");
+  }
+  expect(errors).toEqual([]);
 });

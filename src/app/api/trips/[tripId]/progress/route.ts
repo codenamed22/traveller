@@ -3,16 +3,17 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { database } from "@/db";
 import { trips } from "@/db/schema";
+import { applyJournalAction, journalActionSchema, withJournal } from "@/lib/journal";
 import { asJourney, journeySchema, type StoredTrip } from "@/lib/journey";
 import { applyNativeAction, nativeActionSchema, withProgress } from "@/lib/native-actions";
 import { apiError, HttpError, readJson, requireOwner } from "@/lib/server";
 import type { SavedPlan } from "@/lib/trip";
 
 type Context = { params: Promise<{ tripId: string }> };
-const bodySchema = z.object({ actions: z.array(nativeActionSchema).min(1).max(50) }).strict();
+const bodySchema = z.object({ actions: z.array(z.union([nativeActionSchema, journalActionSchema])).min(1).max(50) }).strict();
 
-// Done, Skip and taking them back, saved on the iPhone without a connection and sent once it has one, for a trip the
-// page isn't holding. Applied in order on the saved trip; each says whether it was kept, so the app can stop sending it.
+// Done, Skip and taking them back, and the day's note and favourites, saved on the iPhone without a connection and sent
+// once it has one, for a trip the page isn't holding. Applied in order on the saved trip; each says whether it was kept, so the app can stop sending it.
 export async function POST(request: Request, context: Context) {
   try {
     const owner = await requireOwner(request);
@@ -28,6 +29,12 @@ export async function POST(request: Request, context: Context) {
       let changed = false;
       const results = actions.map((action) => {
         try {
+          if (action.kind === "note" || action.kind === "favourite") {
+            const change = applyJournalAction(journey, action);
+            const next = withJournal(journey, change.cityId, change.date, change.entry);
+            if (JSON.stringify(next.journal) !== JSON.stringify(journey.journal)) { journey = next; changed = true; }
+            return { ok: true, message: change.message };
+          }
           const change = applyNativeAction(journey, action, now);
           if (change.changed) { journey = withProgress(journey, change.cityId, change.date, change.next); changed = true; }
           return { ok: true, message: change.message };

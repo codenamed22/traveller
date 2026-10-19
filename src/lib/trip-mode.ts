@@ -5,8 +5,9 @@ import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type S
 
 // One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
 // snapshot, or today's replan); `cityTrip` is the city as it is now, which keys and validates day progress like the planner.
+// `started` is today or a day gone by.
 export type TripModeDay = {
-  key: string; cityId: string; city: string; cityTrip: Trip; day: number; date: string; label: string; isToday: boolean;
+  key: string; cityId: string; city: string; cityTrip: Trip; day: number; date: string; label: string; isToday: boolean; started: boolean;
   trip: Trip; places: Record<string, Place>; plan: DayPlan; stopIds: string[]; stale: boolean; replanned: boolean; progress?: DayProgress;
 };
 
@@ -31,7 +32,7 @@ export function tripModeDays(cities: Trip[], plans: Record<string, SavedPlan>, e
       const stopIds = plans[city.id].days.find((entry) => entry.day === planned.day)?.stopIds ?? planned.visits.map((visit) => visit.stopId);
       return {
         key: `${city.id}:${planned.day}`, cityId: city.id, city: city.city, cityTrip: city, day: planned.day, date, label: `Day ${planned.day + 1} · ${dayLabel(date)}`,
-        isToday: date === today, trip: replan?.trip ?? snapshot.trip, places: replan?.places ?? snapshot.places, plan: replan?.day ?? planned,
+        isToday: date === today, started: Boolean(today) && date <= today, trip: replan?.trip ?? snapshot.trip, places: replan?.places ?? snapshot.places, plan: replan?.day ?? planned,
         stopIds, stale, replanned: Boolean(replan), ...(progress ? { progress } : {}),
       };
     });

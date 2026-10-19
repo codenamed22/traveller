@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Heart, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
 import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import type { Journey } from "@/lib/journey";
+import { journalEntry, type JournalAction } from "@/lib/journal";
 import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
@@ -17,6 +18,7 @@ import { TransferLine } from "./TransferFields";
 import { TripMap } from "./TripMap";
 import { usePlacePhotos } from "./usePlacePhotos";
 import { RainWarning, WeatherBadge, WeatherCredit } from "./Weather";
+import { DayNote, FavouriteButton } from "./Journal";
 import { rainWarningFor, type Forecast } from "@/lib/weather";
 
 type Props = {
@@ -32,6 +34,8 @@ type Props = {
   tickets?: Ticket[];
   // Each city's forecast, by city id; `onSwap` asks the agent to swap a visit rain threatens.
   forecasts?: Record<string, Forecast>; onSwap?: (cityId: string, day: number, stopId: string) => void;
+  // The owner's notes and favourites; `onJournal` keeps them, from the first day of the trip on.
+  journal?: Journey["journal"]; onJournal?: (action: JournalAction) => void;
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
@@ -41,7 +45,7 @@ const noForecasts: Record<string, Forecast> = {};
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap, journal, onJournal }: Props) {
   const ticketLinks = (place: TicketPlace) => ticketsFor(tickets, place).map((ticket, _index, all) => <a key={ticket.id} className="button secondary small" href={`/api/trips/${ticket.tripId}/tickets/${ticket.id}`} target="_blank" rel="noopener"><TicketIcon size={15} />{all.length === 1 ? "Ticket" : ticket.name}</a>);
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
@@ -151,6 +155,9 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   if (next) markerStatus[next.stopId] = "next";
   const done = entry.isToday && entry.plan.visits.length > 0 && !next;
   const summary = daySummary(entry.plan);
+  const dayJournal = journalEntry({ journal }, entry.cityId, entry.date);
+  const favourite = (stopId: string) => Boolean(dayJournal.favourites?.includes(stopId));
+  const journaling = Boolean(onJournal) && entry.started;
 
   function record(kind: "done" | "skip", visit: Visit) {
     const stop = entry.trip.stops.find((candidate) => candidate.id === visit.stopId);
@@ -198,6 +205,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           {tracking && status === "pending" && <><button type="button" className="button secondary small" onClick={() => record("done", focus)}><Check size={15} />Done</button><button type="button" className="button secondary small" onClick={() => record("skip", focus)}><SkipForward size={15} />Skip</button></>}
           {tracking && status !== "pending" && <button type="button" className="button secondary small" onClick={() => reset(focus)}><Undo2 size={15} />Undo</button>}
           {ticketLinks({ cityId: entry.cityId, target: "stop", stopId: focus.stopId })}
+          {journaling && <FavouriteButton on={favourite(focus.stopId)} name={stopName(focus.stopId)} onChange={(on) => onJournal!({ kind: "favourite", cityId: entry.cityId, day: entry.day, stopId: focus.stopId, on })} />}
         </div>
       </div>;
     }
@@ -264,7 +272,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
             <LegDetails edge={visit.leg} places={entry.places} />
             <button type="button" className={`itinerary-stop ${selected === visit.stopId ? "selected" : ""} ${visit === next ? "next" : ""}`} onClick={() => { setSelected(visit.stopId); setSnap("peek"); }}>
               <span className="stop-number">{status === "done" ? <Check size={13} /> : index + 1}</span>
-              <span className="stop-heading"><strong>{stopName(visit.stopId)}{isMustSee(entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId) ?? { priority: 1 }) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(entry.trip, entry.day, visit.start)} - {formatMinute(entry.trip, entry.day, visit.end)} · {visit.end - visit.start} min{status === "skipped" ? " · skipped" : ""}</span>{status === "pending" && rainAt(visit) !== undefined && <RainWarning chance={rainAt(visit)!} />}{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>
+              <span className="stop-heading"><strong>{stopName(visit.stopId)}{isMustSee(entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId) ?? { priority: 1 }) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}{favourite(visit.stopId) && <Heart size={12} className="favourite-icon" role="img" aria-label="Favourite" />}</strong><span>{formatMinute(entry.trip, entry.day, visit.start)} - {formatMinute(entry.trip, entry.day, visit.end)} · {visit.end - visit.start} min{status === "skipped" ? " · skipped" : ""}</span>{status === "pending" && rainAt(visit) !== undefined && <RainWarning chance={rainAt(visit)!} />}{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>
               {stop?.fixedTime && <LockKeyhole size={15} />}
             </button>
           </div>;
@@ -272,6 +280,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
         {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure">{ticketLinks({ cityId: entry.cityId, target: "departure", stopId: null })}</TransferLine>}
         {plans[entry.cityId]?.snapshot && <OmittedPlaces trip={entry.trip} schedule={plans[entry.cityId].snapshot!.schedule} />}
+        {(journaling || dayJournal.note) && <DayNote key={entry.key} note={dayJournal.note} onSave={journaling ? (text) => onJournal!({ kind: "note", cityId: entry.cityId, day: entry.day, text }) : undefined} />}
         {forecast && <p className="trip-mode-credit"><WeatherCredit /></p>}
       </div>
     </BottomSheet>

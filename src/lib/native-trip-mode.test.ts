@@ -73,6 +73,18 @@ describe("native trip mode snapshot", () => {
     expect(today.visits.map((visit) => visit.mustSee)).toEqual([undefined, true]);
   });
 
+  it("carries the day's note and favourites, and says the traveller can keep them", () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const kept = { ...journey, journal: { [amsterdam.id]: { "2026-12-24": { note: "Snow on the canals", favourites: [coffee.id] } } } };
+    const snapshot = nativeTripMode(kept, christmasEve, { canTrack: true, photos: false });
+    const [today, tomorrow] = snapshot.days;
+    expect(snapshot.journal).toBe(true);
+    expect(today.note).toBe("Snow on the canals");
+    expect(today.visits.map((visit) => visit.favourite)).toEqual([true, undefined]);
+    expect(tomorrow).not.toHaveProperty("note");
+    expect(nativeTripMode(kept, christmasEve, { canTrack: false, photos: false })).not.toHaveProperty("journal");
+  });
+
   it("carries the day's forecast and the chance of rain during outdoor visits", () => {
     const { journey, amsterdam, coffee, museum } = fixture();
     // The museum's garden, say: a park. Rain is likely all morning.

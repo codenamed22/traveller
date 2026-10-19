@@ -218,6 +218,27 @@ summary::-webkit-details-marker { display: none; }
 .itinerary-stop + .rain-warning { margin: 6px 0 0 50px; }
 .trip-card > .rain-warning { margin: 0 0 8px; }
 .trip-mode-credit { margin: 14px 0 0; font-size: 10px; color: var(--muted); }
+.favourite-icon { color: var(--red); fill: currentColor; margin-left: 5px; vertical-align: -1px; }
+.favourite[aria-pressed="true"], .favourite[aria-pressed="true"]:hover:not(:disabled) { color: var(--red); }
+.trip-card-actions .favourite { flex: 0 0 auto; }
+.day-note { margin-top: 14px; }
+.day-note textarea { resize: vertical; min-height: 54px; }
+.day-note-text { margin: 14px 0 0; font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
+.recap-summary { margin: -8px 0 6px; color: var(--muted); font-size: 13px; }
+.recap-day { border-top: 1px solid var(--line); padding: 14px 0 4px; }
+.recap-day h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; }
+.recap-day h3 small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.recap-travel { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.recap-visits { display: grid; gap: 2px; margin: 8px 0 0; padding: 0; list-style: none; }
+.recap-visit { display: flex; align-items: center; gap: 6px; }
+.recap-visit > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.recap-visit strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.recap-visit small { color: var(--muted); font-size: 11px; }
+.recap-visit em { font-style: normal; }
+.recap-visit.done em { color: var(--green); }
+.recap-visit.skipped strong, .recap-visit.missed strong { color: var(--muted); }
+.recap-visit > .favourite-icon { margin: 0 9px 0 10px; }
+.recap-spacer { flex: 0 0 34px; }
 .saved-order { padding-left: 25px; text-align: left; font-size: 13px; margin-bottom: 22px; }
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 24px; font-size: 12px; border-top: 1px solid var(--line); }
 .banner.success { background: #edf4e9; color: #54704b; }

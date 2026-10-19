@@ -1,11 +1,12 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
+import { applyJournalAction, journalActionSchema, type JournalAction } from "@/lib/journal";
 import { applyNativeAction, type NativeAction } from "@/lib/native-actions";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap", "journal"];
 
 type Deps = {
   journey: Journey;
@@ -16,6 +17,7 @@ type Deps = {
   photo?: (placeId: string, index: number) => Promise<unknown>;
   send?: (journeyId: string, actions: unknown[]) => Promise<unknown>;
   swap?: (cityId: string, day: number, stopId: string) => void;
+  recordJournal?: (action: JournalAction) => void;
   now?: () => Temporal.Instant;
 };
 
@@ -59,7 +61,7 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, recordJournal, now: clock = () => Temporal.Now.instant() }: Deps) {
   function apply(action: NativeAction) {
     const change = applyNativeAction(journey, action, clock());
     if (!change.changed) return change.message;
@@ -97,6 +99,15 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
       if (!before.success) return false;
       recordProgress(cityId, date, before.data);
       return true;
+    },
+    // The day's note ({note}), or a visit marked as a favourite or not ({stopId, favourite}), from the day's sheet.
+    journal(cityId: string, day: number, patch: { note?: unknown; stopId?: unknown; favourite?: unknown }) {
+      if (!recordJournal) throw new Error("Saving is unavailable");
+      const action = journalActionSchema.safeParse(typeof patch?.note === "string" ? { kind: "note", cityId, day, text: patch.note } : { kind: "favourite", cityId, day, stopId: patch?.stopId, on: patch?.favourite });
+      if (!action.success) throw new Error("That couldn't be saved.");
+      const { message } = applyJournalAction(journey, action.data);
+      recordJournal(action.data);
+      return message;
     },
     adjustToday,
     // Rain on an outdoor visit: the agent, with a swap for something indoors asked for but not sent. The app closes
