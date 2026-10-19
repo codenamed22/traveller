@@ -191,7 +191,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       const yourNote = current?.note;
       return <div className="trip-card">
         <div className="trip-card-label">{isNext ? "Next" : "Stop"} · {index + 1} of {entry.plan.visits.length}{selected && next && focus !== next && <button type="button" className="chip" onClick={() => setSelected(null)}>Back to next</button>}</div>
-        <h2>{stopName(focus.stopId)}</h2>
+        <div className="trip-card-title"><h2>{stopName(focus.stopId)}</h2>{journaling && <FavouriteButton className="icon-button" on={favourite(focus.stopId)} name={stopName(focus.stopId)} onChange={(on) => onJournal!({ kind: "favourite", cityId: entry.cityId, day: entry.day, stopId: focus.stopId, on })} />}</div>
         <p className="trip-card-time">{formatMinute(entry.trip, entry.day, focus.start)}–{formatMinute(entry.trip, entry.day, focus.end)}{stop?.fixedTime && <span className="booked"><LockKeyhole size={12} />Booked</span>}{current && isMustSee(current) && <span className="booked"><Star size={12} />Must-see</span>}</p>
         {status === "done" ? <p className="trip-card-status done"><Check size={14} />Done{completed ? ` ${formatMinute(entry.cityTrip, entry.day, completed.start)}–${formatMinute(entry.cityTrip, entry.day, completed.end)}` : ""}</p>
           : status === "skipped" ? <p className="trip-card-status skipped"><SkipForward size={14} />Skipped</p>
@@ -205,7 +205,6 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           {tracking && status === "pending" && <><button type="button" className="button secondary small" onClick={() => record("done", focus)}><Check size={15} />Done</button><button type="button" className="button secondary small" onClick={() => record("skip", focus)}><SkipForward size={15} />Skip</button></>}
           {tracking && status !== "pending" && <button type="button" className="button secondary small" onClick={() => reset(focus)}><Undo2 size={15} />Undo</button>}
           {ticketLinks({ cityId: entry.cityId, target: "stop", stopId: focus.stopId })}
-          {journaling && <FavouriteButton on={favourite(focus.stopId)} name={stopName(focus.stopId)} onChange={(on) => onJournal!({ kind: "favourite", cityId: entry.cityId, day: entry.day, stopId: focus.stopId, on })} />}
         </div>
       </div>;
     }

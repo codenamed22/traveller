@@ -220,7 +220,8 @@ summary::-webkit-details-marker { display: none; }
 .trip-mode-credit { margin: 14px 0 0; font-size: 10px; color: var(--muted); }
 .favourite-icon { color: var(--red); fill: currentColor; margin-left: 5px; vertical-align: -1px; }
 .favourite[aria-pressed="true"], .favourite[aria-pressed="true"]:hover:not(:disabled) { color: var(--red); }
-.trip-card-actions .favourite { flex: 0 0 auto; }
+.trip-card-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.trip-card-title .favourite { margin: -4px -6px 0 0; }
 .day-note { margin-top: 14px; }
 .day-note textarea { resize: vertical; min-height: 54px; }
 .day-note-text { margin: 14px 0 0; font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
