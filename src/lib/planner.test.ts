@@ -225,6 +225,60 @@ describe("schedule optimizer", () => {
     expect(crowded.omitted).toEqual([]);
     expect(crowded.warnings.join(" ")).toMatch(/Day 1: (Waffle Factory|Booked lunch) starts \d+ min after (Waffle Factory|Booked lunch) ends\. Meals are kept 2 hours apart/);
   });
+  it("keeps a snack an hour from a meal, and leaves out an optional evening meal on a day with a dinner", async () => {
+    const roti = { ...newStop("Roopram Roti"), source: "Grab a massive Surinamese roti at Roopram Roti (€12).", duration: 60 };
+    const dinner = { ...newStop("Bouillon d'Amsterdam"), source: "Dinner: Bouillon d'Amsterdam for a budget French bistro main (€12).", duration: 45 };
+    const trail = { ...newStop("Trajectum Lumen"), kind: "walk" as const, day: 0, fixedTime: "16:30", duration: 15 };
+    const trip = { ...fixture(), days: 1, dailyStart: "15:00", dailyEnd: "21:00", stops: [roti, dinner, trail] };
+    const schedule = await solveTrip(trip, routes(trip), 2);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    const at = (id: string) => schedule.days[0].visits.find((visit) => visit.stopId === id)!;
+    const [first, second] = [at(roti.id), at(dinner.id)].sort((left, right) => left.start - right.start);
+    expect(second.start - first.end).toBeGreaterThanOrEqual(59.9);
+    expect(schedule.warnings.join(" ")).not.toContain("Snacks are kept");
+
+    const tight = { ...trip, dailyEnd: "17:15", stops: [roti, dinner] };
+    const crowded = await solveTrip(tight, routes(tight), 2);
+    expect(crowded.warnings.join(" ")).toMatch(/Snacks are kept 60 min from meals/);
+
+    const chartier = { ...newStop("Bouillon Chartier"), kind: "meal" as const, slot: "dinner" as const, duration: 75 };
+    const burger = { ...newStop("Mangez et Cassez-Vous"), kind: "meal" as const, slot: "evening" as const, duration: 45, optional: true };
+    const evening = { ...fixture(), days: 1, dailyStart: "15:00", dailyEnd: "23:00", stops: [chartier, burger] };
+    const planned = await solveTrip(evening, routes(evening), 2);
+    expect(planned.omitted).toEqual([burger.id]);
+  });
+  it("moves a visit off a day that can't fit it to the next day that can, when the lightest can't either", async () => {
+    const [long, longer] = [{ ...newStop("Long walk"), day: 0, duration: 150 }, { ...newStop("Longer walk"), day: 0, duration: 150 }];
+    const tour = { ...newStop("Tour"), day: 1, duration: 300 };
+    const cafe = { ...newStop("Café"), duration: 60 };
+    const trip = { ...fixture(), days: 3, dailyStart: "09:00", dailyEnd: "17:00", stops: [long, longer, tour, cafe] };
+    // Day 1 looks best for the café but its two walks are far apart; day 3 is the lightest but the café is out of reach.
+    const minutes = (edge: TravelEdge) => {
+      const pair = [edge.from, edge.to];
+      if (pair.includes(cafe.id)) return edge.day === 0 ? (pair.includes(longer.id) ? 120 : 5) : edge.day === 1 ? 40 : 1000;
+      return edge.day === 0 && pair.includes(long.id) && pair.includes(longer.id) ? 120 : 10;
+    };
+    const travel = routes(trip).map((edge) => ({ ...edge, minutes: minutes(edge) }));
+    const schedule = await solveTripByDays(trip, travel, 10);
+    expect(validateSchedule(trip, schedule)).toEqual([]);
+    expect(schedule.omitted).toEqual([]);
+    expect(schedule.days[1].visits.map((visit) => visit.stopId)).toContain(cafe.id);
+  });
+  it("warns about holidays and food too close together when planning day by day", async () => {
+    const coffee = { ...newStop("Sango"), kind: "coffee" as const, day: 1, duration: 45 };
+    const lunch = { ...newStop("Halve Maan"), kind: "meal" as const, slot: "lunch" as const, day: 0, fixedTime: "12:00", duration: 60 };
+    const chocolate = { ...newStop("Old Chocolate House"), kind: "snack" as const, day: 0, fixedTime: "13:30", duration: 45 };
+    const trip = { ...fixture(), startDate: "2026-12-24", days: 2, dailyStart: "09:00", dailyEnd: "18:00", stops: [coffee, lunch, chocolate] };
+    const hours = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ open: { day, hour: 8, minute: 0 }, close: { day, hour: 17, minute: 0 } }));
+    const places = { [coffee.id]: { id: "sango", name: "Sango", address: "", location: { lat: 52.36, lng: 4.88 }, hours } };
+    const schedule = await solveTripByDays(trip, routes(trip), 5, { places });
+    const warnings = schedule.warnings.join(" ");
+    expect(warnings).toContain("Day 2 (2026-12-25) is Christmas Day. Google lists only regular weekly hours for Sango;");
+    expect(warnings).not.toContain("Snacks are kept");
+    const moved = { ...trip, stops: [coffee, lunch, { ...chocolate, fixedTime: null }] };
+    const crowded = await solveTripByDays({ ...moved, dailyStart: "11:00", dailyEnd: "14:05" }, routes(moved), 5, { places });
+    expect(crowded.warnings.join(" ")).toMatch(/Day 1: Old Chocolate House starts \d+ min after Halve Maan ends\. Snacks are kept 60 min from meals/);
+  });
   it("spreads meals with no lunch or dinner label at two a day when planning day by day", async () => {
     const meals = ["NONA", "Fin de Siècle", "My Tannour", "Alibaba"].map((name) => ({ ...newStop(name), kind: "meal" as const, duration: 60 }));
     const trip = { ...fixture(), dailyStart: "09:00", dailyEnd: "21:30", stops: meals };

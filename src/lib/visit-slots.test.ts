@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { newStop, newTrip, type Stop, type Trip } from "./trip";
-import { afterDark, alternativeGroups, capCategory, describeTiming, isRequiredStop, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitHours, visitTiming } from "./visit-slots";
+import { afterDark, alternativeGroups, capCategory, describeTiming, isRequiredStop, mealGaps, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitHours, visitTiming } from "./visit-slots";
 
 const stop = (name: string, source: string, patch: Partial<Stop> = {}): Stop => ({ ...newStop(name), source, ...patch });
 const amsterdam = (stops: Stop[]): Trip => ({ ...newTrip(), city: "Amsterdam", hotel: "Hotel", startDate: "2026-12-24", days: 4, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00", stops });
@@ -115,6 +115,28 @@ describe("soft time targets", () => {
   it("caps meals by slot and coffee by kind", () => {
     const trip = amsterdam([stop("A", "Lunch: A"), stop("B", "Coffee: B"), stop("C", "Fresh döner at C")]);
     expect(trip.stops.map((entry) => capCategory(trip, entry))).toEqual(["lunch", "coffee", null]);
+  });
+
+  it("counts a meal in the evening as the day's dinner", () => {
+    const trip = amsterdam([stop("Mangez et Cassez-Vous", "Smash burger", { kind: "meal", slot: "evening" }), stop("Bar", "Cocktails", { kind: "nightlife", slot: "evening" })]);
+    expect(trip.stops.map((entry) => capCategory(trip, entry))).toEqual(["dinner", null]);
+  });
+
+  it("keeps meals two hours apart and a snack an hour from a meal, but not from another snack", () => {
+    const roti = stop("Roopram Roti", "Grab a massive Surinamese roti at Roopram Roti (€12).");
+    const fries = stop("Fries", "A cone of fries");
+    const dinner = stop("Bouillon d'Amsterdam", "Dinner: Bouillon d'Amsterdam for a budget French bistro main (€12).");
+    const lunch = stop("Oudaen", "Lunch: Stadskasteel Oudaen");
+    const trip = amsterdam([roti, fries, dinner, lunch]);
+    const visit = (entry: Stop, start: number, end: number) => ({ stopId: entry.id, start, end });
+    expect(mealGaps(trip, [visit(lunch, 840, 885), visit(fries, 960, 980), visit(roti, 1000, 1060), visit(dinner, 1080, 1125)])).toEqual([
+      { first: roti.id, second: dinner.id, gap: 20, shortfall: 40, required: 60 },
+    ]);
+    expect(mealGaps(trip, [visit(lunch, 840, 885), visit(fries, 900, 920), visit(dinner, 960, 1005)])).toEqual([
+      { first: lunch.id, second: fries.id, gap: 15, shortfall: 45, required: 60 },
+      { first: lunch.id, second: dinner.id, gap: 75, shortfall: 45, required: 120 },
+      { first: fries.id, second: dinner.id, gap: 40, shortfall: 20, required: 60 },
+    ]);
   });
 });
 

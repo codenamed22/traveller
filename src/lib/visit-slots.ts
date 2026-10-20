@@ -256,30 +256,48 @@ export function visitHours(trip: Trip, day: number, stop: Stop, place?: Place): 
   return (hours ?? [[0, 2880]]).flatMap(([open, close]): [number, number][] => Math.max(open, sunset) < close ? [[Math.max(open, sunset), close]] : []);
 }
 
-// Meals on one day are kept this far apart, from the end of one to the start of the next, so you are hungry again.
+// Meals on one day are kept this far apart, from the end of one to the start of the next, so you are hungry again. A
+// snack keeps a shorter distance from a meal so it doesn't spoil it; snacks among themselves are fine.
 export const mealGapMinutes = 120;
+export const snackGapMinutes = 60;
 
-export function isMeal(trip: Pick<Trip, "stops">, stop: Stop, place?: Place) {
-  return visitTiming(trip, stop, place).kind === "meal";
+export type FoodKind = "meal" | "snack";
+
+export function foodKind(trip: Pick<Trip, "stops">, stop: Stop, place?: Place): FoodKind | null {
+  const kind = visitTiming(trip, stop, place).kind;
+  return kind === "meal" || kind === "snack" ? kind : null;
 }
 
-export type MealGap = { first: string; second: string; gap: number; shortfall: number };
+// Minutes two food stops on one day are kept apart; 0 when they needn't be.
+export function foodGap(first: FoodKind, second: FoodKind) {
+  return first === "meal" && second === "meal" ? mealGapMinutes : first === "meal" || second === "meal" ? snackGapMinutes : 0;
+}
 
-// Consecutive meals in one day's visits that sit closer than the gap. Two bookings are left alone: neither can move.
+export type MealGap = { first: string; second: string; gap: number; shortfall: number; required: number };
+
+// Food stops in one day's visits that sit closer than their gap, each against the closest earlier meal and snack. Two
+// bookings are left alone: neither can move.
 export function mealGaps(trip: Pick<Trip, "stops">, visits: { stopId: string; start: number; end: number }[], places?: Record<string, Place>): MealGap[] {
-  const meals = visits.filter((visit) => { const stop = trip.stops.find((candidate) => candidate.id === visit.stopId); return stop && isMeal(trip, stop, places?.[stop.id]); }).sort((left, right) => left.start - right.start);
-  const booked = (id: string) => Boolean(trip.stops.find((stop) => stop.id === id)?.fixedTime);
-  return meals.slice(1).flatMap((visit, index) => {
-    const previous = meals[index];
+  const food = visits.flatMap((visit) => {
+    const stop = trip.stops.find((candidate) => candidate.id === visit.stopId);
+    const kind = stop && foodKind(trip, stop, places?.[stop.id]);
+    return stop && kind ? [{ ...visit, kind, booked: Boolean(stop.fixedTime) }] : [];
+  }).sort((left, right) => left.start - right.start);
+  return food.flatMap((visit, index) => (["meal", "snack"] as const).flatMap((kind) => {
+    const previous = food.slice(0, index).findLast((candidate) => candidate.kind === kind);
+    const required = previous ? foodGap(previous.kind, visit.kind) : 0;
+    if (!previous || !required || (previous.booked && visit.booked)) return [];
     const gap = visit.start - previous.end;
-    return gap < mealGapMinutes - 0.01 && !(booked(previous.stopId) && booked(visit.stopId)) ? [{ first: previous.stopId, second: visit.stopId, gap, shortfall: mealGapMinutes - gap }] : [];
-  });
+    return gap < required - 0.01 ? [{ first: previous.stopId, second: visit.stopId, gap, shortfall: required - gap, required }] : [];
+  }));
 }
 
 export function capCategory(trip: Pick<Trip, "stops">, stop: Stop, place?: Place): CapCategory | null {
   const timing = visitTiming(trip, stop, place);
   if (timing.kind === "coffee") return "coffee";
   if (timing.kind === "meal" && (timing.slot === "breakfast" || timing.slot === "lunch" || timing.slot === "dinner")) return timing.slot;
+  // A meal in the evening is the day's dinner.
+  if (timing.kind === "meal" && timing.slot === "evening") return "dinner";
   if (timing.kind === "meal") return "meal";
   return null;
 }
