@@ -49,7 +49,7 @@ import { Assistant, type ApplyOutcome, type AssistantHandle } from "./Assistant"
 const offlineMessage = "Offline, not saved yet";
 const cityName = (city: string, fallback: string) => city.split(",")[0].trim() || fallback;
 const shortDate = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" });
-export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; assistant?: { model: string } | null; email: string | null };
+export type AppConfig = { auth: boolean; database: boolean; maps: boolean; routes: boolean; ai: boolean; extraction?: ExtractionServices; timing?: boolean; assistant?: { model: string; thoroughModel?: string } | null; email: string | null };
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; shared?: boolean; updatedAt: string };
 type PhotoSession = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
@@ -820,6 +820,6 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     {recapOpen && <RecapDialog journey={journey} now={now} onJournal={recordJournal} onClose={() => setRecapOpen(false)} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
     {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} journal={journey.journal} onJournal={recordJournal} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
-    {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
+    {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} thoroughModel={config.assistant.thoroughModel} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

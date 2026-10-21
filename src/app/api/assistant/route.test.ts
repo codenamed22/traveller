@@ -43,6 +43,7 @@ beforeEach(() => {
   vi.stubEnv("OPENROUTER_API_KEY", "test-only-key");
   vi.stubEnv("OPENROUTER_MODEL", "google/gemini-test");
   vi.stubEnv("OPENROUTER_ASSISTANT_MODEL", "");
+  vi.stubEnv("OPENROUTER_ASSISTANT_THOROUGH_MODEL", "");
   vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-only-key");
   vi.stubGlobal("fetch", mocks.fetch);
   mocks.requireOwner.mockResolvedValue("owner@example.com");
@@ -131,6 +132,20 @@ describe("trip assistant API", () => {
     expect(response.status).toBe(200);
     await response.text();
     expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).model).toBe("openai/tool-model");
+  });
+
+  it("answers with the thorough model when chosen, for six units and a longer reply", async () => {
+    mocks.fetch.mockResolvedValueOnce(reply("Move the Anne Frank House to 14:00."));
+    const response = await POST(request({ provider: { provider: "openrouter", model: "google/gemini-4-argon" } }));
+    expect(response.status).toBe(200);
+    await response.text();
+    const sent = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    expect(sent).toMatchObject({ model: "google/gemini-4-argon", max_tokens: 4000 });
+    expect(mocks.reserveUsage).toHaveBeenCalledWith("owner@example.com", 6, expect.any(String));
+    // Another model can be configured; the default one is then refused.
+    vi.stubEnv("OPENROUTER_ASSISTANT_THOROUGH_MODEL", "anthropic/strong-model");
+    expect((await POST(request({ provider: { provider: "openrouter", model: "google/gemini-4-argon" } }))).status).toBe(409);
+    expect(mocks.reserveUsage).toHaveBeenCalledTimes(1);
   });
 
   it("drops a tool call that was stopped before it finished", async () => {

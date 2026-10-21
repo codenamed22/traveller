@@ -5,7 +5,7 @@ import { newTrip } from "@/lib/trip";
 import { desc, eq } from "drizzle-orm";
 import { database } from "@/db";
 import { trips } from "@/db/schema";
-import { assistantService, extractionServices } from "@/lib/import-providers";
+import { assistantService, extractionServices, thoroughAssistantService } from "@/lib/import-providers";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +24,7 @@ export default async function Home() {
   const plain = JSON.parse(JSON.stringify(saved));
   const extraction = extractionServices();
   const assistant = assistantService();
+  const thorough = thoroughAssistantService();
   return <TripPlanner initialTrip={newTrip()} initialSaved={plain.length === 1 ? plain[0] : null} initialList={plain.length > 1 ? plain : null} config={{
     auth: configured, email: session?.user?.email ?? null,
     database: Boolean(process.env.DATABASE_URL),
@@ -31,6 +32,6 @@ export default async function Home() {
     routes: Boolean(process.env.GOOGLE_MAPS_API_KEY),
     ai: Boolean(extraction.standard), extraction,
     timing: Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY),
-    assistant: assistant ? { model: assistant.model } : null,
+    assistant: assistant ? { model: assistant.model, ...(thorough ? { thoroughModel: thorough.model } : {}) } : null,
   }} />;
 }

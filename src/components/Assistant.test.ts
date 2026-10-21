@@ -109,6 +109,31 @@ describe("trip assistant panel", () => {
     expect(button("New chat")).toBeTruthy();
   });
 
+  it("switches the chat to the thorough model when chosen, and offers it only when there is one", async () => {
+    stored["traveller.assistant.consent"] = "1";
+    const fetch = vi.fn(async () => new Response(["start", "finish"].map((type) => `data: ${JSON.stringify({ type })}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" } }));
+    vi.stubGlobal("fetch", fetch);
+    await renderAssistant();
+    await click(button("Open trip assistant"));
+    expect(container.querySelector("select")).toBeNull();
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderAssistant({ thoroughModel: "google/gemini-4-argon" });
+    await click(button("Open trip assistant"));
+    const mode = container.querySelector("select[aria-label='Assistant mode']") as HTMLSelectElement;
+    expect(mode.value).toBe("quick");
+    expect([...mode.options].map((option) => option.textContent)).toEqual(["Quick", "Thorough"]);
+    await click(button("What could I still fit in?"));
+    await settle();
+    // The test DOM can't set a select's value; choose the option instead.
+    await act(async () => { for (const option of mode.options) option.toggleAttribute("selected", option.value === "thorough"); mode.dispatchEvent(new win.Event("change", { bubbles: true })); });
+    await click(button("New chat"));
+    await click(button("What could I still fit in?"));
+    await settle();
+    const models = fetch.mock.calls.map((call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)).provider.model);
+    expect(models).toEqual(["google/gemini-test", "google/gemini-4-argon"]);
+  });
+
   it("opens and sends a message handed to it, such as a planning failure, once consent is given", async () => {
     const fetch = vi.fn(async () => new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" } }));
     vi.stubGlobal("fetch", fetch);

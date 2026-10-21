@@ -12,7 +12,8 @@ export type AssistantView = { cityId: string; day: number; tripMode: boolean; to
 export type ApplyOutcome = { ok: true; token: string; stale: { id: string; city: string }[] } | { ok: false; error: string };
 export type CardState = { status: "applied"; token: string; stale: { id: string; city: string }[] } | { status: "undone" } | { status: "dismissed" } | { status: "failed"; error: string };
 type Props = {
-  journey: Journey; view: AssistantView; model: string;
+  // `thoroughModel` is a stronger, pricier model the traveller can switch to for the chat.
+  journey: Journey; view: AssistantView; model: string; thoroughModel?: string;
   onApply: (operations: Operation[]) => ApplyOutcome;
   // Returns why the change can't be undone, or null once it is.
   onUndo: (token: string) => string | null;
@@ -30,8 +31,10 @@ function errorText(error: Error) {
 
 // A chat that answers questions about the trip and suggests small changes as cards to apply. It hides behind a tab on
 // the right edge; opening it adds an #assistant history entry so the back button or gesture closes it again.
-export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref }: Props) {
+export function Assistant({ journey, view, model, thoroughModel, onApply, onUndo, onReplan, ref }: Props) {
   const [open, setOpen] = useState(false);
+  // Quick each time the page loads, so the pricier model is only used when chosen.
+  const [thorough, setThorough] = useState(false);
   const [consented, setConsented] = useState(false);
   const [input, setInput] = useState("");
   const [cards, setCards] = useState<Record<string, CardState>>({});
@@ -73,7 +76,7 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
     if (open && consented && window.matchMedia?.("(pointer: fine)").matches) field.current?.focus({ preventScroll: true });
   }, [open, consented]);
 
-  const context = () => ({ body: { journey, view: { cityId: view.cityId, day: view.day, tripMode: view.tripMode }, consent: true, provider: { provider: "openrouter", model } } });
+  const context = () => ({ body: { journey, view: { cityId: view.cityId, day: view.day, tripMode: view.tripMode }, consent: true, provider: { provider: "openrouter", model: thorough && thoroughModel ? thoroughModel : model } } });
 
   function show() {
     setConsented(hasConsent("assistant")); setOpen(true);
@@ -134,6 +137,10 @@ export function Assistant({ journey, view, model, onApply, onUndo, onReplan, ref
       <header className="assistant-header">
         <span className="assistant-mark"><Sparkles size={16} /></span>
         <strong>Trip assistant</strong>
+        {thoroughModel && consented && <select className="assistant-mode" aria-label="Assistant mode" value={thorough ? "thorough" : "quick"} onChange={(event) => setThorough(event.target.value === "thorough")}>
+          <option value="quick">Quick</option>
+          <option value="thorough">Thorough</option>
+        </select>}
         {messages.length > 0 && <button type="button" className="icon-button" title="New chat" aria-label="New chat" disabled={busy} onClick={() => { setMessages([]); setCards({}); clearError(); }}><SquarePen size={17} /></button>}
         <button type="button" className="icon-button" title="Close" aria-label="Close trip assistant" onClick={() => hide()}><ChevronRight size={19} /></button>
       </header>

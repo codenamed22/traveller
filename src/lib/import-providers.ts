@@ -13,3 +13,9 @@ export function assistantService() {
   const model = process.env.OPENROUTER_ASSISTANT_MODEL || process.env.OPENROUTER_MODEL;
   return process.env.OPENROUTER_API_KEY && model ? { provider: "openrouter" as const, model } : null;
 }
+// A stronger, pricier model the traveller can choose for the assistant ("Thorough"); also needs tool calling.
+export function thoroughAssistantService() {
+  const quick = assistantService();
+  const model = process.env.OPENROUTER_ASSISTANT_THOROUGH_MODEL || "google/gemini-4-argon";
+  return quick && model !== quick.model ? { provider: "openrouter" as const, model } : null;
+}

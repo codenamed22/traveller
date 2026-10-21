@@ -50,6 +50,7 @@ Set local values in an ignored `.env.local` at the project root. `.env.example` 
 | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL` | Paid Gemini key and an available multimodal model supporting structured output |
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Optional extraction provider/model for text, links, and images; takes precedence over Gemini for these sources, never for YouTube |
 | `OPENROUTER_ASSISTANT_MODEL` | Optional model for the trip assistant; it must support tool calling. Defaults to `OPENROUTER_MODEL` |
+| `OPENROUTER_ASSISTANT_THOROUGH_MODEL` | Optional stronger model offered as the assistant's **Thorough** mode; it must support tool calling. Defaults to `google/gemini-4-argon` |
 | `GEMINI_TIMING_MODEL` | Optional Search-grounded timing model; defaults to `gemini-2.5-flash-lite`, independently of the import model |
 | `DAILY_USAGE_LIMIT` | Per-account daily service-unit cap; default 200 |
 
@@ -195,7 +196,8 @@ Editors with OpenRouter configured get a small tab on the right edge of the plan
 - To add a new place it looks it up on Google first, so the place goes on the map confirmed. The server only keeps a map link the assistant actually saw (in the trip or in one of its lookups in this chat): a mistyped id is matched back by location, and anything else is added by name to confirm on the map. If Google later rejects a place's map link, planning names that place instead of reporting a generic Maps error.
 - The first time you open it, it asks for consent; the screen just says an AI service is used and that AI and map usage are charged. Behind it, your messages and the trip's details (cities, dates, hotels, places, bookings, notes and today's progress) go to the configured AI gateway (OpenRouter today) and the model's provider. The conversation stays in the browser for the open trip; Traveller doesn't store it. **New chat** clears it.
 - When Plan my days fails, **Ask the assistant to fix this** closes the dialog and sends the failure to the assistant as your message. It suggests the smallest change that fixes it (a booking time, the day's hours, a visit's length or day) as a card, keeping every place unless you agree otherwise. Tap Replan on the card to try again.
-- Each message costs 2 service units, and each Google lookup costs 1 (at most 3 per message). The phone's back button or gesture, Esc, or › closes the panel.
+- **Quick** (the configured assistant model) is used each time the page loads; **Thorough** switches the chat to a stronger, slower model (`OPENROUTER_ASSISTANT_THOROUGH_MODEL`) for harder changes. The choice applies per message, so a chat can switch either way.
+- Each message costs 2 service units (6 in Thorough), and each Google lookup costs 1 (at most 3 per message). The phone's back button or gesture, Esc, or › closes the panel.
 
 ### Today And Day Recovery
 
@@ -265,7 +267,7 @@ Each place has a Notes box for your own reminders. Notes show on the itinerary, 
 
 Place search is biased towards the trip's hotel (a bias, not a limit), since Google finds nothing for some bare names unless told where to look. Search results Google lists as permanently or temporarily closed say so, the trip assistant skips them, and planning warns about any place in the trip Google marks closed.
 
-Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; a trip assistant message costs two (plus one per place it looks up); a photo frame costs two; an extraction batch costs three; timing research costs five; a planning preview costs 30, including each re-optimization. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
+Every paid endpoint requires an allowlisted session, same-origin mutation request, and a Neon-backed atomic daily quota reservation. A place lookup costs one service unit; a trip assistant message costs two, or six in Thorough mode (plus one per place it looks up); a photo frame costs two; an extraction batch costs three; timing research costs five; a planning preview costs 30, including each re-optimization. These are application limits, not dollar prices. Failed calls retain their reservation to prevent retry abuse. Repeated operation IDs are rejected rather than performing the paid operation twice.
 
 Each planning run permits at most 1,000 billable matrix elements and `max(100, 6 * (grouped stop count + days))` route requests, at most 402 for 60 stops over 7 days. The route budget covers two modes over three validation passes. Matrix sampling reserves hotel and successor connections before extra alternatives, but cannot guarantee a feasible graph for every trip. Place details are additionally fetched for the hotel and stops. A standard account budget permits at most six planning attempts per UTC day, less when other services are used. Also set quotas at Google/OpenRouter: application limits cannot protect a leaked key or direct browser-map usage. Deployment abuse controls are required before removing the personal allowlist.
 
