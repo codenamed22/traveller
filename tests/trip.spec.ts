@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { newStop, newTrip, persistedPlan, tripDate, type Trip, type PlanResult } from "../src/lib/trip";
 import { liveRouteKey, newDayProgress, recoveryContext, recoveryMinute, remainingIds, type RecoveryRequest, type RecoveryResult } from "../src/lib/day-recovery";
@@ -1696,6 +1696,44 @@ test("trip mode opens today's day full screen, records progress and closes with 
   await (await download).saveAs(output);
   const backup = JSON.parse(await readFile(output, "utf8"));
   expect(backup.journey.execution[trip.id]["2026-10-13"].completed).toEqual([{ stopId: coffee.id, start: 555, end: 600 }]);
+});
+
+test("a chosen place's card in trip mode stays below the bar and scrolls when it's taller than the screen", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
+  const mobile = testInfo.project.name === "mobile";
+  await page.setViewportSize(mobile ? { width: 390, height: 640 } : { width: 980, height: 600 });
+  const long = "A long line from a guide about the place, its history and its setting, to fill the card. ".repeat(3).slice(0, 290);
+  const market = { ...newStop("Albert Cuyp Market"), placeId: "market-id", duration: 60, source: "Walk 5 mins to the market.", about: { what: long, expect: long, todo: long } };
+  const trip: Trip = { ...newTrip(), city: "Amsterdam", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Amsterdam", dailyStart: "09:00", dailyEnd: "21:00", stops: [market] };
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: "2026-10-13", visits: [{ stopId: market.id, start: 600, end: 660, leg: { day: 0, from: "hotel", to: market.id, mode: "WALK" as const, minutes: 10, meters: 800 } }] }] };
+  const place = (id: string, name: string) => ({ id, name, address: `${name}, Amsterdam`, location: { lat: 52.35, lng: 4.89 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel"), [market.id]: place("market-id", "Albert Cuyp Market") });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "trip-mode.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  if (mobile) await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  const tripMode = page.getByRole("dialog", { name: /^Trip mode/ });
+  // Boxes once the sheet has finished sliding to its height.
+  const settled = async (locator: Locator) => {
+    let last = -1;
+    await expect.poll(async () => { const y = (await locator.boundingBox())!.y; const same = y === last; last = y; return same; }).toBe(true);
+    return (await locator.boundingBox())!;
+  };
+  await tripMode.getByRole("button", { name: "Show the whole day" }).click();
+  await tripMode.locator(".trip-timeline .itinerary-stop").first().click();
+  const card = tripMode.locator(".trip-card");
+  await expect(card.locator(".place-about")).toContainText("What to do");
+  // The guide's notes take the place of the original itinerary's line.
+  await expect(card).not.toContainText("Walk 5 mins to the market.");
+  const bar = (await tripMode.locator(".trip-mode-bar").boundingBox())!;
+  const sheet = await settled(tripMode.getByRole("region", { name: "Day plan" }));
+  expect(sheet.y).toBeGreaterThanOrEqual(bar.y + bar.height);
+  // The card's top is in view, and the rest scrolls within the sheet.
+  const label = (await card.locator(".trip-card-label").boundingBox())!;
+  expect(label.y).toBeGreaterThanOrEqual(sheet.y);
+  await expect(tripMode.locator(".sheet-header")).toHaveClass(/scrolls/);
+  await page.screenshot({ path: testInfo.outputPath("trip-mode-about.png") });
 });
 
 test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {

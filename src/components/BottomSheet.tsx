@@ -7,17 +7,23 @@ const order: Snap[] = ["peek", "half", "full"];
 
 // A sheet over the map with three resting heights: its header alone, `half` and `full`. Drag the header up or down to
 // resize, tap it to switch between the smallest and middle heights, or swipe it sideways (onSwipe: 1 next, -1 previous).
-// onHeight reports the resting height, never mid-drag, so the map behind can keep its stops in view.
+// onHeight reports the resting height, never mid-drag, so the map behind can keep its stops in view. A header taller than
+// the full height (a chosen place with its photo and notes) stops there and scrolls, as it does past half the sheet once
+// the day shows below it; the handle still drags.
 export function BottomSheet({ snap, sizes, onSnap, onSwipe, onHeight, header, children, label }: { snap: Snap; sizes: { half: number; full: number }; onSnap: (snap: Snap) => void; onSwipe?: (direction: 1 | -1) => void; onHeight?: (height: number) => void; header: ReactNode; children: ReactNode; label: string }) {
   const [drag, setDrag] = useState<number | null>(null);
-  const [peek, setPeek] = useState(180);
+  const [natural, setNatural] = useState(180);
   const headerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const peek = Math.min(natural, sizes.full);
   const heights: Record<Snap, number> = { peek, half: Math.max(peek, sizes.half), full: Math.max(peek, sizes.full) };
+  const headerMax = (snap === "peek" ? sizes.full : Math.round(sizes.full / 2)) - 6;
   useEffect(() => {
-    const element = headerRef.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => setPeek(Math.ceil(element.getBoundingClientRect().height) + 6));
-    observer.observe(element);
+    const element = headerRef.current, content = contentRef.current;
+    if (!element || !content || typeof ResizeObserver === "undefined") return;
+    // The header's own height stops at its cap, so the content is watched for its natural height.
+    const observer = new ResizeObserver(() => setNatural(Math.ceil(element.scrollHeight) + 6));
+    observer.observe(element); observer.observe(content);
     return () => observer.disconnect();
   }, []);
   useEffect(() => { onHeight?.(heights[snap]); }, [heights[snap]]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -51,9 +57,9 @@ export function BottomSheet({ snap, sizes, onSnap, onSwipe, onHeight, header, ch
   }
 
   return <section className={`bottom-sheet ${drag !== null ? "dragging" : ""} snap-${snap}`} aria-label={label} style={{ height: drag ?? heights[snap] }}>
-    <div className="sheet-header" ref={headerRef} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { start.current = null; setDrag(null); }}>
+    <div className={`sheet-header ${natural - 6 > headerMax ? "scrolls" : ""}`} ref={headerRef} style={{ maxHeight: headerMax }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { start.current = null; setDrag(null); }}>
       <button type="button" className="sheet-handle" aria-label={snap === "peek" ? "Show the whole day" : "Show less"} onClick={(event) => { if (event.detail === 0) onSnap(snap === "peek" ? "half" : "peek"); }}><span /></button>
-      {header}
+      <div ref={contentRef}>{header}</div>
     </div>
     <div className="sheet-body">{children}</div>
   </section>;

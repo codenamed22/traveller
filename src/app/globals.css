@@ -493,7 +493,9 @@ body.trip-mode-open { overflow: hidden; }
 .trip-mode-toast button { border: 0; background: transparent; color: #9fe0c5; font-weight: 600; padding: 2px 4px; }
 .bottom-sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; display: flex; flex-direction: column; background: var(--paper); border-radius: 16px 16px 0 0; box-shadow: 0 -4px 20px #0002; padding-bottom: env(safe-area-inset-bottom, 0px); transition: height 220ms ease; max-width: 640px; margin: 0 auto; }
 .bottom-sheet.dragging { transition: none; }
-.sheet-header { flex-shrink: 0; padding: 0 16px 10px; touch-action: none; user-select: none; cursor: grab; }
+.sheet-header { flex-shrink: 0; padding: 0 16px 10px; touch-action: none; user-select: none; cursor: grab; overflow-y: auto; overscroll-behavior: contain; }
+.sheet-header.scrolls > div { touch-action: pan-y; }
+.sheet-header .sheet-handle { position: sticky; top: 0; z-index: 1; background: var(--paper); }
 .sheet-handle { display: grid; place-items: center; width: 100%; height: 22px; padding: 0; border: 0; background: transparent; }
 .sheet-handle span { width: 38px; height: 4px; border-radius: 2px; background: #cfd6cf; }
 .sheet-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 20px; border-top: 1px solid var(--line); }
@@ -507,6 +509,7 @@ body.trip-mode-open { overflow: hidden; }
 .trip-card-status.done { color: var(--green); }
 .trip-card-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); white-space: pre-line; max-height: 4.5em; overflow: hidden; }
 .trip-card-actions { display: flex; gap: 8px; margin-top: 10px; }
+.trip-card .place-photo-frame { aspect-ratio: auto; height: min(220px, 28vh); }
 .trip-card-actions .button { flex: 1; white-space: nowrap; }
 .trip-mode-note { margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; background: #fbf4e6; color: var(--amber); font-size: 12px; }
 .trip-timeline { display: grid; gap: 8px; padding-top: 10px; }
