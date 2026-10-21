@@ -1,9 +1,10 @@
-import { allowsTravelEdge, dayEnd, dayStart, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Schedule, type Trip } from "./trip";
-import { alternativeGroups, isRequiredStop } from "./visit-slots";
+import { allowsTravelEdge, dayEnd, dayStart, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Place, type Schedule, type Trip } from "./trip";
+import { alternativeGroups, dayOpening, isRequiredStop } from "./visit-slots";
 
 export type ScheduleBoundary = { startId: string; startMinute: number };
 
-export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: ScheduleBoundary): string[] {
+// `places` tells a café by its Google type, so a day may start early for one.
+export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: ScheduleBoundary, places?: Record<string, Place>): string[] {
   const errors: string[] = [];
   const seen = new Set<string>();
   const seenDays = new Set<number>();
@@ -16,10 +17,11 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
     seenDays.add(day.day);
     if (day.visits.length > planningPreferences(trip).maxStopsPerDay) errors.push(`Day ${day.day + 1}: too many places.`);
     if (day.date !== tripDate(trip, day.day)) errors.push("A sightseeing date changed.");
-    let previousEnd = boundary?.startMinute ?? dayStart(trip, day.day);
+    const first = stops.get(day.visits[0]?.stopId ?? "");
+    let previousEnd = boundary?.startMinute ?? dayOpening(trip, day.day, first, places?.[first?.id ?? ""]);
     let previousId = boundary?.startId ?? "hotel";
     const lastEnd = dayEnd(trip, day.day);
-    for (const visit of day.visits) {
+    for (const [index, visit] of day.visits.entries()) {
       const stop = stops.get(visit.stopId);
       if (!stop || seen.has(visit.stopId)) { errors.push("Unknown or repeated stop."); continue; }
       seen.add(stop.id);
@@ -33,6 +35,7 @@ export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: Sche
       if (stop.day !== null && stop.day !== day.day) errors.push(`${stop.name}: assigned day changed.`);
       const buffer = stop.fixedTime ? stop.buffer : 0;
       if (visit.start + 0.01 < previousEnd + duration + buffer) errors.push(`${stop.name}: not enough time to arrive.`);
+      if (index && !boundary && visit.start + 0.01 < dayStart(trip, day.day)) errors.push(`${stop.name}: before sightseeing starts.`);
       if (stop.fixedTime && Math.abs(visit.start - minuteAt(trip, day.day, stop.fixedTime)) > 0.01) errors.push(`${stop.name}: booking time changed.`);
       if (!(stop.fixedTime ? [stop.duration] : stop.durationOptions ?? [stop.duration]).some((allowed) => Math.abs(visit.end - visit.start - allowed) <= 0.01)) errors.push(`${stop.name}: visit duration changed beyond the approved choices.`);
       if (visit.end > lastEnd + 0.01) errors.push(`${stop.name}: outside sightseeing hours.`);

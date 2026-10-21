@@ -7,7 +7,8 @@ type Solve = (trip: Trip, seconds: number, level: number) => Promise<Schedule>;
 function restoreDurations(trip: Trip, schedule: Schedule): Schedule {
   const durations = new Map(schedule.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, visit.end - visit.start] as const)));
   const retime = () => ({ ...schedule, days: schedule.days.map((day) => {
-    let cursor = dayStart(trip, day.day);
+    // From the hotel when the day starts, or when it left earlier for its morning café.
+    let cursor = day.visits[0] ? Math.min(dayStart(trip, day.day), day.visits[0].start - day.visits[0].leg.minutes) : dayStart(trip, day.day);
     const visits = day.visits.map((visit) => {
       const stop = trip.stops.find((candidate) => candidate.id === visit.stopId)!;
       const start = stop.fixedTime ? minuteAt(trip, day.day, stop.fixedTime) : cursor + visit.leg.minutes;

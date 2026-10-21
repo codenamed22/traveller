@@ -67,7 +67,7 @@ export function ConflictResolution({ trip, busy, onBusy, onCheck, onPreview, onA
       const result = await onPreview(candidate);
       if (result.status === "provisional") { setProvisional({ trip: candidate, result }); setAttempted(true); return; }
       if (!result.verified) throw new Error("This proposal has not passed route verification.");
-      const issues = validateSchedule(candidate, result.schedule);
+      const issues = validateSchedule(candidate, result.schedule, undefined, result.places);
       if (issues.length) throw new Error(`The proposed route does not respect your choices. ${issues.join(" ")}`);
       setProposal({ trip: applyScheduleDurations(candidate, result.schedule), result });
     } catch (cause) { setAttempted(true); report(cause); }

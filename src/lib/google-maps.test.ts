@@ -613,7 +613,8 @@ describe("Google-backed configurable planning", () => {
     expect(validateSchedule(trip, result.schedule)).toEqual([]);
     const durations = new Map(result.schedule.days[0].visits.map((visit) => [visit.stopId, visit.end - visit.start]));
     expect(trip.stops.map((stop) => durations.get(stop.id))).toEqual([60, 54]);
-    expect(stages.flatMap((stage) => stage.solver.map((solver) => solver.objective))).toEqual(["duration", "travel"]);
+    // "Cafe" can start the day, so the morning café gets its own stage.
+    expect(stages.flatMap((stage) => stage.solver.map((solver) => solver.objective))).toEqual(["duration", "routine", "travel"]);
     expect(requests.filter((request) => request.destinations)).toHaveLength(3);
     expect(requests.filter((request) => request.origin)).toHaveLength(3);
     expect(result.schedule.warnings.join(" ")).toContain("1 visit shortened by 6 minutes");

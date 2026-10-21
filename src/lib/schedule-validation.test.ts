@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateSchedule } from "./schedule-validation";
-import { newStop, newTrip, type Schedule, type TravelEdge } from "./trip";
+import { newStop, newTrip, type Schedule, type Stop, type TravelEdge } from "./trip";
 
 function fixture() {
   const stop = { ...newStop("Museum"), day: 0, fixedTime: "10:00", duration: 60 };
@@ -32,5 +32,21 @@ describe("independent schedule validator", () => {
     expect(validateSchedule(trip, schedule)).toContain("Museum: invalid travel or visit time.");
     expect(validateSchedule(trip, schedule)).toContain("Invalid or repeated sightseeing day.");
     expect(validateSchedule(trip, schedule)).toContain("Museum: both scheduled and omitted.");
+  });
+  it("lets a morning café start the day up to an hour early, and nothing else", () => {
+    const cafe: Stop = { ...newStop("Coffee"), kind: "coffee", duration: 30 };
+    const museum = { ...newStop("Museum"), day: 0, fixedTime: "09:30", duration: 60, buffer: 0 };
+    const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", days: 1, startDate: "2026-10-12", timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "18:00", stops: [cafe, museum] };
+    const leg = (from: string, to: string): TravelEdge => ({ day: 0, from, to, mode: "WALK", minutes: 10, meters: 700 });
+    const plan = (first: Stop, start: number, second = 570): Schedule => ({ days: [{ day: 0, date: trip.startDate, visits: [{ stopId: first.id, start, end: start + 30, leg: leg("hotel", first.id) }, { stopId: museum.id, start: second, end: second + 60, leg: leg(first.id, museum.id) }], returnLeg: leg(museum.id, "hotel") }], omitted: [], warnings: [], generatedAt: new Date().toISOString() });
+    // Out at 08:00 for coffee at 08:10 is fine; a minute earlier is not.
+    expect(validateSchedule(trip, plan(cafe, 490))).toEqual([]);
+    expect(validateSchedule(trip, plan(cafe, 489))).toContain("Coffee: not enough time to arrive.");
+    const sight: Stop = { ...cafe, kind: "sight" };
+    expect(validateSchedule({ ...trip, stops: [sight, museum] }, plan(sight, 490))).toContain("Coffee: not enough time to arrive.");
+    const arriving = { ...trip, arrival: { mode: "TRAIN" as const, time: "07:00", place: "Gare du Nord" } };
+    expect(validateSchedule(arriving, plan(cafe, 490))).toContain("Coffee: not enough time to arrive.");
+    const flexible = { ...museum, fixedTime: null };
+    expect(validateSchedule({ ...trip, stops: [cafe, flexible] }, plan(cafe, 490, 530))).toContain("Museum: before sightseeing starts.");
   });
 });

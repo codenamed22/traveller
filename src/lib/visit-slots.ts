@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import { instantAt, minuteAt, tripDate, type Place, type Stop, type Trip, type VisitKind, type VisitSlot } from "./trip";
+import { dayEnd, dayStart, instantAt, minuteAt, tripDate, type Place, type Stop, type Trip, type VisitKind, type VisitSlot } from "./trip";
 
 // Time-of-day guidance for flexible visits. Explicit choices win over the original itinerary time,
 // which wins over cues in the imported note, which win over Google place types.
@@ -30,9 +30,9 @@ const kindWindows: Partial<Record<VisitKind, { start: string; end: string; weigh
   snack: { start: "10:30", end: "17:30", weight: 0.5, label: "Snack hours" },
 };
 const eveningWeight = 3;
-// Original itinerary times are a hint from a plan that may have grouped places differently, so they stay weak:
-// an hour off costs less than a cross-town detour.
-const plannedWeight = 1;
+// Original itinerary times are a hint from a plan that may have grouped places differently, so they only break ties
+// between routes of about the same length: an hour off costs less than a three-minute detour.
+const plannedWeight = 0.05;
 const plannedTolerance = 60;
 const preferredWeight = 4;
 const daylightWeight = 1.5;
@@ -290,6 +290,60 @@ export function mealGaps(trip: Pick<Trip, "stops">, visits: { stopId: string; st
     const gap = visit.start - previous.end;
     return gap < required - 0.01 ? [{ first: previous.stopId, second: visit.stopId, gap, shortfall: required - gap, required }] : [];
   }));
+}
+
+// A café or breakfast place to start the day at, for coffee and something to eat: not one you put later in the day.
+export function morningCafe(trip: Pick<Trip, "stops">, stop: Stop, place?: Place) {
+  if (stop.preferredTimeWindow && wallMinutes(stop.preferredTimeWindow.start) >= wallMinutes("11:30")) return false;
+  const timing = visitTiming(trip, stop, place);
+  if (timing.kind === "coffee") return !timing.slot || timing.slot === "breakfast" || timing.slot === "morning" || timing.slot === "any";
+  return timing.kind === "meal" && (timing.slot === "breakfast" || timing.slot === "morning");
+}
+
+// Days that start in the morning begin at a café. An early booking may start the day up to this much earlier for it.
+export const earlyCafeMinutes = 60;
+export function morningCafeDay(trip: Trip, day: number) {
+  const start = dayStart(trip, day);
+  return start <= minuteOrWall(trip, day, "11:00") && dayEnd(trip, day) - start >= 90;
+}
+
+// The earliest a day can start: early on a morning that begins at a café, never before arriving.
+export function earliestStart(trip: Trip, day: number) {
+  return !(day === 0 && trip.arrival) && morningCafeDay(trip, day) ? dayStart(trip, day) - earlyCafeMinutes : dayStart(trip, day);
+}
+
+// When the day may start given its first visit: early only for a morning café.
+export function dayOpening(trip: Trip, day: number, first?: Stop, place?: Place) {
+  return first && !first.fixedTime && morningCafe(trip, first, place) ? earliestStart(trip, day) : dayStart(trip, day);
+}
+
+export type MealSlot = "lunch" | "dinner";
+export const mealWindows: Record<MealSlot, { start: string; end: string }> = { lunch: { start: "11:45", end: "14:00" }, dinner: { start: "18:00", end: "20:30" } };
+
+// Which of lunch and dinner a meal can be; "either" for a restaurant with no time of day.
+export function mealCover(trip: Pick<Trip, "stops">, stop: Stop, place?: Place): MealSlot | "either" | null {
+  const timing = visitTiming(trip, stop, place);
+  if (timing.kind !== "meal") return null;
+  if (stop.preferredTimeWindow) { const start = wallMinutes(stop.preferredTimeWindow.start); return start < wallMinutes("11:00") ? null : start < wallMinutes("16:00") ? "lunch" : "dinner"; }
+  if (timing.slot === "lunch" || timing.slot === "afternoon") return "lunch";
+  if (timing.slot === "dinner" || timing.slot === "evening") return "dinner";
+  return timing.slot === "breakfast" || timing.slot === "morning" ? null : "either";
+}
+
+// Lunch and dinner the day takes in (most of each window), unless a long booking such as a theme park, or a booked meal,
+// already covers it.
+export function mealWindowsToCover(trip: Trip, day: number): { meal: MealSlot; start: number; end: number }[] {
+  const [open, close] = [dayStart(trip, day), dayEnd(trip, day)];
+  return (["lunch", "dinner"] as const).flatMap((meal) => {
+    const [start, end] = [minuteOrWall(trip, day, mealWindows[meal].start), minuteOrWall(trip, day, mealWindows[meal].end)];
+    if (Math.min(end, close) - Math.max(start, open) < 90) return [];
+    const covered = trip.stops.some((stop) => {
+      if (stop.day !== day || !stop.fixedTime) return false;
+      const at = minuteOrWall(trip, day, stop.fixedTime);
+      return (stop.duration >= 180 && Math.min(end, at + stop.duration) - Math.max(start, at) >= 90) || (foodKind(trip, stop) === "meal" && at >= start - 30 && at <= end);
+    });
+    return covered ? [] : [{ meal, start, end }];
+  });
 }
 
 export function capCategory(trip: Pick<Trip, "stops">, stop: Stop, place?: Place): CapCategory | null {

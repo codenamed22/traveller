@@ -90,7 +90,7 @@ export function PlanningDialog({ trip, canPlan, canResearch, onClose, onPreview,
       const result = await onPreview(tripSchema.parse(candidate));
       if (result.status === "provisional") { setPreview(result); setStage("preview"); return; }
       if (!result.verified) throw new Error("This route has not passed travel-time checks. Adjust preferences and try again.");
-      const issues = validateSchedule(candidate, result.schedule);
+      const issues = validateSchedule(candidate, result.schedule, undefined, result.places);
       if (issues.length) throw new Error(issues.join(" "));
       setPreview(result); setStage("preview");
     } catch (cause) { report(cause); }

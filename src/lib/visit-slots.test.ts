@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { newStop, newTrip, type Stop, type Trip } from "./trip";
-import { afterDark, alternativeGroups, capCategory, describeTiming, isRequiredStop, mealGaps, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitHours, visitTiming } from "./visit-slots";
+import { dayStart, minuteAt, newStop, newTrip, type Place, type Stop, type Trip } from "./trip";
+import { afterDark, alternativeGroups, capCategory, describeTiming, earliestStart, isRequiredStop, mealCover, mealGaps, mealWindowsToCover, morningCafe, morningCafeDay, openingIntervals, placeTiming, relaxAlternatives, sunsetMinute, textTiming, timeTarget, visitHours, visitTiming } from "./visit-slots";
 
 const stop = (name: string, source: string, patch: Partial<Stop> = {}): Stop => ({ ...newStop(name), source, ...patch });
 const amsterdam = (stops: Stop[]): Trip => ({ ...newTrip(), city: "Amsterdam", hotel: "Hotel", startDate: "2026-12-24", days: 4, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00", stops });
@@ -45,7 +45,7 @@ describe("soft time targets", () => {
       stop("Booked", "Dinner", { day: 0, fixedTime: "19:00" }),
       stop("Any", "Dinner: but whenever", { slot: "any" }),
     ]);
-    expect(timeTarget(trip, trip.stops[0], 0)).toMatchObject({ start: 13 * 60 + 45, end: 15 * 60 + 45, weight: 1, source: "itinerary" });
+    expect(timeTarget(trip, trip.stops[0], 0)).toMatchObject({ start: 13 * 60 + 45, end: 15 * 60 + 45, weight: 0.05, source: "itinerary" });
     expect(timeTarget(trip, trip.stops[1], 0)).toMatchObject({ start: 18 * 60, end: 20 * 60 + 30, weight: 5, source: "note" });
     expect(timeTarget(trip, trip.stops[2], 0)).toBeNull();
     expect(timeTarget(trip, trip.stops[3], 0)).toBeNull();
@@ -173,5 +173,41 @@ describe("alternative groups", () => {
     expect(groups).toEqual([{ key: "g", stopIds: [trip.stops[0].id, trip.stops[1].id], required: true, inferred: false }]);
     expect(trip.stops.map((entry) => isRequiredStop(entry, groups))).toEqual([false, true, true]);
     expect(relaxAlternatives(trip, groups).stops.map((entry) => [entry.optional, entry.alternativeGroup])).toEqual([[true, null], [false, null], [false, null]]);
+  });
+});
+
+describe("morning café and the day's meals", () => {
+  it("starts mornings at a café or breakfast place, not one set for later in the day", () => {
+    const trip = amsterdam([
+      stop("Toki", "Coffee: Toki"),
+      stop("Lot Sixty One", "Brunch: Lot Sixty One"),
+      stop("Back to Black", ""),
+      stop("Rum Baba", "Coffee at Rum Baba", { slot: "afternoon" }),
+      stop("Bakers", "Coffee at Bakers", { preferredTimeWindow: { start: "14:00", end: "16:00", sources: ["https://example.com/bakers"] } }),
+      stop("Moeders", "Dinner: Moeders"),
+    ]);
+    const cafe: Place = { id: "back-to-black", name: "Back to Black", address: "", location: { lat: 52.36, lng: 4.88 }, primaryType: "cafe" };
+    expect(trip.stops.map((entry, index) => morningCafe(trip, entry, index === 2 ? cafe : undefined))).toEqual([true, true, true, false, false, false]);
+  });
+  it("counts days that start by 11:00 with time to spare, and starts only those early, never before arriving", () => {
+    const trip: Trip = { ...amsterdam([]), days: 3, arrival: { mode: "FLIGHT", time: "13:20", place: "Schiphol" }, departure: { mode: "TRAIN", time: "09:30", place: "Centraal" } };
+    expect([0, 1, 2].map((day) => morningCafeDay(trip, day))).toEqual([false, true, false]);
+    expect(earliestStart(trip, 1)).toBe(minuteAt(trip, 1, "08:00") - 60);
+    const early: Trip = { ...trip, arrival: { mode: "TRAIN", time: "07:00", place: "Centraal" } };
+    expect(morningCafeDay(early, 0)).toBe(true);
+    expect(earliestStart(early, 0)).toBe(dayStart(early, 0));
+  });
+  it("wants lunch and dinner on days that take them in, unless a long booking or a booked meal covers one", () => {
+    const park = stop("Efteling", "", { day: 1, fixedTime: "10:40", duration: 540 });
+    const trip: Trip = { ...amsterdam([park]), days: 3, arrival: { mode: "FLIGHT", time: "13:20", place: "Schiphol" }, departure: { mode: "TRAIN", time: "13:30", place: "Centraal" } };
+    // Landing at 13:20 is too late for lunch; the park covers both meals; leaving at 13:30 means eating on the way.
+    expect([0, 1, 2].map((day) => mealWindowsToCover(trip, day).map((window) => window.meal))).toEqual([["dinner"], [], []]);
+    const booked = { ...trip, stops: [park, stop("Moeders", "Dinner: Moeders", { day: 0, fixedTime: "19:00", duration: 90 })] };
+    expect(mealWindowsToCover(booked, 0)).toEqual([]);
+    expect(mealWindowsToCover({ ...trip, arrival: undefined, departure: undefined }, 2).map((window) => window.meal)).toEqual(["lunch", "dinner"]);
+  });
+  it("tells which meal a restaurant can be", () => {
+    const trip = amsterdam([stop("Foodhallen", "Lunch: Foodhallen"), stop("Moeders", "Dinner: Moeders"), stop("Blauw", "Restaurant Blauw"), stop("Lot Sixty One", "Brunch: Lot Sixty One"), stop("Toki", "Coffee: Toki")]);
+    expect(trip.stops.map((entry) => mealCover(trip, entry))).toEqual(["lunch", "dinner", "either", null, null]);
   });
 });

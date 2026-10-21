@@ -1,6 +1,6 @@
 import { bookingConflicts, PlanningError, planningEngine } from "./planner";
 import { dayEnd, dayStart, minuteAt, planningPreferences, type Place, type Stop, type Trip } from "./trip";
-import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, visitHours, type CapCategory } from "./visit-slots";
+import { alternativeGroups, capCategory, dailyCaps, isRequiredStop, mealCover, mealWindowsToCover, morningCafe, morningCafeDay, visitHours, type CapCategory } from "./visit-slots";
 
 export async function assignDays(input: Trip, locations: Record<string, Place["location"]>, places: Record<string, Place> = {}): Promise<Trip> {
   const conflicts = bookingConflicts(input);
@@ -62,6 +62,16 @@ export async function assignDays(input: Trip, locations: Record<string, Place["l
         model.changeColCost(columns, 2_000_000);
         addRow([...members.map((choice): [number, number] => [choice.column, 1]), [columns++, -1]], -highs.infinity, dailyCaps[category] - booked);
       }
+      // A café for each morning and a lunch and dinner for each day that takes them in, from the trip's own places;
+      // missing one costs more than a long way across town.
+      const cover = (members: typeof dayChoices, cost: number) => {
+        if (!members.length) return;
+        model.addVar(0, 1);
+        model.changeColCost(columns, cost);
+        addRow([...members.map((choice): [number, number] => [choice.column, 1]), [columns++, 1]], 1, highs.infinity);
+      };
+      if (morningCafeDay(input, day) && !input.stops.some((stop) => stop.fixedTime && stop.day === day && morningCafe(input, stop, places[stop.id]))) cover(dayChoices.filter((choice) => morningCafe(input, choice.stop, places[choice.stop.id])), 200);
+      for (const { meal } of mealWindowsToCover(input, day)) cover(dayChoices.filter((choice) => { const covers = mealCover(input, choice.stop, places[choice.stop.id]); return covers === meal || covers === "either"; }), 60);
     }
     model.run();
     if (model.info.get("primal_solution_status") !== 2) throw new PlanningError("Could not assign visits around the bookings and daily limits. Reduce required visits, shorten durations, or extend the daily hours.");

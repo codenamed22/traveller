@@ -777,7 +777,9 @@ export async function refreshSavedPlanWithGoogle(trip: Trip, plan: SavedPlan, si
   const schedule: Schedule = { days: [], omitted: [...plan.omitted], generatedAt: Temporal.Now.instant().toString(), warnings: ["Travel times updated. Days and visit order are unchanged.", "Opening hours have not been verified. Check venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."] };
   for (const savedDay of [...plan.days].sort((left, right) => left.day - right.day)) {
     let from = "hotel";
-    let departure = dayStart(trip, savedDay.day);
+    // A day that started early for its morning café leaves the hotel when it did.
+    const first = plan.snapshot?.schedule.days.find((entry) => entry.day === savedDay.day)?.visits[0];
+    let departure = first?.stopId === savedDay.stopIds[0] ? Math.min(dayStart(trip, savedDay.day), first.start - first.leg.minutes) : dayStart(trip, savedDay.day);
     const day: Schedule["days"][number] = { day: savedDay.day, date: tripDate(trip, savedDay.day), visits: [] };
     const routeTo = async (to: string) => {
       const options = (await Promise.all(travelModes(trip, trip.stops.find((stop) => stop.id === to)).map((mode) => computeLeg(trip, day.day, from, to, mode, departure, places, budget))))
@@ -800,7 +802,7 @@ export async function refreshSavedPlanWithGoogle(trip: Trip, plan: SavedPlan, si
     if (day.visits.length && trip.returnToHotel) day.returnLeg = await routeTo("hotel");
     schedule.days.push(day);
   }
-  const issues = validateSchedule(trip, schedule);
+  const issues = validateSchedule(trip, schedule, undefined, places);
   if (issues.length) throw new PlanningFailure("verification-failed", `Refreshed travel does not fit the saved itinerary: ${issues.join(" ")} Your saved plan was kept; replan explicitly to consider changes.`);
   schedule.warnings = [...new Set(schedule.warnings)];
   return { verified: true, schedule, places };
@@ -1108,7 +1110,9 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
     const usedEstimates = schedule.days.some((day) => day.returnLeg?.estimated || day.visits.some((visit) => visit.leg.estimated));
     try { await measure("verification", trip, edges, async () => {
     await Promise.all(schedule.days.map(async (day) => {
-      let departure = dayStart(trip, day.day);
+      // From the hotel when the day starts, or earlier on a morning that starts early for its café.
+      const first = day.visits[0];
+      let departure = first ? Math.min(dayStart(trip, day.day), first.start - first.leg.minutes) : dayStart(trip, day.day);
       let from = "hotel";
       for (const visit of day.visits) {
         const stop = trip.stops.find((candidate) => candidate.id === visit.stopId)!;
@@ -1147,7 +1151,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
         day.returnLeg = best ? { ...best, alternatives: options.filter((option) => option !== best) } : undefined;
       }
     }));
-    const issues = validateSchedule(trip, schedule);
+    const issues = validateSchedule(trip, schedule, undefined, places);
     if (schedule.days.some((day) => day.returnLeg?.estimated || day.visits.some((visit) => visit.leg.estimated))) issues.push("An estimated leg was not replaced by a Google route.");
     if (visitsOutsideHours(trip, schedule, places).length) issues.push("Actual travel moved a visit outside its opening hours.");
     if (issues.length) { verificationIssues.push(issues.join(" ")); throw new PlanningError("Actual-departure verification failed.", "conflict", false, "verification-failed"); }
@@ -1157,9 +1161,9 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
       if (samples) edges = samples.select();
       continue;
     }
-    if (!validateSchedule(trip, schedule).length) {
+    if (!validateSchedule(trip, schedule, undefined, places).length) {
       schedule.omitted.push(...input.stops.filter((stop) => !trip.stops.some((retained) => retained.id === stop.id)).map((stop) => stop.id));
-      const errors = validateSchedule(input, schedule);
+      const errors = validateSchedule(input, schedule, undefined, places);
       if (errors.length) throw new HttpError(422, errors.join(" "));
       const fits = squeezeIns(input, schedule, samples ? samples.select() : edges, places);
       if (fits.length) schedule.squeezeIns = fits;
