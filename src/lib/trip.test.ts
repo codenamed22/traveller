@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, withMeasuredTransfers, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -105,6 +105,29 @@ describe("trip constraints", () => {
     expect(formatMinute(trip, 0, 180)).toBe("04:00");
     expect(() => minuteAt(trip, 0, "02:30")).toThrow();
     expect(() => minuteAt({ ...trip, startDate: "2026-10-25" }, 0, "02:30")).toThrow();
+  });
+
+  it("times the hotel transfers by the routes the plan found, keeping typed minutes as the fallback", () => {
+    const trip = { ...newTrip(), city: "Amsterdam", hotel: "Motel One", startDate: "2026-12-24", days: 2, timeZone: "Europe/Amsterdam", dailyStart: "08:00", dailyEnd: "21:00",
+      arrival: { mode: "FLIGHT" as const, time: "13:20", place: "Amsterdam Schiphol", bufferMinutes: 60, transferMinutes: 30 },
+      departure: { mode: "TRAIN" as const, time: "17:00", place: "Amsterdam Centraal", transferMinutes: 25 }, stops: [{ ...newStop("Museum"), day: 1 }] };
+    const leg = (from: string, to: string, day: number, minutes: number) => ({ day, from, to, mode: "TRANSIT" as const, minutes, meters: 15_000 });
+    const schedule: Schedule = { days: [{ day: 0, date: "2026-12-24", visits: [], arrivalLeg: leg("arrival", "hotel", 0, 22) }, { day: 1, date: "2026-12-25", visits: [], departureLeg: leg("hotel", "departure", 1, 18) }], omitted: [], warnings: [], generatedAt: "2026-10-21T00:00:00Z" };
+    // 13:20 + 60 min at the airport + 22 min by train + 15 min to drop bags, not the 30 typed.
+    const measured = withMeasuredTransfers(trip, schedule);
+    expect(measured.arrival).toMatchObject({ transferMinutes: 30, routeMinutes: 22 });
+    expect(arrivalTimes(measured)).toMatchObject({ transfer: 22, routed: true, ready: minuteAt(trip, 0, "14:57") });
+    // 17:00 − 20 min at the station − 18 min to it.
+    expect(departureTimes(measured)).toMatchObject({ transfer: 18, routed: true, leaveHotel: minuteAt(trip, 1, "16:22") });
+    expect(tripSchema.safeParse(measured).success).toBe(true);
+    // A schedule without the legs, such as the planner's own draft, leaves the minutes alone.
+    expect(withMeasuredTransfers(measured, { days: [] })).toBe(measured);
+    expect(arrivalTimes(trip)).toMatchObject({ transfer: 30, routed: false });
+    // Accepting the plan stores the minutes on the trip and its snapshot alike, so the plan isn't out of date.
+    const accepted = applyScheduleDurations(trip, schedule);
+    expect(accepted.departure?.routeMinutes).toBe(18);
+    expect(planningKey(accepted)).toBe(planningKey(persistedPlan(schedule, accepted).snapshot!.trip));
+    expect(planningKey(accepted)).not.toBe(planningKey(trip));
   });
 
   it("starts the first day after arrival and ends the last day in time for departure", () => {

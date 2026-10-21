@@ -8,6 +8,7 @@ import type { Place, Schedule, TravelEdge, Trip } from "@/lib/trip";
 import type { PlacePhoto } from "@/lib/place-photos";
 import { placeMarkerLabel } from "@/lib/map-markers";
 import { PlacePhotos } from "./PlacePhotos";
+import { transferIcons } from "./TransferFields";
 
 type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | null; day: number; selected: string | null; onSelect: (id: string | null) => void; currentLocation?: { lat: number; lng: number }; selectedRoute?: TravelEdge; markerOrder?: string[]; photoTotal?: number; photoFrames: Partial<Record<number, PlacePhoto | null>>; photoLoading: Partial<Record<number, boolean>>; photoErrors: Partial<Record<number, boolean>>; photoDisabledMessage?: string; onPhotoRequest: (placeId: string, index: number) => void; onPhotoRetry: (placeId: string, index: number) => void;
   // Trip mode: room for the floating bar and sheet, a refit on demand, no photo popup, a closer look at the selected stop,
@@ -25,7 +26,9 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
   const stopIds = visits ? visits.visits.map((visit) => visit.stopId) : selectedRoute ? [selectedRoute.to].filter((id) => id !== "hotel") : trip.stops.map((stop) => stop.id);
-  const visiblePlaces = Object.entries(places).filter(([id]) => id === "hotel" || stopIds.includes(id));
+  // The airport or station you arrive at or leave from, on the day its route to or from the hotel is planned.
+  const hubs = selectedRoute ? [] : (["arrival", "departure"] as const).filter((kind) => places[kind] && trip[kind] && visits?.[kind === "arrival" ? "arrivalLeg" : "departureLeg"]);
+  const visiblePlaces = Object.entries(places).filter(([id]) => id === "hotel" || stopIds.includes(id) || hubs.some((kind) => kind === id));
   const selectedPlace = visiblePlaces.find(([id]) => id === selected)?.[1];
   const selectedName = selected === "hotel" ? places.hotel?.name : trip.stops.find((stop) => stop.id === selected)?.name ?? selectedPlace?.name;
   const fitLocation = fitCurrentLocation ? currentLocation : undefined;
@@ -70,7 +73,7 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   }, [map, centerOn?.token]);
   useEffect(() => {
     if (!map) return;
-    const legs = selectedRoute ? [selectedRoute] : visits ? [...visits.visits.map((visit) => visit.leg), ...(visits.returnLeg ? [visits.returnLeg] : [])] : [];
+    const legs = selectedRoute ? [selectedRoute] : visits ? [...(visits.arrivalLeg ? [visits.arrivalLeg] : []), ...visits.visits.map((visit) => visit.leg), ...(visits.returnLeg ? [visits.returnLeg] : []), ...(visits.departureLeg ? [visits.departureLeg] : [])] : [];
     const lines = legs.filter((leg) => leg.polyline).map((leg) => new google.maps.Polyline({
       map, path: decode(leg.polyline!).map(([lat, lng]) => ({ lat, lng })), strokeColor: leg.mode === "WALK" ? "#137765" : "#426eab", strokeWeight: 4, strokeOpacity: 0.85,
     }));
@@ -78,6 +81,7 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
   }, [map, visits, selectedRoute]);
   return <>
     {places.hotel && <AdvancedMarker position={places.hotel.location} title={places.hotel.name || trip.hotel} onClick={() => onSelect("hotel")}><span className="hotel-marker"><Hotel size={19} /></span></AdvancedMarker>}
+    {hubs.map((kind) => { const Icon = transferIcons[trip[kind]!.mode]; return <AdvancedMarker key={kind} position={places[kind].location} title={trip[kind]!.place || places[kind].name}><span className="hotel-marker"><Icon size={19} /></span></AdvancedMarker>; })}
     {currentLocation && <AdvancedMarker position={currentLocation} title="Current location"><span className="current-marker"><LocateFixed size={21} /></span></AdvancedMarker>}
     {stopIds.map((id, index) => {
       const visitIndex = markerOrder?.indexOf(id) ?? -1;

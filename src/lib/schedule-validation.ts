@@ -1,10 +1,12 @@
-import { allowsTravelEdge, dayEnd, dayStart, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, type Place, type Schedule, type Trip } from "./trip";
+import { allowsTravelEdge, dayEnd, dayStart, groupAllowedDays, minuteAt, planningPreferences, returnDeadline, tripDate, withMeasuredTransfers, type Place, type Schedule, type Trip } from "./trip";
 import { alternativeGroups, dayOpening, isRequiredStop } from "./visit-slots";
 
 export type ScheduleBoundary = { startId: string; startMinute: number };
 
-// `places` tells a café by its Google type, so a day may start early for one.
-export function validateSchedule(trip: Trip, schedule: Schedule, boundary?: ScheduleBoundary, places?: Record<string, Place>): string[] {
+// `places` tells a café by its Google type, so a day may start early for one. The days are bounded by the hotel
+// transfers the plan routed.
+export function validateSchedule(input: Trip, schedule: Schedule, boundary?: ScheduleBoundary, places?: Record<string, Place>): string[] {
+  const trip = withMeasuredTransfers(input, schedule);
   const errors: string[] = [];
   const seen = new Set<string>();
   const seenDays = new Set<number>();

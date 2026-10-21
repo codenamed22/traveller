@@ -206,7 +206,8 @@ export function applyOperations(journey: Journey, operations: Operation[], now: 
         if (!transfer) throw new Error(`${trip.city} has no ${kind} details yet; add them in the city settings.`);
         const next = { ...transfer };
         const parts: string[] = [];
-        if (operation.time !== undefined && operation.time !== transfer.time) { next.time = operation.time; parts.push(`${transfer.time} → ${operation.time}`); }
+        // A new time needs a new route to or from the hotel; the next plan finds it.
+        if (operation.time !== undefined && operation.time !== transfer.time) { next.time = operation.time; delete next.routeMinutes; parts.push(`${transfer.time} → ${operation.time}`); }
         if (operation.reference !== undefined && operation.reference !== (transfer.reference ?? "")) {
           if (operation.reference) next.reference = operation.reference; else delete next.reference;
           parts.push(operation.reference ? `reference ${operation.reference}` : "reference removed");

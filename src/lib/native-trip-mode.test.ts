@@ -181,4 +181,19 @@ describe("native trip mode snapshot", () => {
     const [day] = nativeTripMode(journey, Temporal.Instant.from("2026-12-31T08:00:00Z"), { canTrack: true, photos: false }).days;
     expect(day.departure).toMatchObject({ title: "Train leaves Gare du Nord 18:00", at: Date.parse("2026-12-31T17:00:00Z"), leaveAt: Date.parse("2026-12-31T16:00:00Z") });
   });
+
+  it("carries the routed leg between the hotel and the station on the departure line", () => {
+    const louvre = { ...newStop("Louvre"), placeId: "g-louvre", duration: 120 };
+    const paris: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", startDate: "2026-12-31", days: 1, timeZone: "Europe/Paris", stops: [louvre], departure: { mode: "TRAIN", time: "18:00", place: "Gare du Nord", placeId: "g-gare", bufferMinutes: 30, transferMinutes: 30, routeMinutes: 22 } };
+    const schedule: Schedule = { generatedAt: "2026-10-14T06:00:00Z", warnings: [], omitted: [], days: [
+      { day: 0, date: "2026-12-31", visits: [{ stopId: louvre.id, start: minuteAt(paris, 0, "10:00"), end: minuteAt(paris, 0, "12:00"), leg: leg("hotel", louvre.id, 20) }], returnLeg: leg(louvre.id, "hotel", 20),
+        departureLeg: leg("hotel", "departure", 22, { mode: "TRANSIT", steps: [{ instruction: "Metro", mode: "TRANSIT", line: "4", from: "Odéon", to: "Gare du Nord" }] }) },
+    ] };
+    const places = { hotel: place("g-hotel", "Hotel", 48.85), [louvre.id]: place("g-louvre", "Louvre", 48.86), departure: place("g-gare", "Gare du Nord", 48.88) };
+    const journey: Journey = { id: crypto.randomUUID(), title: "Paris", cities: [paris], plans: { [paris.id]: persistedPlan(schedule, paris, places) } };
+    const [day] = nativeTripMode(journey, Temporal.Instant.from("2026-12-31T08:00:00Z"), { canTrack: true, photos: false }).days;
+    // 18:00 − 30 min at the station − the 22 min route: leave at 17:08 (16:08 UTC).
+    expect(day.departure).toMatchObject({ leaveAt: Date.parse("2026-12-31T16:08:00Z"), leg: { mode: "TRANSIT", minutes: 22, label: "22 min by transit", from: { lat: 48.85, lng: 4.89 }, to: { lat: 48.88, lng: 4.89 }, steps: ["4 Odéon to Gare du Nord"] } });
+    expect(day.arrival).toBeUndefined();
+  });
 });

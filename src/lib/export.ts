@@ -9,7 +9,8 @@ export type ExportTravel = { mode: "Walk" | "Transit"; minutes: number; km: numb
 export type ExportVisit = { stopId: string; start: string; end: string; startInstant: string; endInstant: string; minutes: number; name: string; address: string; booked: boolean; optional: boolean; travel: ExportTravel; mapsUrl: string; yourNote?: string; note: string; sourceUrl?: string; alternativeTo?: string[] };
 export type ExportDay = { day: number; date: string; label: string; leave: string; visits: ExportVisit[]; back?: { time: string; travel: ExportTravel; to?: string; address?: string } };
 // Getting into or out of the city: the arrival runs until you are at the hotel, the departure from leaving the hotel.
-export type ExportTransfer = { kind: "arrival" | "departure"; date: string; label: string; title: string; time: string; detail: string; place: string; startInstant: string; endInstant: string };
+// `travel` is the route between the airport or station and the hotel, when the plan found one.
+export type ExportTransfer = { kind: "arrival" | "departure"; date: string; label: string; title: string; time: string; detail: string; place: string; startInstant: string; endInstant: string; travel?: ExportTravel };
 export type ExportCity = { arrival?: ExportTransfer; departure?: ExportTransfer; id: string; city: string; hotel: string; hotelAddress: string; startDate: string; endDate: string; planned: boolean; outOfDate: boolean; generatedAt?: string; days: ExportDay[]; notScheduled: { name: string; fits?: string }[] };
 export type ItineraryExport = { title: string; cities: ExportCity[]; exportedAt: string };
 
@@ -42,9 +43,10 @@ function travel(trip: Trip, edge: TravelEdge, places: Record<string, Place>): Ex
 const transferName: Record<Transfer["mode"], string> = { FLIGHT: "Flight", TRAIN: "Train", BUS: "Bus", CAR: "Drive", OTHER: "Transfer" };
 const transferHub: Record<Transfer["mode"], string> = { FLIGHT: "the airport", TRAIN: "the station", BUS: "the station", CAR: "parking", OTHER: "the terminal" };
 
-function transferExport(trip: Trip, kind: "arrival" | "departure"): ExportTransfer | undefined {
+function transferExport(trip: Trip, kind: "arrival" | "departure", route?: ExportTravel): ExportTransfer | undefined {
   const transfer = trip[kind];
   if (!transfer) return undefined;
+  const travel = route ? { travel: route } : {};
   try {
     const name = [transferName[transfer.mode], transfer.reference].filter(Boolean).join(" ");
     const place = transfer.place || transferHub[transfer.mode];
@@ -52,11 +54,11 @@ function transferExport(trip: Trip, kind: "arrival" | "departure"): ExportTransf
     if (kind === "arrival") {
       const times = arrivalTimes(trip)!;
       const date = tripDate(trip, 0);
-      return { kind, date, label: `Day 1 · ${dateLabel(date)}`, title: `${name} ${transfer.mode === "FLIGHT" ? "lands at" : "arrives at"} ${place}`, time: transfer.time, place: transfer.place, detail: `${times.buffer} min at ${transferHub[transfer.mode]}, ${times.transfer} min to ${hotel}; at the hotel about ${formatMinute(trip, 0, times.atHotel)}`, startInstant: instantForMinute(trip, 0, times.arrive).toString(), endInstant: instantForMinute(trip, 0, times.atHotel).toString() };
+      return { kind, date, label: `Day 1 · ${dateLabel(date)}`, title: `${name} ${transfer.mode === "FLIGHT" ? "lands at" : "arrives at"} ${place}`, time: transfer.time, place: transfer.place, detail: `${times.buffer} min at ${transferHub[transfer.mode]}, ${times.transfer} min to ${hotel}; at the hotel about ${formatMinute(trip, 0, times.atHotel)}`, startInstant: instantForMinute(trip, 0, times.arrive).toString(), endInstant: instantForMinute(trip, 0, times.atHotel).toString(), ...travel };
     }
     const times = departureTimes(trip)!;
     const date = tripDate(trip, times.day);
-    return { kind, date, label: `Day ${times.day + 1} · ${dateLabel(date)}`, title: `${name} ${transfer.mode === "FLIGHT" ? "takes off from" : "leaves"} ${place} at ${transfer.time}`, time: formatMinute(trip, times.day, times.direct ? times.end : times.leaveHotel), place: transfer.place, detail: times.direct ? `Checked out; at ${place} by ${formatMinute(trip, times.day, times.end)}, ${times.buffer} min before departure` : `Leave ${hotel} ${formatMinute(trip, times.day, times.leaveHotel)}: ${times.transfer} min to ${place}, ${times.buffer} min there before departure`, startInstant: instantForMinute(trip, times.day, times.direct ? times.end : times.leaveHotel).toString(), endInstant: instantForMinute(trip, times.day, times.depart).toString() };
+    return { kind, date, label: `Day ${times.day + 1} · ${dateLabel(date)}`, title: `${name} ${transfer.mode === "FLIGHT" ? "takes off from" : "leaves"} ${place} at ${transfer.time}`, time: formatMinute(trip, times.day, times.direct ? times.end : times.leaveHotel), place: transfer.place, detail: times.direct ? `Checked out; at ${place} by ${formatMinute(trip, times.day, times.end)}, ${times.buffer} min before departure` : `Leave ${hotel} ${formatMinute(trip, times.day, times.leaveHotel)}: ${times.transfer} min to ${place}, ${times.buffer} min there before departure`, startInstant: instantForMinute(trip, times.day, times.direct ? times.end : times.leaveHotel).toString(), endInstant: instantForMinute(trip, times.day, times.depart).toString(), ...travel };
   } catch {
     return undefined;
   }
@@ -81,7 +83,9 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
       const trip: Trip = snapshot?.trip ?? current;
       const places = snapshot?.places ?? {};
       const name = (id: string) => trip.stops.find((stop) => stop.id === id)?.name ?? "Removed place";
-      const base = { ...(transferExport(trip, "arrival") ? { arrival: transferExport(trip, "arrival") } : {}), ...(transferExport(trip, "departure") ? { departure: transferExport(trip, "departure") } : {}), id: current.id, city: current.city || current.title, hotel: trip.hotel, hotelAddress: places.hotel?.address ?? "", startDate: current.startDate, endDate: tripDate(current, current.days - 1) };
+      const route = (kind: "arrival" | "departure") => { const leg = snapshot?.schedule.days.find((day) => day.day === (kind === "arrival" ? 0 : trip.days - 1))?.[kind === "arrival" ? "arrivalLeg" : "departureLeg"]; return leg && travel(trip, leg, places); };
+      const [arrival, departure] = [transferExport(trip, "arrival", route("arrival")), transferExport(trip, "departure", route("departure"))];
+      const base = { ...(arrival ? { arrival } : {}), ...(departure ? { departure } : {}), id: current.id, city: current.city || current.title, hotel: trip.hotel, hotelAddress: places.hotel?.address ?? "", startDate: current.startDate, endDate: tripDate(current, current.days - 1) };
       if (!snapshot) return { ...base, planned: false, outOfDate: false, days: [], notScheduled: current.stops.map((stop) => ({ name: stop.name })) };
       // Alternatives imported from one itinerary line share its note; name the pairing instead of repeating the note.
       const scheduled = snapshot.schedule.days.flatMap((day) => day.visits.map((visit) => visit.stopId));
@@ -134,7 +138,7 @@ const html = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&":
 export function itineraryHtml(data: ItineraryExport, autoPrint = true) {
   const range = (city: ExportCity) => city.startDate === city.endDate ? dateLabel(city.startDate) : `${dateLabel(city.startDate)} – ${dateLabel(city.endDate)}`;
   const leg = (travel: ExportTravel) => `<div class="leg"><span>${html(travelLabel(travel))}${travel.estimated ? " · estimated" : ""}</span> <a href="${html(travel.directionsUrl)}">Directions</a></div>`;
-  const transfer = (entry: ExportTransfer) => `<p class="transfer"><span class="time">${html(entry.label.replace(/^Day \d+ · /, ""))} ${html(entry.time)}</span><span><strong>${html(entry.kind === "arrival" ? "Arrive" : "Leave")}: ${html(entry.title)}</strong><span class="muted">${html(entry.detail)}</span></span></p>`;
+  const transfer = (entry: ExportTransfer) => `<p class="transfer"><span class="time">${html(entry.label.replace(/^Day \d+ · /, ""))} ${html(entry.time)}</span><span><strong>${html(entry.kind === "arrival" ? "Arrive" : "Leave")}: ${html(entry.title)}</strong><span class="muted">${html(entry.detail)}</span></span></p>${entry.travel ? leg(entry.travel) : ""}`;
   const cities = data.cities.map((city) => `
     <section class="city">
       <h2>${html(city.city)} <small>${html(range(city))}</small></h2>
@@ -232,7 +236,7 @@ function sheetXml(rows: Cell[][], widths: number[]) {
 
 export function itineraryRows(data: ItineraryExport): Cell[][] {
   const rows: Cell[][] = [["City", "Date", "Day", "Start", "End", "Place", "Booked", "Minutes", "Getting there", "Travel min", "Address", "Notes", "Map", "Directions"]];
-  const transfer = (city: ExportCity, entry: ExportTransfer): Cell[] => [city.city, entry.date, entry.label, entry.time, "", `${entry.kind === "arrival" ? "Arrive" : "Leave"}: ${entry.title}`, "", null, entry.detail, null, entry.place, "", null, null];
+  const transfer = (city: ExportCity, entry: ExportTransfer): Cell[] => [city.city, entry.date, entry.label, entry.time, "", `${entry.kind === "arrival" ? "Arrive" : "Leave"}: ${entry.title}`, "", null, entry.travel ? travelLabel(entry.travel) : entry.detail, entry.travel?.minutes ?? null, entry.place, entry.travel ? entry.detail : "", null, entry.travel ? { link: entry.travel.directionsUrl, text: "Directions" } : null];
   for (const city of data.cities) {
     if (city.arrival) rows.push(transfer(city, city.arrival));
     for (const day of city.days) {

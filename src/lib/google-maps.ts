@@ -2,7 +2,7 @@ import "server-only";
 import { writeFile } from "node:fs/promises";
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, assumedGroupEdge, dayEnd, dayStart, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type TravelEdge, type TravelMode, type Trip } from "./trip";
+import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, arrivalTimes, assumedGroupEdge, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, withTransferRoutes, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type Transfer, type TravelEdge, type TravelMode, type Trip } from "./trip";
 import { HttpError } from "./server";
 import { blockedDayFixes, kmBetween, solveTrip, solveTripByDays, PlanningError, squeezeIns, travelEstimator, twoLegBound, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
 import { validateSchedule } from "./schedule-validation";
@@ -224,7 +224,8 @@ function departureInstant(trip: Trip, day: number, minute: number, date?: string
   return Temporal.PlainDate.from(date).toZonedDateTime({ timeZone: trip.timeZone, plainTime: instant.toZonedDateTimeISO(trip.timeZone).toPlainTime() }).toInstant();
 }
 
-export async function computeLeg(trip: Trip, day: number, from: string, to: string, mode: TravelMode, departure: number, places: Record<string, Pick<Place, "id">>, budget: RequestBudget, includeDetails = true): Promise<TravelEdge | null> {
+// `destination` names the place to route to when `to` alone would be read as the day's endpoint.
+export async function computeLeg(trip: Trip, day: number, from: string, to: string, mode: TravelMode, departure: number, places: Record<string, Pick<Place, "id">>, budget: RequestBudget, includeDetails = true, destination = endpointKey(trip, day, to, "to")): Promise<TravelEdge | null> {
   budget.consume("routes", 1);
   if (mode === "TRANSIT") {
     const delta = instantForMinute(trip, day, departure).epochMilliseconds - Date.now();
@@ -233,7 +234,7 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
   const request = async (date?: string) => {
     // Without a language Google picks one from where the request comes from; directions came back in German.
     const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", includeDetails ? "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode,routes.legs.steps.navigationInstruction,routes.legs.steps.transitDetails,routes.localizedValues.transitFare" : "routes.duration,routes.distanceMeters", {
-      origin: { placeId: places[from].id }, destination: { placeId: places[endpointKey(trip, day, to, "to")].id }, travelMode: mode, languageCode: "en",
+      origin: { placeId: places[from].id }, destination: { placeId: places[destination].id }, travelMode: mode, languageCode: "en",
       ...(mode === "TRANSIT" ? { departureTime: departureInstant(trip, day, departure, date).toString() } : {}),
       ...(mode === "TRANSIT" && planningPreferences(trip).transitPreference !== "DEFAULT" ? { transitPreferences: { routingPreference: planningPreferences(trip).transitPreference } } : {}),
     }, budget.requestSignal());
@@ -802,6 +803,13 @@ export async function refreshSavedPlanWithGoogle(trip: Trip, plan: SavedPlan, si
     if (day.visits.length && trip.returnToHotel) day.returnLeg = await routeTo("hotel");
     schedule.days.push(day);
   }
+  // The hotel transfers keep the routes the plan was made with while the trip still uses their minutes.
+  for (const [kind, key, number] of [["arrival", "arrivalLeg", 0], ["departure", "departureLeg", trip.days - 1]] as const) {
+    const leg = plan.snapshot?.schedule.days.find((entry) => entry.day === number)?.[key];
+    const target = schedule.days.find((entry) => entry.day === number);
+    const place = plan.snapshot?.places[kind];
+    if (leg && target && place && trip[kind]?.routeMinutes === Math.ceil(leg.minutes)) { target[key] = leg; places[kind] = place; }
+  }
   const issues = validateSchedule(trip, schedule, undefined, places);
   if (issues.length) throw new PlanningFailure("verification-failed", `Refreshed travel does not fit the saved itinerary: ${issues.join(" ")} Your saved plan was kept; replan explicitly to consider changes.`);
   schedule.warnings = [...new Set(schedule.warnings)];
@@ -850,6 +858,47 @@ export type PlanningStage = {
   groups?: GroupRouteEvidence[];
   code?: PlanningFailureCode;
 };
+
+// A short walk beats waiting for transit, even with bags.
+const transferWalkMinutes = 15;
+
+// The routes between the airport or station and the hotel: from it once you have landed and cleared it, and to it in time
+// for the train or flight. A direct departure already ends the last day there, and a car isn't routed. Where Google has
+// no route, or the place can't be found, the typed or default minutes stand.
+export async function routeTransfers(trip: Trip, hotel: Place, signal?: AbortSignal) {
+  const budget = new RequestBudget(8, signal);
+  const places: Record<string, Place> = { hotel };
+  const legs: { arrival?: TravelEdge; departure?: TravelEdge } = {};
+  const warnings: string[] = [];
+  const hub = async (transfer: Transfer): Promise<Place | undefined> => {
+    if (transfer.placeId && transfer.location) return { id: transfer.placeId, name: transfer.place || "", address: "", location: transfer.location };
+    if (transfer.placeId) return placeDetails(transfer.placeId, budget.requestSignal()).catch(() => undefined);
+    // Typed but never confirmed on the map: the best match near the hotel.
+    return transfer.place ? (await searchPlaces(transfer.place, hotel.location).catch(() => []))[0] : undefined;
+  };
+  await Promise.all((["arrival", "departure"] as const).map(async (kind) => {
+    const transfer = trip[kind];
+    if (!transfer || transfer.mode === "CAR" || (kind === "departure" && directDeparture(trip))) return;
+    let day: number, departure: number;
+    try {
+      if (kind === "arrival") { const times = arrivalTimes(trip)!; [day, departure] = [0, times.arrive + times.buffer]; }
+      else { const times = departureTimes(trip)!; [day, departure] = [times.day, times.leaveHotel]; }
+    } catch { return; }
+    const place = await hub(transfer);
+    const name = transfer.place || place?.name || `the ${kind === "arrival" ? "arrival" : "departure"} ${transfer.mode === "FLIGHT" ? "airport" : "station"}`;
+    if (!place) { warnings.push(`${name} could not be found on the map, so the time to and from the hotel is your own estimate.`); return; }
+    places[kind] = { ...place, name: transfer.place || place.name };
+    const [from, to] = kind === "arrival" ? [kind, "hotel"] : ["hotel", kind];
+    const modes = travelModes(trip).filter((mode) => mode === "TRANSIT" || kmBetween(place.location, hotel.location) <= 2);
+    const options = (await Promise.all(modes.map((mode) => computeLeg(trip, day, from, to, mode, departure, places, budget, true, to).catch(() => null))))
+      .filter((edge): edge is TravelEdge => edge !== null && allowsTravelEdge(trip, edge)).sort((left, right) => left.minutes - right.minutes);
+    const best = options.find((edge) => edge.mode === "WALK" && edge.minutes <= transferWalkMinutes) ?? options[0];
+    if (!best) { warnings.push(`Google returned no route between ${name} and the hotel, so that transfer uses your own estimate.`); return; }
+    legs[kind] = { ...best, ...(options.length > 1 ? { alternatives: options.filter((edge) => edge !== best) } : {}) };
+  }));
+  delete places.hotel;
+  return { legs, places, warnings };
+}
 
 export async function planWithGoogle(input: Trip, options: { onStage?: (stage: PlanningStage) => void; signal?: AbortSignal } = {}) {
   if (options.signal?.aborted) throw new HttpError(499, "The planning request was cancelled.");
@@ -919,6 +968,9 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   ids.forEach((id, index) => { places[id] = details[index]; });
   if (directDeparture(input)) places.departure = await placeDetails(input.departure!.placeId!, options.signal);
   if (places.hotel.timeZone && places.hotel.timeZone !== input.timeZone) throw new HttpError(400, `The hotel timezone is ${places.hotel.timeZone}. Update the trip timezone before planning.`);
+  // The hotel transfers' real minutes bound the first and last days, so they are routed before anything else.
+  const transfers = await routeTransfers(input, places.hotel, options.signal);
+  input = withTransferRoutes(input, transfers.legs);
   useOrTools = !coupled && Boolean(process.env.TRAVELLER_ROUTING_PYTHON) && !usesVisitTiming(input, { places });
   joint = useOrTools || coupled;
   const grouped = !joint && input.stops.length > jointPlanningLimit;
@@ -933,6 +985,7 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
   try {
   const warnings = ["Google's regular opening hours were applied where available; holiday and special hours were not checked. Confirm venue hours and ticket conditions.", "Transit schedules and fares can change. Refresh before departure."];
   if (grouped) warnings.push("Visits were grouped around bookings and daily limits. A better arrangement may exist.");
+  warnings.push(...transfers.warnings);
   const activeIds = ["hotel", ...trip.stops.map((stop) => stop.id)];
   const dayIds = Array.from({ length: trip.days }, (_, day) => activeIds.filter((id) => id === "hotel" || stopAllowedOnDay(trip, trip.stops.find((stop) => stop.id === id)!, day)));
   const allAssigned = trip.stops.every((stop) => stop.day !== null);
@@ -1178,7 +1231,10 @@ export async function planWithGoogle(input: Trip, options: { onStage?: (stage: P
       schedule.warnings = [...new Set([...schedule.warnings, ...warnings])];
       // Development only: keep the last solved problem so a surprising itinerary can be replayed offline.
       if (process.env.NODE_ENV === "development" && debugProblem) await writeFile("/tmp/traveller-plan-last.json", JSON.stringify({ ...debugProblem, places, stages })).catch(() => undefined);
-      return { status: "verified" as const, schedule, places, verified: true as const };
+      const [first, last] = [schedule.days.find((day) => day.day === 0), schedule.days.find((day) => day.day === input.days - 1)];
+      if (first && transfers.legs.arrival) first.arrivalLeg = transfers.legs.arrival;
+      if (last && transfers.legs.departure) last.departureLeg = transfers.legs.departure;
+      return { status: "verified" as const, schedule, places: { ...places, ...transfers.places }, verified: true as const };
     }
   }
   // Name what the last check found, so the traveller knows which visit or day to give more room.

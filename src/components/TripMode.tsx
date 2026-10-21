@@ -261,6 +261,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       <div className="trip-timeline">
         {entry.replanned && <p className="trip-mode-note">Today was replanned; showing the updated day.</p>}
         {entry.day === 0 && entry.trip.arrival && <TransferLine trip={entry.trip} kind="arrival">{ticketLinks({ cityId: entry.cityId, target: "arrival", stopId: null })}</TransferLine>}
+        {entry.day === 0 && entry.plan.arrivalLeg && <LegDetails edge={entry.plan.arrivalLeg} places={entry.places} />}
         {entry.progress?.completed.filter((visit) => !entry.plan.visits.some((planned) => planned.stopId === visit.stopId)).map((visit) => <p className="trip-timeline-done" key={visit.stopId}><Check size={14} />{stopName(visit.stopId)} · {formatMinute(entry.cityTrip, entry.day, visit.start)}–{formatMinute(entry.cityTrip, entry.day, visit.end)}</p>)}
         {entry.plan.visits.length > 0 && <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{entry.trip.hotel}</strong><span>Leave {firstLeave !== undefined ? formatMinute(entry.trip, entry.day, firstLeave) : ""}</span></div></div>}
         {entry.plan.visits.map((visit, index) => {
@@ -277,6 +278,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           </div>;
         })}
         {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
+        {entry.day === entry.trip.days - 1 && entry.plan.departureLeg && <LegDetails edge={entry.plan.departureLeg} places={entry.places} />}
         {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure">{ticketLinks({ cityId: entry.cityId, target: "departure", stopId: null })}</TransferLine>}
         {plans[entry.cityId]?.snapshot && <OmittedPlaces trip={entry.trip} schedule={plans[entry.cityId].snapshot!.schedule} />}
         {(journaling || dayJournal.note) && <DayNote key={entry.key} note={dayJournal.note} onSave={journaling ? (text) => onJournal!({ kind: "note", cityId: entry.cityId, day: entry.day, text }) : undefined} />}

@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
 import { asJourney, type Journey } from "./journey";
 import { exportFilename, exportNote, itineraryExport, itineraryHtml, itineraryIcs, itineraryRows, itineraryXlsx } from "./export";
-import { minuteAt, newStop, newTrip, persistedPlan, type Place, type Schedule, type TravelEdge, type Trip } from "./trip";
+import { minuteAt, newStop, newTrip, persistedPlan, withMeasuredTransfers, type Place, type Schedule, type TravelEdge, type Trip } from "./trip";
 
 const place = (id: string, name: string, address: string): Place => ({ id, name, address, location: { lat: 52.37, lng: 4.89 } });
 
@@ -135,6 +135,33 @@ describe("itinerary export", () => {
     // 13:20 to 14:50 in Amsterdam in December is 12:20 to 13:50 UTC.
     expect(calendar).toContain("DTSTART:20261224T122000Z\r\nDTEND:20261224T135000Z\r\nSUMMARY:Flight QR 273 lands at Amsterdam Schiphol");
     expect(calendar).toContain("SUMMARY:Train leaves Amsterdam Centraal at 17:00");
+  });
+  it("adds the routes between the airport or station and the hotel, timed by the plan", () => {
+    const { journey: data, trip } = journey();
+    const snapshot = data.plans[trip.id]!.snapshot!;
+    const travelled: Trip = { ...trip, arrival: { mode: "FLIGHT", time: "13:20", place: "Amsterdam Schiphol", placeId: "g-schiphol", reference: "QR 273" }, departure: { mode: "TRAIN", time: "17:00", place: "Amsterdam Centraal", placeId: "g-centraal" } };
+    const schedule: Schedule = { ...snapshot.schedule, days: [
+      { ...snapshot.schedule.days[0], arrivalLeg: { day: 0, from: "arrival", to: "hotel", mode: "TRANSIT", minutes: 22, meters: 15_000, steps: [{ instruction: "Train", mode: "TRANSIT", line: "Sprinter", from: "Schiphol Airport", to: "Amsterdam Zuid" }] } },
+      { ...snapshot.schedule.days[1], departureLeg: { day: 1, from: "hotel", to: "departure", mode: "WALK", minutes: 18, meters: 1400 } },
+    ] };
+    const places = { ...snapshot.places, arrival: place("g-schiphol", "Amsterdam Schiphol", "Evert van de Beekstraat, Schiphol"), departure: place("g-centraal", "Amsterdam Centraal", "Stationsplein, Amsterdam") };
+    const accepted = withMeasuredTransfers(travelled, schedule);
+    const exported = itineraryExport({ ...data, cities: [accepted, data.cities[1]], plans: { ...data.plans, [trip.id]: persistedPlan(schedule, accepted, places) } });
+    const [amsterdam] = exported.cities;
+    // 13:20 + 45 min at the airport + the 22 min route, not the 45 min assumed.
+    expect(amsterdam.arrival).toMatchObject({ detail: "45 min at the airport, 22 min to Motel One; at the hotel about 14:27", travel: { mode: "Transit", minutes: 22, lines: ["Sprinter Schiphol Airport → Amsterdam Zuid"] } });
+    expect(amsterdam.arrival!.travel!.directionsUrl).toContain("origin_place_id=g-schiphol");
+    expect(amsterdam.arrival!.travel!.directionsUrl).toContain("destination_place_id=g-hotel");
+    expect(amsterdam.departure).toMatchObject({ time: "16:22", detail: "Leave Motel One 16:22: 18 min to Amsterdam Centraal, 20 min there before departure", travel: { mode: "Walk", minutes: 18, km: 1.4 } });
+    expect(amsterdam.departure!.travel!.directionsUrl).toContain("destination_place_id=g-centraal");
+    const page = itineraryHtml(exported, false);
+    expect(page).toContain("Transit 22 min · Sprinter Schiphol Airport → Amsterdam Zuid");
+    expect(page.indexOf("Transit 22 min")).toBeGreaterThan(page.indexOf("Arrive: Flight"));
+    expect(page.indexOf("Walk 18 min · 1.4 km")).toBeGreaterThan(page.indexOf("Leave: Train"));
+    const row = itineraryRows(exported).find((entry) => entry[5] === "Leave: Train leaves Amsterdam Centraal at 17:00")!;
+    expect(row.slice(8, 14)).toEqual(["Walk 18 min · 1.4 km", 18, "Amsterdam Centraal", "Leave Motel One 16:22: 18 min to Amsterdam Centraal, 20 min there before departure", null, { link: amsterdam.departure!.travel!.directionsUrl, text: "Directions" }]);
+    // Without a routed leg the transfer keeps its own estimate and no directions.
+    expect(itineraryExport({ ...data, cities: [travelled, data.cities[1]], plans: { ...data.plans, [trip.id]: persistedPlan(snapshot.schedule, travelled, snapshot.places) } }).cities[0].arrival!.travel).toBeUndefined();
   });
   it("says where a place left out could still fit", () => {
     const { journey: data, trip } = journey();

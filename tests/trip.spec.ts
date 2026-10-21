@@ -911,6 +911,9 @@ test("arrival and departure narrow the first and last day and appear in the itin
     // Day 1 starts at 15:05 (minute 905) after a 13:20 landing.
     let cursor = 905;
     generated.schedule.days[0].visits = generated.schedule.days[0].visits.map((visit) => { const start = cursor + 10; cursor = start + (visit.end - visit.start); return { ...visit, start, end: cursor }; });
+    // The plan routes the airport to the hotel: 35 min by train, not the 45 assumed.
+    if (candidate.arrival) generated.schedule.days[0].arrivalLeg = { day: 0, from: "arrival", to: "hotel", mode: "TRANSIT", minutes: 35, meters: 26_000, steps: [{ instruction: "Train", mode: "TRANSIT", line: "RER B", from: "Aéroport CDG 2", to: "Châtelet" }] };
+    generated.places = { arrival: { id: "cdg-id", name: "Paris Charles de Gaulle", address: "95700 Roissy-en-France", location: { lat: 49.009, lng: 2.547 } } };
     await route.fulfill({ json: generated });
   });
   await openPlanningTrip(page, "Private hotel", [{ ...newStop("Louvre Museum"), placeId: "museum-id", duration: 90 }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id", duration: 60 }]);
@@ -932,7 +935,7 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await leaving.getByLabel("Leaving by").selectOption("TRAIN");
   await leaving.getByLabel("Departs").fill("17:00");
   await leaving.getByLabel("Station or stop").fill("Gare du Nord");
-  await leaving.getByLabel("Hotel to station (min)").fill("25");
+  await leaving.getByLabel("Hotel to station, if no route (min)").fill("25");
   await expect(leaving.getByRole("status")).toHaveText("Visits end about 16:00 on Tue 13 Oct (back at the hotel for bags, leave 16:15, 25 min to the station, 20 min there before 17:00).");
   await leaving.getByLabel("Check out in the morning and go straight there from the last visit").check();
   await expect(leaving.getByRole("status")).toHaveText("Confirm Gare du Nord on the map to plan the last leg straight there.");
@@ -951,8 +954,14 @@ test("arrival and departure narrow the first and last day and appear in the itin
   expect(submitted.at(-1)).toMatchObject({ arrival: { mode: "FLIGHT", time: "13:20", place: "Paris Charles de Gaulle", reference: "AF 1234" }, departure: { mode: "TRAIN", time: "17:00", transferMinutes: 25 } });
   await page.getByRole("button", { name: /^Itinerary/ }).click();
   await expect(page.getByLabel("Arrival")).toContainText("Land at Paris Charles de Gaulle 13:20 · AF 1234");
-  await expect(page.getByLabel("Arrival")).toContainText("At Private hotel about 14:50");
-  await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 15:05");
+  await expect(page.getByLabel("Arrival")).toContainText("At Private hotel about 14:40");
+  const arrivalLeg = page.locator(".travel-leg").first();
+  await expect(arrivalLeg).toContainText("Public transit · 35 min");
+  await arrivalLeg.locator("summary").click();
+  await expect(arrivalLeg).toContainText("RER B Aéroport CDG 2 to Châtelet");
+  await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 14:55");
+  // The routed time replaces the assumed 45 min; the typed minutes stay as the fallback.
+  await expect(arriving.getByRole("status")).toHaveText("Sightseeing starts about 14:55 on Mon 12 Oct (lands 13:20, 45 min at the airport, 35 min to the hotel, 15 min to drop bags).");
   await page.screenshot({ path: testInfo.outputPath("arrival-itinerary.png"), fullPage: true });
   expect(errors).toEqual([]);
 });
@@ -974,7 +983,7 @@ test("a direct departure ends the last day at the confirmed station", async ({ p
   await expect(dialog).toHaveCount(0);
   const leaving = page.locator("fieldset", { has: page.getByText("Leaving", { exact: true }) });
   await expect(leaving.getByRole("status")).toHaveText("Check out in the morning; the last visit on Mon 12 Oct is planned so you reach Gare du Nord by 16:40, 20 min before 17:00.");
-  await expect(leaving.getByLabel("Hotel to station (min)")).toHaveCount(0);
+  await expect(leaving.getByLabel("Hotel to station, if no route (min)")).toHaveCount(0);
   await page.getByRole("button", { name: /^Itinerary/ }).click();
   await expect(page.getByText("At Gare du Nord", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Departure")).toContainText("Checked out; at Gare du Nord by 16:40");

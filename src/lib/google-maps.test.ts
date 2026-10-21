@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Temporal } from "@js-temporal/polyfill";
-import { instantAt, minuteAt, newStop, newTrip, planningPreferences, type Trip } from "./trip";
+import { applyScheduleDurations, dayStart, instantAt, instantForMinute, minuteAt, newStop, newTrip, persistedPlan, planningPreferences, withMeasuredTransfers, type Trip } from "./trip";
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, getPlacePhoto, planWithGoogle, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, planWithGoogle, routeTransfers, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -927,5 +927,74 @@ describe("pinned visit routes", () => {
     expect(edges.some((edge) => edge.day === 0 && edge.from === b.id && edge.to === a.id)).toBe(true);
     const asked = requests.flatMap((body) => ((body.destinations as { waypoint: { placeId: string } }[] | undefined) ?? []).map((entry) => `${(body.origins as { waypoint: { placeId: string } }[])[0].waypoint.placeId}>${entry.waypoint.placeId}`));
     expect(asked.sort()).toEqual(["A-place>B-place", "B-place>A-place"]);
+  });
+});
+
+describe("airport and station transfers", () => {
+  const hotel = { id: "hotel-place", name: "Hotel", address: "", location: { lat: 48.86, lng: 2.33 } };
+  const transit = (trip: Trip): Trip => ({ ...trip, planning: { ...planningPreferences(trip), mode: "AUTO" } });
+
+  it("routes the station to the hotel after arriving and the hotel to the airport before leaving, and bounds the days by them", async () => {
+    const requests = mockGoogle(600, 1500);
+    const trip: Trip = { ...transit(fixture()), days: 2, dailyStart: "09:00", dailyEnd: "21:00", returnToHotel: true,
+      stops: [{ ...newStop("Museum"), placeId: "museum-place", day: 0 }, { ...newStop("Park"), placeId: "park-place", day: 1 }],
+      arrival: { mode: "TRAIN", time: "11:35", place: "Gare du Nord", placeId: "gare-place", location: { lat: 48.88, lng: 2.355 }, bufferMinutes: 10, transferMinutes: 40 },
+      departure: { mode: "FLIGHT", time: "19:55", place: "CDG", placeId: "cdg-place", location: { lat: 49.0, lng: 2.55 }, bufferMinutes: 120 } };
+    const result = await planWithGoogle(trip);
+    const [first, last] = result.schedule.days;
+    expect(first.arrivalLeg).toMatchObject({ day: 0, from: "arrival", to: "hotel", mode: "TRANSIT", minutes: 25 });
+    expect(last.departureLeg).toMatchObject({ day: 1, from: "hotel", to: "departure", mode: "TRANSIT", minutes: 25 });
+    expect(result.places).toMatchObject({ arrival: { id: "gare-place", name: "Gare du Nord" }, departure: { id: "cdg-place", name: "CDG" } });
+    // Leaving the station after its 10 minutes, and leaving the hotel 120 min + the 45 min default before the flight.
+    const route = (origin: string, destination: string) => requests.find((body) => (body.origin as { placeId: string } | undefined)?.placeId === origin && (body.destination as { placeId: string }).placeId === destination && body.travelMode === "TRANSIT");
+    expect(route("gare-place", "hotel-place")?.departureTime).toBe(instantForMinute(trip, 0, minuteAt(trip, 0, "11:45")).toString());
+    expect(route("hotel-place", "cdg-place")?.departureTime).toBe(instantForMinute(trip, 1, minuteAt(trip, 1, "17:10")).toString());
+    // The day starts once the 25-minute route and 15 minutes for bags are done, not after the 40 typed.
+    const measured = withMeasuredTransfers(trip, result.schedule);
+    expect(dayStart(measured, 0)).toBe(minuteAt(trip, 0, "12:25"));
+    expect(first.visits[0].start - first.visits[0].leg.minutes).toBeGreaterThanOrEqual(minuteAt(trip, 0, "12:25"));
+    expect(validateSchedule(trip, result.schedule)).toEqual([]);
+    const accepted = applyScheduleDurations(trip, result.schedule);
+    expect(accepted).toMatchObject({ arrival: { routeMinutes: 25, transferMinutes: 40 }, departure: { routeMinutes: 25 } });
+    expect(() => persistedPlan(result.schedule, accepted, result.places)).not.toThrow();
+    // A refresh keeps the saved transfer routes while the trip still uses their minutes.
+    const plan = persistedPlan(result.schedule, accepted, result.places);
+    const refreshed = await refreshSavedPlanWithGoogle(accepted, plan);
+    expect(refreshed.schedule.days[0].arrivalLeg).toEqual(first.arrivalLeg);
+    expect(refreshed.places.departure).toMatchObject({ id: "cdg-place" });
+  });
+
+  it("finds an unconfirmed station near the hotel and routes a one-day arrival to the hotel, not the station it leaves from", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("searchText")) { requests.push(JSON.parse(init!.body as string)); return Response.json({ places: [{ id: "midi-place", displayName: { text: "Bruxelles-Midi" }, formattedAddress: "Brussels", location: { latitude: 48.9, longitude: 2.4 } }] }); }
+      const body = JSON.parse(init!.body as string);
+      requests.push(body);
+      return Response.json({ routes: [{ duration: "1200s", distanceMeters: 5000 }] });
+    }));
+    const trip: Trip = { ...transit(fixture()), returnToHotel: true,
+      arrival: { mode: "TRAIN", time: "09:00", place: "Brussels-Midi" },
+      departure: { mode: "TRAIN", time: "18:00", place: "Centraal", placeId: "station-place", direct: true } };
+    const { legs, places, warnings } = await routeTransfers(trip, hotel);
+    expect(requests[0]).toMatchObject({ textQuery: "Brussels-Midi", locationBias: { circle: { center: { latitude: 48.86, longitude: 2.33 } } } });
+    expect(legs.arrival).toMatchObject({ from: "arrival", to: "hotel", minutes: 20 });
+    expect(requests[1]).toMatchObject({ origin: { placeId: "midi-place" }, destination: { placeId: "hotel-place" } });
+    // A direct departure already ends the day at the station; your typed name stays.
+    expect(legs.departure).toBeUndefined();
+    expect(places).toEqual({ arrival: expect.objectContaining({ id: "midi-place", name: "Brussels-Midi" }) });
+    expect(warnings).toEqual([]);
+  });
+
+  it("leaves a car and an unrouted transfer to the typed minutes", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const calls = vi.fn(async () => Response.json({ routes: [] }));
+    vi.stubGlobal("fetch", calls);
+    const trip: Trip = { ...transit(fixture()), arrival: { mode: "CAR", time: "09:00", place: "Garage" }, departure: { mode: "TRAIN", time: "18:00", place: "Gare de Lyon", placeId: "lyon-place", location: { lat: 48.84, lng: 2.37 } } };
+    const { legs, warnings } = await routeTransfers(trip, hotel);
+    expect(legs).toEqual({});
+    expect(calls).toHaveBeenCalledTimes(1);
+    expect(warnings).toEqual(["Google returned no route between Gare de Lyon and the hotel, so that transfer uses your own estimate."]);
+    expect(withMeasuredTransfers(trip, { days: [] })).toBe(trip);
   });
 });

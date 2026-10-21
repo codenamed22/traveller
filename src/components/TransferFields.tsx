@@ -39,11 +39,18 @@ export function transferSummary(trip: Trip, kind: Kind) {
   }
 }
 
+// Changing when, where or how you travel drops the routed minutes; the next plan routes the transfer again.
+function unrouted(transfer: Transfer): Transfer {
+  const next = { ...transfer };
+  delete next.routeMinutes;
+  return next;
+}
+
 // `children`, such as its tickets, go below the fields once there is an arrival or departure.
 export function TransferFields({ trip, kind, onChange, onFind, children }: { trip: Trip; kind: Kind; onChange: (transfer: Transfer | undefined) => void; onFind?: () => void; children?: ReactNode }) {
   const transfer = trip[kind];
   const defaults = transferDefaults[kind];
-  const patch = (next: Partial<Transfer>) => transfer && onChange({ ...transfer, ...next });
+  const patch = (next: Partial<Transfer>) => transfer && onChange({ ...(Object.keys(next).every((key) => key === "reference") ? transfer : unrouted(transfer)), ...next });
   const minutes = (value: string) => value === "" ? undefined : Math.min(360, Math.max(0, Math.round(Number(value))));
   const title = kind === "arrival" ? "Arriving" : "Leaving";
   return <fieldset className="transfer-fields">
@@ -51,18 +58,18 @@ export function TransferFields({ trip, kind, onChange, onFind, children }: { tri
     <label className="field">{kind === "arrival" ? "How you arrive" : "How you leave"}<select aria-label={`${title} by`} value={transfer?.mode ?? ""} onChange={(event) => {
       const mode = event.target.value as Transfer["mode"] | "";
       if (!mode) return onChange(undefined);
-      onChange(transfer ? { ...transfer, mode } : { mode, time: kind === "arrival" ? "12:00" : "18:00", place: "" });
+      onChange(transfer ? { ...unrouted(transfer), mode } : { mode, time: kind === "arrival" ? "12:00" : "18:00", place: "" });
     }}><option value="">{kind === "arrival" ? "Already here, use the day start" : "Leaving after the day ends"}</option>{modes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
     {transfer && <>
       <div className="form-grid">
         <label className="field">{kind === "arrival" ? transfer.mode === "FLIGHT" ? "Lands" : "Arrives" : transfer.mode === "FLIGHT" ? "Takes off" : "Departs"}<input type="time" value={transfer.time} onChange={(event) => { if (event.target.value) patch({ time: event.target.value }); }} /></label>
         {transfer.mode !== "CAR" && <label className="field">{transfer.mode === "FLIGHT" ? "Flight" : "Reference"}<input value={transfer.reference ?? ""} maxLength={100} placeholder={reference[transfer.mode]} onChange={(event) => patch({ reference: event.target.value || undefined })} /></label>}
       </div>
-      <label className="field">{transfer.mode === "FLIGHT" ? "Airport" : transfer.mode === "CAR" ? "From" : "Station or stop"}<div className="input-with-action"><MapPin size={15} /><input value={transfer.place} maxLength={200} placeholder={placeholder[transfer.mode]} onChange={(event) => patch({ place: event.target.value, placeId: undefined })} /><button type="button" title={transfer.placeId ? "Confirmed on the map; search again" : "Find on map"} aria-label={`Find ${transfer.mode === "FLIGHT" ? "airport" : "station"} on map`} disabled={!onFind} onClick={onFind}>{transfer.placeId ? <Check size={17} /> : <Search size={17} />}</button></div></label>
+      <label className="field">{transfer.mode === "FLIGHT" ? "Airport" : transfer.mode === "CAR" ? "From" : "Station or stop"}<div className="input-with-action"><MapPin size={15} /><input value={transfer.place} maxLength={200} placeholder={placeholder[transfer.mode]} onChange={(event) => patch({ place: event.target.value, placeId: undefined, location: undefined })} /><button type="button" title={transfer.placeId ? "Confirmed on the map; search again" : "Find on map"} aria-label={`Find ${transfer.mode === "FLIGHT" ? "airport" : "station"} on map`} disabled={!onFind} onClick={onFind}>{transfer.placeId ? <Check size={17} /> : <Search size={17} />}</button></div></label>
       {kind === "departure" && transfer.mode !== "CAR" && <label className="checkbox"><input type="checkbox" checked={Boolean(transfer.direct)} onChange={(event) => patch({ direct: event.target.checked || undefined })} />Check out in the morning and go straight there from the last visit</label>}
       <div className={directDeparture(trip) && kind === "departure" ? "" : "form-grid"}>
         <label className="field">{bufferLabel(kind, transfer.mode)}<input type="number" min={0} max={360} step={5} value={transfer.bufferMinutes ?? ""} placeholder={String(defaults.buffer[transfer.mode])} onChange={(event) => patch({ bufferMinutes: minutes(event.target.value) })} /></label>
-        {!(directDeparture(trip) && kind === "departure") && <label className="field">{kind === "arrival" ? "To the hotel (min)" : `Hotel to ${hub[transfer.mode]} (min)`}<input type="number" min={0} max={360} step={5} value={transfer.transferMinutes ?? ""} placeholder={String(defaults.transfer[transfer.mode])} onChange={(event) => patch({ transferMinutes: minutes(event.target.value) })} /></label>}
+        {!(directDeparture(trip) && kind === "departure") && <label className="field">{kind === "arrival" ? "To the hotel" : `Hotel to ${hub[transfer.mode]}`}{transfer.mode === "CAR" ? "" : ", if no route"} (min)<input type="number" min={0} max={360} step={5} value={transfer.transferMinutes ?? ""} placeholder={String(defaults.transfer[transfer.mode])} onChange={(event) => patch({ transferMinutes: minutes(event.target.value) })} /></label>}
       </div>
       <p className="quiet" role="status">{transferSummary(trip, kind)}</p>
       {children}

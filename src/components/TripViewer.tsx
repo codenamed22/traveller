@@ -59,6 +59,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
           {!snapshot ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>Not planned yet</h2>{city.stops.length > 0 && <ol className="saved-order">{city.stops.map((stop) => <li key={stop.id}>{stop.name}</li>)}</ol>}</div>
             : !currentDay ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>Nothing planned on this day</h2></div> : <>
               {day === 0 && trip.arrival && <TransferLine trip={trip} kind="arrival" />}
+              {day === 0 && currentDay.arrivalLeg && <LegDetails edge={currentDay.arrivalLeg} places={snapshot.places} />}
               <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{trip.hotel}</strong><span>Depart {formatMinute(trip, day, currentDay.visits[0] ? currentDay.visits[0].start - currentDay.visits[0].leg.minutes : dayStart(trip, day))}</span></div></div>
               {currentDay.visits.map((visit, index) => {
                 const stop = trip.stops.find((entry) => entry.id === visit.stopId);
@@ -68,6 +69,7 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
                   {selected === stop.id && (note(stop.id) || stop.source || stop.sourceUrl) && <div className="stop-details">{note(stop.id) && <p className="stop-note">{note(stop.id)}</p>}{stop.source && <blockquote>{stop.source}</blockquote>}{stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}</div>}</div>;
               })}
               {currentDay.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={snapshot.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${trip.departure!.place || "the station"}` : `Back to ${trip.hotel}`}</strong><span>{formatMinute(trip, day, (currentDay.visits.at(-1)?.end ?? dayStart(trip, day)) + currentDay.returnLeg.minutes)}</span></div></div></>}
+              {day === trip.days - 1 && currentDay.departureLeg && <LegDetails edge={currentDay.departureLeg} places={snapshot.places} />}
               {day === trip.days - 1 && trip.departure && <TransferLine trip={trip} kind="departure" />}
               <OmittedPlaces trip={trip} schedule={snapshot.schedule} />
             </>}

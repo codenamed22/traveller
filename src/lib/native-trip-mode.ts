@@ -29,7 +29,8 @@ export type NativeVisit = {
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
   alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
 };
-type Line = { title: string; detail: string; at?: number; leaveAt?: number };
+// `leg` is the route between the airport or station and the hotel, when the plan found one.
+type Line = { title: string; detail: string; at?: number; leaveAt?: number; leg?: NativeLeg };
 export type NativeDay = {
   key: string; cityId: string; city: string; day: number; date: string; label: string; timeZone: string; startsAt: number; endsAt: number;
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
@@ -130,8 +131,8 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
       };
     }),
     ...(plan.returnLeg ? { returnLeg: leg(plan.returnLeg, places, toDeparture) } : {}),
-    ...(arrival ? { arrival: line(arrival, { at: transferAt(trip, "arrival") }) } : {}),
-    ...(departure ? { departure: line(departure, { at: transferAt(trip, "departure"), leaveAt: transferLeaveAt(trip) }) } : {}),
+    ...(arrival ? { arrival: { ...line(arrival, { at: transferAt(trip, "arrival") }), ...(plan.arrivalLeg ? { leg: leg(plan.arrivalLeg, places) } : {}) } } : {}),
+    ...(departure ? { departure: { ...line(departure, { at: transferAt(trip, "departure"), leaveAt: transferLeaveAt(trip) }), ...(plan.departureLeg ? { leg: leg(plan.departureLeg, places) } : {}) } } : {}),
     doneElsewhere: entry.progress?.completed.filter((visit) => !plan.visits.some((planned) => planned.stopId === visit.stopId))
       .map((visit) => ({ title: stopName(visit.stopId), detail: `${clock(entry.cityTrip, entry.day, visit.start)}–${clock(entry.cityTrip, entry.day, visit.end)}` })) ?? [],
     omitted: omitted.map((id) => trip.stops.find((stop) => stop.id === id)?.name ?? "").filter(Boolean),

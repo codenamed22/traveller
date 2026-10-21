@@ -105,8 +105,12 @@ export const transferSchema = z.object({
   reference: z.string().trim().max(100).optional(),
   bufferMinutes: z.number().int().min(0).max(360).optional(),
   transferMinutes: z.number().int().min(0).max(360).optional(),
+  // Minutes between the airport or station and the hotel on the route the last plan took; ahead of transferMinutes,
+  // which is then only a fallback. Cleared whenever the time, place or mode changes.
+  routeMinutes: z.number().int().min(0).max(360).optional(),
   // The airport or station confirmed on the map; needed to route a direct departure to it.
   placeId: z.string().trim().min(1).max(300).optional(),
+  location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional(),
   // Departure only: check out in the morning and go there from the last visit, bags in hand, instead of returning to
   // the hotel first.
   direct: z.boolean().optional(),
@@ -226,7 +230,9 @@ export type TravelEdge = {
   alternatives?: TravelEdge[];
 };
 export type Visit = { stopId: string; start: number; end: number; leg: TravelEdge };
-export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge };
+// arrivalLeg (first day, from "arrival" to "hotel") and departureLeg (last day, from "hotel" to "departure") are the
+// routes between the airport or station and the hotel.
+export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge; arrivalLeg?: TravelEdge; departureLeg?: TravelEdge };
 // Where a place left out of the plan could still go: between two visits (or at the start or end of a day), with the
 // least extra travel, and how much later the following visits would start. Times are estimates from the plan's routes.
 export type SqueezeIn = { stopId: string; day: number; after?: string; before?: string; start: number; end: number; extraMinutes: number; delayMinutes?: number; overCap?: { category: "breakfast" | "lunch" | "dinner" | "meal" | "coffee"; count: number }; nearMeal?: { stopId: string; minutes: number; after: boolean } };
@@ -250,6 +256,8 @@ export const dayPlanSchema = z.object({
     stopId: z.uuid(), start: z.number().min(0).max(2880), end: z.number().min(0).max(2880), leg: travelEdgeSchema,
   }).strict().refine((visit) => visit.end > visit.start, "A visit must end after it starts.")).max(maxStopsPerCity),
   returnLeg: travelEdgeSchema.optional(),
+  arrivalLeg: travelEdgeSchema.optional(),
+  departureLeg: travelEdgeSchema.optional(),
 }).strict();
 export const scheduleSchema = z.object({
   days: z.array(dayPlanSchema).max(7),
@@ -279,7 +287,8 @@ export const savedPlanSchema = z.object({
   omitted: z.array(z.uuid()).max(maxStopsPerCity),
   snapshot: z.object({
     trip: tripSchema, schedule: scheduleSchema,
-    places: z.record(z.string().max(300), placeSchema).refine((places) => Object.keys(places).length <= maxStopsPerCity + 1, "Too many saved places."),
+    // The stops, the hotel, and the airports or stations you arrive at and leave from.
+    places: z.record(z.string().max(300), placeSchema).refine((places) => Object.keys(places).length <= maxStopsPerCity + 3, "Too many saved places."),
   }).strict().optional(),
 }).strict().superRefine((plan, context) => {
   if (!plan.snapshot) return;
@@ -354,13 +363,14 @@ export function plannedStopIds(...days: ({ visits: { stopId: string }[] }[] | un
 export function applyScheduleDurations(trip: Trip, schedule: Schedule): Trip {
   // Visit times can carry fractions of a minute (from a computed sunset, for instance), so lengths are compared whole.
   const durations = new Map(schedule.days.flatMap((day) => day.visits.map((visit) => [visit.stopId, Math.round(visit.end - visit.start)] as const)));
-  return { ...trip, stops: trip.stops.map((stop) => {
+  // The hotel transfers keep the minutes the plan was made with, so it isn't out of date as soon as it is accepted.
+  return withMeasuredTransfers({ ...trip, stops: trip.stops.map((stop) => {
     const duration = durations.get(stop.id) ?? stop.duration;
     if (!(stop.fixedTime ? [stop.duration] : stop.durationOptions ?? [stop.duration]).includes(duration)) throw new Error(`${stop.name}: the proposed duration was not approved.`);
     const next = { ...stop, duration };
     delete next.durationOptions;
     return next;
-  }) };
+  }) }, schedule);
 }
 
 export function resolvePlanningConstraints(trip: Trip, choices: PlanningResolution): Trip {
@@ -450,8 +460,8 @@ export function arrivalTimes(trip: Trip) {
   if (!trip.arrival) return null;
   const arrive = minuteAt(trip, 0, trip.arrival.time);
   const buffer = trip.arrival.bufferMinutes ?? transferDefaults.arrival.buffer[trip.arrival.mode];
-  const transfer = trip.arrival.transferMinutes ?? transferDefaults.arrival.transfer[trip.arrival.mode];
-  return { arrive, buffer, transfer, atHotel: arrive + buffer + transfer, ready: arrive + buffer + transfer + transferDefaults.hotelMinutes };
+  const transfer = trip.arrival.routeMinutes ?? trip.arrival.transferMinutes ?? transferDefaults.arrival.transfer[trip.arrival.mode];
+  return { arrive, buffer, transfer, routed: trip.arrival.routeMinutes !== undefined, atHotel: arrive + buffer + transfer, ready: arrive + buffer + transfer + transferDefaults.hotelMinutes };
 }
 
 // Departure day (the city's last day): back at the hotel to collect bags, then leave in time for the airport or station,
@@ -461,11 +471,30 @@ export function departureTimes(trip: Trip) {
   const day = trip.days - 1;
   const depart = minuteAt(trip, day, trip.departure.time);
   const buffer = trip.departure.bufferMinutes ?? transferDefaults.departure.buffer[trip.departure.mode];
-  const transfer = trip.departure.transferMinutes ?? transferDefaults.departure.transfer[trip.departure.mode];
+  const transfer = trip.departure.routeMinutes ?? trip.departure.transferMinutes ?? transferDefaults.departure.transfer[trip.departure.mode];
   const leaveHotel = depart - buffer - transfer;
   // A direct departure ends the day's route at the airport or station (`end`), reached from the last visit.
   const end = directDeparture(trip) ? depart - buffer : leaveHotel - transferDefaults.hotelMinutes;
-  return { day, depart, buffer, transfer, leaveHotel, backAtHotel: leaveHotel - transferDefaults.hotelMinutes, end, direct: directDeparture(trip) };
+  return { day, depart, buffer, transfer, routed: trip.departure.routeMinutes !== undefined, leaveHotel, backAtHotel: leaveHotel - transferDefaults.hotelMinutes, end, direct: directDeparture(trip) };
+}
+
+// The trip as a plan was made: its hotel transfers take the minutes of the routes it found. Without a route (none was
+// found, or the schedule is the planner's own draft) the trip's minutes stand.
+export function withMeasuredTransfers(trip: Trip, schedule: Pick<Schedule, "days">): Trip {
+  return withTransferRoutes(trip, { arrival: schedule.days.find((day) => day.day === 0)?.arrivalLeg, departure: schedule.days.find((day) => day.day === trip.days - 1)?.departureLeg });
+}
+
+export function withTransferRoutes(trip: Trip, legs: { arrival?: TravelEdge; departure?: TravelEdge }): Trip {
+  const minutes = (leg: TravelEdge | undefined) => leg && Math.min(360, Math.ceil(leg.minutes));
+  const arrival = minutes(legs.arrival);
+  const departure = minutes(legs.departure);
+  const changed = (transfer: Transfer | undefined, routed: number | undefined) => transfer && routed !== undefined && transfer.routeMinutes !== routed;
+  if (!changed(trip.arrival, arrival) && !changed(trip.departure, departure)) return trip;
+  return {
+    ...trip,
+    ...(trip.arrival && arrival !== undefined ? { arrival: { ...trip.arrival, routeMinutes: arrival } } : {}),
+    ...(trip.departure && departure !== undefined ? { departure: { ...trip.departure, routeMinutes: departure } } : {}),
+  };
 }
 
 // Checked out and heading for the airport or station from the last visit: only with a confirmed place to route to and
