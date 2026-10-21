@@ -41,7 +41,7 @@ describe("native trip mode snapshot", () => {
       label: "Day 1 · Thu 24 Dec", city: "Amsterdam", timeZone: "Europe/Amsterdam", stale: false, replanned: false,
       hotel: { name: "Motel One", location: { lat: 52.36, lng: 4.89 } }, end: { title: "Back to Motel One", short: "Back to Motel One" },
       summary: { stops: 2, travel: "1 h", leaveLabel: "09:15", backLabel: "13:25" },
-      arrival: { title: "Arrive at Amsterdam Centraal 08:30 · ICE 123" }, omitted: ["Albert Cuyp"], doneElsewhere: [],
+      arrival: { title: "Arrive at Amsterdam Centraal 08:30 · ICE 123", mode: "TRAIN" }, omitted: ["Albert Cuyp"], doneElsewhere: [],
     });
     expect(tomorrow.arrival).toBeUndefined();
     // The train arrives 08:30 in Amsterdam (07:30 UTC).
@@ -179,7 +179,7 @@ describe("native trip mode snapshot", () => {
     ] };
     const journey: Journey = { id: crypto.randomUUID(), title: "Paris", cities: [paris], plans: { [paris.id]: persistedPlan(schedule, paris, { hotel: place("g-hotel", "Hotel"), [louvre.id]: place("g-louvre", "Louvre") }) } };
     const [day] = nativeTripMode(journey, Temporal.Instant.from("2026-12-31T08:00:00Z"), { canTrack: true, photos: false }).days;
-    expect(day.departure).toMatchObject({ title: "Train leaves Gare du Nord 18:00", at: Date.parse("2026-12-31T17:00:00Z"), leaveAt: Date.parse("2026-12-31T16:00:00Z") });
+    expect(day.departure).toMatchObject({ title: "Train leaves Gare du Nord 18:00", mode: "TRAIN", at: Date.parse("2026-12-31T17:00:00Z"), leaveAt: Date.parse("2026-12-31T16:00:00Z") });
   });
 
   it("carries the routed leg between the hotel and the station on the departure line", () => {

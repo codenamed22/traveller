@@ -4,7 +4,7 @@ import { journalEntry } from "./journal";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type TravelEdge, type Trip } from "./trip";
+import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type Transfer, type TravelEdge, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 import { tripRecap, type RecapTravel } from "./recap";
 import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
@@ -29,8 +29,9 @@ export type NativeVisit = {
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
   alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
 };
-// `leg` is the route between the airport or station and the hotel, when the plan found one.
-type Line = { title: string; detail: string; at?: number; leaveAt?: number; leg?: NativeLeg };
+// `mode` (flight, train…) picks the arrival or departure line's icon; `leg` is the route between the airport or station
+// and the hotel, when the plan found one.
+type Line = { title: string; detail: string; mode?: Transfer["mode"]; at?: number; leaveAt?: number; leg?: NativeLeg };
 export type NativeDay = {
   key: string; cityId: string; city: string; day: number; date: string; label: string; timeZone: string; startsAt: number; endsAt: number;
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
@@ -87,7 +88,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
   const departureName = trip.departure?.place || "the station";
   const arrival = entry.day === 0 ? transferLineText(trip, "arrival") : null;
   const departure = entry.day === trip.days - 1 ? transferLineText(trip, "departure") : null;
-  const line = (text: { title: string; detail: string }, times: { at?: number; leaveAt?: number }): Line => ({ title: text.title, detail: text.detail, ...defined(times) });
+  const line = (text: { title: string; detail: string; mode?: Transfer["mode"] }, times: { at?: number; leaveAt?: number }): Line => ({ title: text.title, detail: text.detail, ...(text.mode ? { mode: text.mode } : {}), ...defined(times) });
   const omitted = journey.plans[entry.cityId]?.snapshot?.schedule.omitted ?? [];
   const weather = forecast?.days[entry.date];
   const journal = journalEntry(journey, entry.cityId, entry.date);
