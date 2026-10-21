@@ -5,13 +5,15 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { ArrowUpRight, CalendarDays, Compass, Eye, FolderOpen, Hotel, List, LockKeyhole, Map, MapPin, Navigation, Route } from "lucide-react";
 import type { SharedView } from "@/lib/shared-trips";
-import { dayStart, endpointKey, formatMinute, planningKey, plannedStopIds, tripDate } from "@/lib/trip";
+import { aboutLines, dayStart, endpointKey, formatMinute, planningKey, plannedStopIds, tripDate } from "@/lib/trip";
 import { ExportMenu } from "./ExportMenu";
 import { LegDetails } from "./LegDetails";
+import { PlaceAbout } from "./PlaceAbout";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { TransferLine } from "./TransferFields";
 import { TripMap } from "./TripMap";
 import { TripMode } from "./TripMode";
+import { suggestedTransitApp } from "@/lib/transport";
 
 const noPhotos = {};
 
@@ -34,7 +36,9 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
   const journey = { ...view, execution: undefined };
   // Notes come from the city as it is now: writing one doesn't replan.
   const note = (stopId: string) => city.stops.find((entry) => entry.id === stopId)?.note;
+  const about = (stopId: string) => city.stops.find((entry) => entry.id === stopId)?.about;
   const toDeparture = endpointKey(trip, day, "hotel", "to") === "departure";
+  const cityApp = suggestedTransitApp(city.city);
 
   return <div className="app-shell trip-viewer">
     <header className="app-header">
@@ -59,22 +63,22 @@ export function TripViewer({ view, email }: { view: SharedView; email: string })
           {!snapshot ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>Not planned yet</h2>{city.stops.length > 0 && <ol className="saved-order">{city.stops.map((stop) => <li key={stop.id}>{stop.name}</li>)}</ol>}</div>
             : !currentDay ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>Nothing planned on this day</h2></div> : <>
               {day === 0 && trip.arrival && <TransferLine trip={trip} kind="arrival" />}
-              {day === 0 && currentDay.arrivalLeg && <LegDetails edge={currentDay.arrivalLeg} places={snapshot.places} />}
+              {day === 0 && currentDay.arrivalLeg && <LegDetails edge={currentDay.arrivalLeg} places={snapshot.places} app={cityApp} />}
               <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{trip.hotel}</strong><span>Depart {formatMinute(trip, day, currentDay.visits[0] ? currentDay.visits[0].start - currentDay.visits[0].leg.minutes : dayStart(trip, day))}</span></div></div>
               {currentDay.visits.map((visit, index) => {
                 const stop = trip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
                 const alternatives = stop.alternativeGroup ? currentDay.visits.filter((other) => other.stopId !== stop.id && trip.stops.find((entry) => entry.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => trip.stops.find((entry) => entry.id === other.stopId)!.name) : [];
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={snapshot.places} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(trip, day, visit.start)} - {formatMinute(trip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>
-                  {selected === stop.id && (note(stop.id) || stop.source || stop.sourceUrl) && <div className="stop-details">{note(stop.id) && <p className="stop-note">{note(stop.id)}</p>}{stop.source && <blockquote>{stop.source}</blockquote>}{stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}</div>}</div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={snapshot.places} app={cityApp} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} aria-expanded={selected === stop.id} onClick={() => setSelected(selected === stop.id ? null : stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}</strong><span>{formatMinute(trip, day, visit.start)} - {formatMinute(trip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>
+                  {selected === stop.id && (note(stop.id) || about(stop.id) || stop.source || stop.sourceUrl) && <div className="stop-details">{note(stop.id) && <p className="stop-note">{note(stop.id)}</p>}<PlaceAbout about={about(stop.id)} />{stop.source && !aboutLines(about(stop.id)).length && <blockquote>{stop.source}</blockquote>}{stop.sourceUrl && <a className="source-link" href={stop.sourceUrl} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={14} />Source link</a>}</div>}</div>;
               })}
-              {currentDay.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={snapshot.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${trip.departure!.place || "the station"}` : `Back to ${trip.hotel}`}</strong><span>{formatMinute(trip, day, (currentDay.visits.at(-1)?.end ?? dayStart(trip, day)) + currentDay.returnLeg.minutes)}</span></div></div></>}
-              {day === trip.days - 1 && currentDay.departureLeg && <LegDetails edge={currentDay.departureLeg} places={snapshot.places} />}
+              {currentDay.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={snapshot.places} endpointToDeparture={toDeparture} app={cityApp} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${trip.departure!.place || "the station"}` : `Back to ${trip.hotel}`}</strong><span>{formatMinute(trip, day, (currentDay.visits.at(-1)?.end ?? dayStart(trip, day)) + currentDay.returnLeg.minutes)}</span></div></div></>}
+              {day === trip.days - 1 && currentDay.departureLeg && <LegDetails edge={currentDay.departureLeg} places={snapshot.places} app={cityApp} />}
               {day === trip.days - 1 && trip.departure && <TransferLine trip={trip} kind="departure" />}
               <OmittedPlaces trip={trip} schedule={snapshot.schedule} />
             </>}
         </div></section>
-        <section className="map-panel" aria-label="City map"><TripMap trip={trip} places={snapshot?.places ?? {}} schedule={snapshot?.schedule ?? null} day={day} selected={selected} onSelect={setSelected} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} photoDisabledMessage="Photos aren't shown on shared trips." onPhotoRequest={() => {}} onPhotoRetry={() => {}} /><div className="map-heading"><span className="map-heading-dot" /><span>{city.city}</span><span className="map-heading-divider" />Day {day + 1}</div>{snapshot && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
+        <section className="map-panel" aria-label="City map"><TripMap trip={trip} places={snapshot?.places ?? {}} schedule={snapshot?.schedule ?? null} day={day} selected={selected} about={selected ? about(selected) : undefined} onSelect={setSelected} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} photoDisabledMessage="Photos aren't shown on shared trips." onPhotoRequest={() => {}} onPhotoRetry={() => {}} /><div className="map-heading"><span className="map-heading-dot" /><span>{city.city}</span><span className="map-heading-divider" />Day {day + 1}</div>{snapshot && <div className="map-legend"><span><i className="walking-line" />Walking</span><span><i className="transit-line" />Public transit</span></div>}</section>
       </div>
     </main>
     {planned && !tripMode && <button className="trip-mode-pill" onClick={() => setTripMode(true)}><Navigation size={17} />Start trip</button>}

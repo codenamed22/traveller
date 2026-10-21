@@ -62,6 +62,19 @@ describe("native trip mode snapshot", () => {
     expect(today.visits[1].leg.directionsFromHere).not.toContain("origin");
     expect(today.visits[1].leg.directionsFromHere).toContain("travelmode=transit");
     expect(today.returnLeg).toMatchObject({ label: "25 min walk", to: { lat: 52.36, lng: 4.89 } });
+    // What a guide says about a place, as labelled lines; none for a place without notes.
+    const guided = structuredClone(journey);
+    guided.cities[0].stops = guided.cities[0].stops.map((stop) => stop.id === coffee.id ? { ...stop, about: { what: "A specialty coffee bar.", expect: "Small; expect a queue.", todo: "" } } : stop);
+    const [guidedCoffee] = nativeTripMode(guided, christmasEve, { canTrack: true, photos: true }).days[0].visits;
+    expect(guidedCoffee.about).toEqual([{ label: "What it is", text: "A specialty coffee bar." }, { label: "What to expect", text: "Small; expect a queue." }]);
+    // It takes the place of the original itinerary's line.
+    expect(guidedCoffee.sourceNote).toBeUndefined();
+    expect(today.visits[0].about).toBeUndefined();
+    // The city's transport app, and Uber from wherever the phone is to the end of every leg.
+    expect(snapshot.cities[0].app).toEqual({ name: "GVB", url: "https://apps.apple.com/app/id1544439867" });
+    const uber = new URL(today.visits[1].leg.taxi!);
+    expect(uber.searchParams.get("pickup")).toBe("my_location");
+    expect(uber.searchParams.get("dropoff[nickname]")).toBe("Rijksmuseum");
     // The snapshot crosses into Swift as JSON.
     expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
   });

@@ -1,12 +1,12 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { Journey } from "./journey";
-import { arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type RouteLeg, type Transfer, type Trip } from "./trip";
+import { aboutLines, arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type RouteLeg, type Transfer, type Trip } from "./trip";
 
 // Shareable exports of the accepted itinerary: a printable page (save as PDF), an Excel workbook and a calendar file.
 // Everything is built from the saved plan snapshots, so an export never calls Google or changes the trip.
 
 export type ExportTravel = { mode: "Walk" | "Transit" | "Car"; minutes: number; km: number; lines: string[]; fare?: string; directionsUrl: string; estimated: boolean };
-export type ExportVisit = { stopId: string; start: string; end: string; startInstant: string; endInstant: string; minutes: number; name: string; address: string; booked: boolean; optional: boolean; travel: ExportTravel; mapsUrl: string; yourNote?: string; note: string; sourceUrl?: string; alternativeTo?: string[] };
+export type ExportVisit = { stopId: string; start: string; end: string; startInstant: string; endInstant: string; minutes: number; name: string; address: string; booked: boolean; optional: boolean; travel: ExportTravel; mapsUrl: string; yourNote?: string; about?: { label: string; text: string }[]; note: string; sourceUrl?: string; alternativeTo?: string[] };
 export type ExportDay = { day: number; date: string; label: string; leave: string; visits: ExportVisit[]; back?: { time: string; travel: ExportTravel; to?: string; address?: string } };
 // Getting into or out of the city: the arrival runs until you are at the hotel, the departure from leaving the hotel.
 // `travel` is the route between the airport or station and the hotel, when the plan found one.
@@ -94,13 +94,16 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
       const days = snapshot.schedule.days.filter((day) => day.visits.length).sort((left, right) => left.day - right.day).map((day): ExportDay => {
         const visits = day.visits.map((visit): ExportVisit => {
           const stop = trip.stops.find((candidate) => candidate.id === visit.stopId);
+          const about = aboutLines(current.stops.find((candidate) => candidate.id === visit.stopId)?.about);
           return {
             stopId: visit.stopId, start: formatMinute(trip, day.day, visit.start), end: formatMinute(trip, day.day, visit.end),
             startInstant: instantForMinute(trip, day.day, visit.start).toString(), endInstant: instantForMinute(trip, day.day, visit.end).toString(),
             minutes: Math.round(visit.end - visit.start), name: name(visit.stopId), address: places[visit.stopId]?.address ?? "",
             booked: Boolean(stop?.fixedTime), optional: Boolean(stop?.optional), travel: travel(trip, visit.leg, places), mapsUrl: mapsUrl(places[visit.stopId], name(visit.stopId)),
             ...(current.stops.find((candidate) => candidate.id === visit.stopId)?.note?.trim() ? { yourNote: current.stops.find((candidate) => candidate.id === visit.stopId)!.note!.trim() } : {}),
-            note: exportNote(stop?.source ?? ""), ...(stop?.sourceUrl ? { sourceUrl: stop.sourceUrl } : {}),
+            ...(about.length ? { about: about.map(({ label, text }) => ({ label, text })) } : {}),
+            // The original itinerary's line, until a guide's notes say what the place is.
+            note: about.length ? "" : exportNote(stop?.source ?? ""), ...(stop?.sourceUrl ? { sourceUrl: stop.sourceUrl } : {}),
             ...(alternatives(visit.stopId).length ? { alternativeTo: alternatives(visit.stopId) } : {}),
           };
         });
@@ -158,6 +161,7 @@ export function itineraryHtml(data: ItineraryExport, autoPrint = true) {
                   <strong><a href="${html(visit.mapsUrl)}">${html(visit.name)}</a></strong>${visit.booked ? ' <span class="tag">Booked</span>' : ""}${visit.optional ? ' <span class="tag light">Optional</span>' : ""}${visit.alternativeTo ? ` <span class="tag light">Alternative to ${html(visit.alternativeTo.join(", "))}</span>` : ""}
                   <span class="muted">${visit.minutes} min${visit.address ? ` · ${html(visit.address)}` : ""}</span>
                   ${visit.yourNote ? `<p class="note"><strong>Note:</strong> ${html(visit.yourNote)}</p>` : ""}
+                  ${visit.about?.map((line) => `<p class="note"><strong>${html(line.label)}:</strong> ${html(line.text)}</p>`).join("") ?? ""}
                   ${visit.note ? `<p class="note">${html(visit.note)}</p>` : ""}
                 </div>
               </div>
@@ -240,7 +244,7 @@ export function itineraryRows(data: ItineraryExport): Cell[][] {
   for (const city of data.cities) {
     if (city.arrival) rows.push(transfer(city, city.arrival));
     for (const day of city.days) {
-      for (const visit of day.visits) rows.push([city.city, day.date, day.label, visit.start, visit.end, visit.name, visit.booked ? "Booked" : visit.optional ? "Optional" : "", visit.minutes, travelLabel(visit.travel), visit.travel.minutes, visit.address, [visit.yourNote ? `Note: ${visit.yourNote}` : "", visit.alternativeTo ? `Alternative to ${visit.alternativeTo.join(", ")}.` : "", visit.note].filter(Boolean).join(" "), { link: visit.mapsUrl, text: "Map" }, { link: visit.travel.directionsUrl, text: "Directions" }]);
+      for (const visit of day.visits) rows.push([city.city, day.date, day.label, visit.start, visit.end, visit.name, visit.booked ? "Booked" : visit.optional ? "Optional" : "", visit.minutes, travelLabel(visit.travel), visit.travel.minutes, visit.address, [visit.yourNote ? `Note: ${visit.yourNote}` : "", ...(visit.about ?? []).map((line) => `${line.label}: ${line.text}`), visit.alternativeTo ? `Alternative to ${visit.alternativeTo.join(", ")}.` : "", visit.note].filter(Boolean).join(" "), { link: visit.mapsUrl, text: "Map" }, { link: visit.travel.directionsUrl, text: "Directions" }]);
       if (day.back) rows.push([city.city, day.date, day.label, day.back.time, "", day.back.to ? `To ${day.back.to}` : `Back to ${city.hotel || "hotel"}`, "", null, travelLabel(day.back.travel), day.back.travel.minutes, day.back.to ? day.back.address ?? "" : city.hotelAddress, "", null, { link: day.back.travel.directionsUrl, text: "Directions" }]);
     }
     if (city.departure) rows.push(transfer(city, city.departure));
@@ -329,7 +333,7 @@ export function itineraryIcs(data: ItineraryExport) {
     `DTEND:${icsTime(visit.endInstant)}`,
     `SUMMARY:${icsText(`${visit.name}${visit.booked ? " (booked)" : ""}`)}`,
     ...(visit.address ? [`LOCATION:${icsText(visit.address)}`] : []),
-    `DESCRIPTION:${icsText([`${city.city} · ${day.label}`, `Getting there: ${travelLabel(visit.travel)}`, visit.yourNote ? `Note: ${visit.yourNote}` : "", visit.note, `Map: ${visit.mapsUrl}`, `Directions: ${visit.travel.directionsUrl}`].filter(Boolean).join("\n"))}`,
+    `DESCRIPTION:${icsText([`${city.city} · ${day.label}`, `Getting there: ${travelLabel(visit.travel)}`, visit.yourNote ? `Note: ${visit.yourNote}` : "", ...(visit.about ?? []).map((line) => `${line.label}: ${line.text}`), visit.note, `Map: ${visit.mapsUrl}`, `Directions: ${visit.travel.directionsUrl}`].filter(Boolean).join("\n"))}`,
     `URL:${visit.mapsUrl}`,
     "END:VEVENT",
   ])).concat([city.arrival, city.departure].filter((entry) => entry !== undefined).map((entry) => [

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, withMeasuredTransfers, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { recoveryPlanKey } from "./day-recovery";
+import { aboutLines, applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, withMeasuredTransfers, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -198,6 +199,11 @@ describe("planning key", () => {
     const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [newStop("Charminar")] };
     expect(planningKey({ ...city, stops: [{ ...city.stops[0], duration: 90 }] })).not.toBe(planningKey(city));
     expect(planningKey({ ...city, stops: [{ ...city.stops[0], note: "Go early" }] })).toBe(planningKey(city));
+    const about = { what: "A 16th-century monument and mosque.", expect: "Busy after 10:00.", todo: "" };
+    expect(planningKey({ ...city, stops: [{ ...city.stops[0], about }] })).toBe(planningKey(city));
+    // Nor does a day already under way see its plan as changed.
+    expect(recoveryPlanKey({ ...city, stops: [{ ...city.stops[0], about }] }, 0, [city.stops[0].id])).toBe(recoveryPlanKey(city, 0, [city.stops[0].id]));
+    expect(aboutLines(about)).toEqual([{ key: "what", label: "What it is", text: "A 16th-century monument and mosque." }, { key: "expect", label: "What to expect", text: "Busy after 10:00." }]);
   });
 
   it("keeps an itinerary current when a place it includes becomes a must-see, but not one it left out", () => {

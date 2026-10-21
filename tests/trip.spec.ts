@@ -816,6 +816,15 @@ test("itinerary persistence restores timings and complete routes without regener
   await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
   await page.getByRole("button", { name: /^Places/ }).click();
   await page.getByLabel("Notes").fill("");
+  // As does what a guide says about it, under the place once it's chosen.
+  await page.getByText("About this place").click();
+  await page.getByLabel("What it is").fill("The former royal palace, now the national art museum.");
+  await page.getByLabel("What to do").fill("See the Winged Victory first.");
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await page.locator(".itinerary-stop").first().click();
+  await expect(page.locator(".itinerary-content .place-about")).toHaveText("What it isThe former royal palace, now the national art museum.What to doSee the Winged Victory first.");
+  await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Places/ }).click();
   // So does making a place already in it a must-see.
   await page.getByRole("checkbox", { name: "Must-see", exact: true }).check();
   await page.getByRole("button", { name: /^Itinerary/ }).click();
@@ -913,7 +922,8 @@ test("arrival and departure narrow the first and last day and appear in the itin
     generated.schedule.days[0].visits = generated.schedule.days[0].visits.map((visit) => { const start = cursor + 10; cursor = start + (visit.end - visit.start); return { ...visit, start, end: cursor }; });
     // The plan routes the airport to the hotel: 35 min by train, not the 45 assumed.
     if (candidate.arrival) generated.schedule.days[0].arrivalLeg = { day: 0, from: "arrival", to: "hotel", mode: "TRANSIT", minutes: 35, meters: 26_000, steps: [{ instruction: "Train", mode: "TRANSIT", line: "RER B", from: "Aéroport CDG 2", to: "Châtelet" }] };
-    generated.places = { arrival: { id: "cdg-id", name: "Paris Charles de Gaulle", address: "95700 Roissy-en-France", location: { lat: 49.009, lng: 2.547 } } };
+    if (candidate.departure?.taxi) generated.schedule.days[1].departureLeg = { day: 1, from: "hotel", to: "departure", mode: "DRIVE", minutes: 20, meters: 4_100 };
+    generated.places = { arrival: { id: "cdg-id", name: "Paris Charles de Gaulle", address: "95700 Roissy-en-France", location: { lat: 49.009, lng: 2.547 } }, departure: { id: "gare-id", name: "Gare du Nord", address: "18 Rue de Dunkerque, Paris", location: { lat: 48.88, lng: 2.355 } } };
     await route.fulfill({ json: generated });
   });
   await openPlanningTrip(page, "Private hotel", [{ ...newStop("Louvre Museum"), placeId: "museum-id", duration: 90 }, { ...newStop("Luxembourg Gardens"), placeId: "garden-id", duration: 60 }]);
@@ -962,10 +972,24 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await expect(arrivalLeg).toContainText("Public transit · 35 min");
   await arrivalLeg.locator("summary").click();
   await expect(arrivalLeg).toContainText("RER B Aéroport CDG 2 to Châtelet");
+  // The city's public transport app is a tap away on a transit leg, until the traveller picks their own.
+  await expect(arrivalLeg.getByRole("link", { name: "Open Bonjour RATP" })).toHaveAttribute("href", "https://apps.apple.com/app/id507107090");
+  const around = page.locator("fieldset", { has: page.getByText("Getting around", { exact: true }) });
+  await expect(around.getByLabel("Transport app")).toHaveAttribute("placeholder", "Bonjour RATP");
+  await around.getByLabel("Transport app").fill("IDFM");
+  await around.getByLabel("App link").fill("https://www.iledefrance-mobilites.fr/");
+  await expect(arrivalLeg.getByRole("link", { name: "Open IDFM" })).toHaveAttribute("href", "https://www.iledefrance-mobilites.fr/");
   await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 14:55");
   // The routed time replaces the assumed 45 min; the typed minutes stay as the fallback.
   await expect(arriving.getByRole("status")).toHaveText("Sightseeing starts about 14:55 on Mon 12 Oct (lands 13:20, 45 min at the airport, 35 min to the hotel, 15 min to drop bags).");
   await page.screenshot({ path: testInfo.outputPath("arrival-itinerary.png"), fullPage: true });
+  // A taxi to the station links Uber, from the hotel to the station.
+  await page.getByRole("button", { name: /^Day 2/ }).click();
+  const taxiLeg = page.locator(".travel-leg").filter({ hasText: "Car or taxi" });
+  await taxiLeg.locator("summary").click();
+  const uber = new URL((await taxiLeg.getByRole("link", { name: "Uber" }).getAttribute("href"))!);
+  expect([uber.hostname, uber.searchParams.get("dropoff[nickname]")]).toEqual(["m.uber.com", "Gare du Nord"]);
+  await expect(taxiLeg.getByRole("link", { name: "Open IDFM" })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

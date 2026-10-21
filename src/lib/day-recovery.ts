@@ -44,7 +44,7 @@ export function liveRouteKey(edge?: TravelEdge) { return edge ? JSON.stringify([
 export function recoveryPlanKey(trip: Trip, day: number, stopIds: string[]) {
   const parsed = tripSchema.safeParse(trip);
   const canonical = parsed.success ? parsed.data : trip;
-  return JSON.stringify({ ...canonical, hotelLocation: undefined, stops: canonical.stops.map((stop) => ({ ...stop, location: undefined, source: "", sourceUrl: undefined })), day, stopIds });
+  return JSON.stringify({ ...canonical, hotelLocation: undefined, stops: canonical.stops.map((stop) => ({ ...stop, location: undefined, source: "", sourceUrl: undefined, about: undefined })), day, stopIds });
 }
 export function newDayProgress(trip: Trip, day: number, stopIds: string[]): DayProgress {
   return { date: tripDate(trip, day), timeZone: trip.timeZone, version: 0, planKey: recoveryPlanKey(trip, day, stopIds), baselineStopIds: stopIds, completed: [], skipped: [], missedBookings: [], originId: "hotel", readyAt: null };

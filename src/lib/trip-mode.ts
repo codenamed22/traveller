@@ -1,6 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, newDayProgress, recoveryMinute, type DayProgress } from "./day-recovery";
 import type { Journey } from "./journey";
+import { legEnd } from "./transport";
 import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type RouteLeg, type SavedPlan, type Stop, type Trip, type Visit } from "./trip";
 
 // One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
@@ -120,8 +121,7 @@ export function markPending(entry: TripModeDay, stopId: string): DayProgress {
 // Google Maps directions for one leg. From here leaves out the origin, so Google Maps starts from the phone's location.
 export function directionsUrl(edge: RouteLeg, places: Record<string, Place>, options: { fromHere?: boolean; toDeparture?: boolean } = {}) {
   const origin = places[edge.from];
-  // Last leg of a direct departure day: "hotel" stands for the airport or station.
-  const destination = options.toDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
+  const destination = legEnd(edge, places, options.toDeparture);
   const url = new URL("https://www.google.com/maps/dir/");
   url.searchParams.set("api", "1");
   if (!options.fromHere) {

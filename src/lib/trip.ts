@@ -40,6 +40,8 @@ export const stopSchema = z.object({
   sourceUrl: sourceUrlSchema.optional(),
   // The traveller's own note. Unlike `source`, the planner never reads it.
   note: z.string().max(500).optional(),
+  // What a guide says about the place: what it is, what to expect and what to do there. Never read by the planner either.
+  about: z.object({ what: z.string().max(300), expect: z.string().max(300), todo: z.string().max(300) }).strict().optional(),
   kind: visitKindSchema.optional(),
   slot: visitSlotSchema.optional(),
   plannedTime: timeSchema.optional(),
@@ -169,6 +171,13 @@ export const tripSchema = z.object({
 
 export type Trip = z.infer<typeof tripSchema>;
 export type Stop = z.infer<typeof stopSchema>;
+export type StopAbout = NonNullable<Stop["about"]>;
+export const aboutLabels = { what: "What it is", expect: "What to expect", todo: "What to do" } as const;
+
+// A place's guide notes as labelled lines, leaving out empty ones.
+export function aboutLines(about: StopAbout | undefined) {
+  return (Object.keys(aboutLabels) as (keyof StopAbout)[]).flatMap((key) => about?.[key]?.trim() ? [{ key, label: aboutLabels[key], text: about[key].trim() }] : []);
+}
 export function stopAllowedOnDay(trip: Trip, stop: Stop, day: number): boolean {
   const group = trip.dayGroups?.find((candidate) => candidate.stopIds.includes(stop.id));
   return (stop.day === null || stop.day === day) && (!group || groupAllowedDays(trip, group).includes(day));
@@ -352,8 +361,8 @@ export function planningKey(trip: Trip | undefined, planned: ReadonlySet<string>
   if (!trip) return "";
   const parsed = tripSchema.safeParse(trip);
   const canonical = parsed.success ? parsed.data : trip;
-  return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, ...stop }) => {
-    void note;
+  return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, about, ...stop }) => {
+    void note; void about;
     if (!planned.has(stop.id)) return stop;
     const { priority, ...rest } = stop;
     void priority;

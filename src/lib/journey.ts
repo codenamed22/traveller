@@ -3,6 +3,7 @@ import { z } from "zod";
 import { newTrip, savedPlanSchema, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
 import { dayProgressSchema } from "./day-recovery";
 import { journalSchema } from "./journal";
+import { transportSchema } from "./transport";
 
 export { savedPlanSchema } from "./trip";
 
@@ -34,6 +35,7 @@ export const journeySchema = z.object({
   plans: z.record(z.uuid(), savedPlanSchema).default({}),
   execution: z.record(z.uuid(), z.record(z.iso.date(), dayProgressSchema)).optional(),
   journal: journalSchema.optional(),
+  transport: transportSchema.optional(),
 }).strict().superRefine((journey, context) => {
   if (new Set(journey.cities.map((city) => city.id)).size !== journey.cities.length) context.addIssue({ code: "custom", message: "City visit identifiers must be unique.", path: ["cities"] });
   journey.cities.forEach((city, index) => {

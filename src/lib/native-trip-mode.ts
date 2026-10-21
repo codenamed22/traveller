@@ -4,9 +4,10 @@ import { journalEntry } from "./journal";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
+import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 import { tripRecap, type RecapTravel } from "./recap";
+import { legEnd, transitApp, uberUrl, type TransitApp } from "./transport";
 import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
@@ -19,15 +20,17 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // (`travellerNative.swap`). `journal` says the traveller can keep a note for each day (`note`) and mark visits as
 // favourites (`favourite`), through `travellerNative.journal` or the progress route. `travel` is how far the traveller
 // walked and rode on a day that has started, on the planned routes to the visits made (as the recap counts it).
+// Each city's `app` is its public transport app, and each leg's `taxi` an Uber link from the phone's location. A visit's
+// `about` is what a guide says about the place, as labelled lines.
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: RouteLeg["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
-  steps: string[]; fare?: string; directions: string; directionsFromHere: string;
+  steps: string[]; fare?: string; directions: string; directionsFromHere: string; taxi?: string;
 };
 export type NativeVisit = {
   stopId: string; name: string; placeId?: string; location?: LatLng; start: number; end: number; startLabel: string; endLabel: string;
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
-  alternatives: string[]; leg: NativeLeg; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
+  alternatives: string[]; leg: NativeLeg; about?: { label: string; text: string }[]; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
 };
 // `mode` (flight, train…) picks the arrival or departure line's icon; `leg` is the route between the airport or station
 // and the hotel, when the plan found one.
@@ -40,7 +43,7 @@ export type NativeDay = {
 };
 export type NativeTripMode = {
   version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
-  cities: { id: string; name: string; dates: string }[]; days: NativeDay[]; tickets?: NativeTicket[]; swap?: boolean; journal?: boolean;
+  cities: { id: string; name: string; dates: string; app?: TransitApp }[]; days: NativeDay[]; tickets?: NativeTicket[]; swap?: boolean; journal?: boolean;
 };
 export type NativeTicket = Omit<Ticket, "tripId" | "stopId"> & { stopId?: string };
 
@@ -54,8 +57,9 @@ function epoch(trip: Trip, day: number, minute: number) {
 }
 
 function leg(edge: RouteLeg, places: Record<string, Place>, toDeparture = false): NativeLeg {
-  const destination = toDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
+  const destination = legEnd(edge, places, toDeparture);
   const from = places[edge.from]?.location;
+  const taxi = uberUrl(edge, places, { fromHere: true, toDeparture });
   return {
     mode: edge.mode, minutes: Math.round(edge.minutes), label: `${durationLabel(edge.minutes)} ${{ WALK: "walk", TRANSIT: "by transit", DRIVE: "by car" }[edge.mode]}`,
     // As the web timeline's leg summary.
@@ -64,6 +68,7 @@ function leg(edge: RouteLeg, places: Record<string, Place>, toDeparture = false)
     steps: edge.steps?.map((step) => `${step.line ? `${step.line} ` : ""}${step.from && step.to ? `${step.from} to ${step.to}` : step.instruction}`) ?? [],
     ...(edge.fare ? { fare: edge.fare } : {}),
     directions: directionsUrl(edge, places, { toDeparture }), directionsFromHere: directionsUrl(edge, places, { fromHere: true, toDeparture }),
+    ...(taxi ? { taxi } : {}),
   };
 }
 
@@ -113,7 +118,9 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
       // From the city as it is now, so a note or must-see set after planning shows.
       const current = entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId);
       const note = current?.note;
-      const sourceNote = stop?.source ? exportNote(stop.source) : "";
+      const about = aboutLines(current?.about).map(({ label, text }) => ({ label, text }));
+      // The original itinerary's line, until a guide's notes say what the place is.
+      const sourceNote = stop?.source && !about.length ? exportNote(stop.source) : "";
       const startAt = epoch(trip, entry.day, visit.start), endAt = epoch(trip, entry.day, visit.end);
       const rain = rainWarningFor(forecast, trip, stop, places[visit.stopId], startAt, endAt);
       return {
@@ -124,7 +131,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
         ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}), ...(current && isMustSee(current) ? { mustSee: true } : {}),
         ...(rain !== undefined ? { rain } : {}), ...(journal.favourites?.includes(visit.stopId) ? { favourite: true } : {}),
         alternatives: stop?.alternativeGroup ? plan.visits.filter((other) => other.stopId !== visit.stopId && trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [],
-        leg: leg(visit.leg, places),
+        leg: leg(visit.leg, places), ...(about.length ? { about } : {}),
         ...defined({
           startAt, endAt, leaveAt: epoch(trip, entry.day, leaveBy(visit)),
           ...(completed ? { doneStartAt: epoch(entry.cityTrip, entry.day, completed.start), doneEndAt: epoch(entry.cityTrip, entry.day, completed.end) } : {}),
@@ -149,10 +156,14 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
   return {
     version: 1, level: 2, journeyId: journey.id, title: journey.title, generatedAt: now.toString(), startKey: startingDay(days, options.start)?.key ?? null,
     canTrack: options.canTrack, photos: options.photos,
-    cities: journey.cities.map((city) => ({
-      id: city.id, name: city.city,
-      dates: city.startDate ? city.days > 1 ? `${dayLabel(city.startDate)} – ${dayLabel(tripDate(city, city.days - 1))}` : dayLabel(city.startDate) : "",
-    })),
+    cities: journey.cities.map((city) => {
+      const app = transitApp(city, journey.transport);
+      return {
+        id: city.id, name: city.city,
+        dates: city.startDate ? city.days > 1 ? `${dayLabel(city.startDate)} – ${dayLabel(tripDate(city, city.days - 1))}` : dayLabel(city.startDate) : "",
+        ...(app ? { app } : {}),
+      };
+    }),
     days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId], travel[entry.key])),
     ...(tickets.length ? { tickets } : {}),
     ...(options.swap ? { swap: true } : {}), ...(options.canTrack ? { journal: true } : {}),

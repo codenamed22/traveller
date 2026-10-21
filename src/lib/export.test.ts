@@ -47,6 +47,15 @@ describe("itinerary export", () => {
     expect(withNote.cities[0].outOfDate).toBe(false);
     expect(withNote.cities[0].days[0].visits[0].yourNote).toBe("Cash only <3");
     expect(itineraryHtml(withNote)).toContain("<strong>Note:</strong> Cash only &lt;3");
+    // So does what a guide says about the place, in every export.
+    const about = { what: "A specialty coffee bar.", expect: "", todo: "Order the pour-over." };
+    const guided = itineraryExport({ ...data, cities: [{ ...trip, stops: trip.stops.map((stop) => stop.name === "Sango Coffee" ? { ...stop, about } : stop) }, data.cities[1]] });
+    expect(guided.cities[0].outOfDate).toBe(false);
+    expect(guided.cities[0].days[0].visits[0].about).toEqual([{ label: "What it is", text: "A specialty coffee bar." }, { label: "What to do", text: "Order the pour-over." }]);
+    expect(itineraryHtml(guided)).toContain("<strong>What to do:</strong> Order the pour-over.");
+    // and takes the place of the original itinerary's line.
+    expect(withNote.cities[0].days[0].visits[0].note).not.toBe("");
+    expect(guided.cities[0].days[0].visits[0].note).toBe("");
   });
 
   it("drops the original itinerary's clock times from notes", () => {

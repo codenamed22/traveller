@@ -40,7 +40,7 @@ export function mergeReviewedDuplicate(stops: Stop[], keepId: string, removeId: 
   const note = [...new Set([kept.note?.trim(), removed.note?.trim()].filter(Boolean))].join("\n");
   if (note.length > 500) throw new Error("The combined notes exceed 500 characters. Shorten one before merging; neither visit was changed.");
   const merged = stopSchema.parse({
-    ...kept, source: evidence, ...(note ? { note } : {}),
+    ...kept, source: evidence, ...(note ? { note } : {}), ...(kept.about ?? removed.about ? { about: kept.about ?? removed.about } : {}),
     ...(sourceUrl ? { sourceUrl } : {}),
     ...(!kept.placeId && removed.placeId ? { placeId: removed.placeId, location: removed.location } : {}),
     ...(kept.placeId && !kept.location && kept.placeId === removed.placeId && removed.location ? { location: removed.location } : {}),

@@ -2,17 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Footprints, Heart, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
+import { ArrowUpRight, CarTaxiFront, Check, ChevronLeft, ChevronRight, Footprints, Heart, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
 import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import type { Journey } from "@/lib/journey";
 import { journalEntry, type JournalAction } from "@/lib/journal";
-import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
+import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
 import { OmittedPlaces } from "./OmittedPlaces";
+import { PlaceAbout } from "./PlaceAbout";
 import { PlacePhotos } from "./PlacePhotos";
 import { TransferLine } from "./TransferFields";
 import { TripMap } from "./TripMap";
@@ -20,6 +21,7 @@ import { usePlacePhotos } from "./usePlacePhotos";
 import { RainWarning, WeatherBadge, WeatherCredit } from "./Weather";
 import { DayNote, FavouriteButton } from "./Journal";
 import { rainWarningFor, type Forecast } from "@/lib/weather";
+import { transitApp, uberUrl } from "@/lib/transport";
 
 type Props = {
   title: string; cities: Trip[]; plans: Record<string, SavedPlan>; execution?: Journey["execution"]; start?: { cityId: string; day: number };
@@ -36,6 +38,8 @@ type Props = {
   forecasts?: Record<string, Forecast>; onSwap?: (cityId: string, day: number, stopId: string) => void;
   // The owner's notes and favourites; `onJournal` keeps them, from the first day of the trip on.
   journal?: Journey["journal"]; onJournal?: (action: JournalAction) => void;
+  // Each city's public transport app, linked on transit legs.
+  transport?: Journey["transport"];
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
@@ -45,7 +49,7 @@ const noForecasts: Record<string, Forecast> = {};
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap, journal, onJournal }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap, journal, onJournal, transport }: Props) {
   const ticketLinks = (place: TicketPlace) => ticketsFor(tickets, place).map((ticket, _index, all) => <a key={ticket.id} className="button secondary small" href={`/api/trips/${ticket.tripId}/tickets/${ticket.id}`} target="_blank" rel="noopener"><TicketIcon size={15} />{all.length === 1 ? "Ticket" : ticket.name}</a>);
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
@@ -149,6 +153,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     try { return rainWarningFor(forecast, entry.trip, entry.trip.stops.find((stop) => stop.id === visit.stopId), entry.places[visit.stopId], instantForMinute(entry.trip, entry.day, visit.start).epochMilliseconds, instantForMinute(entry.trip, entry.day, visit.end).epochMilliseconds); } catch { return undefined; }
   };
   const toDeparture = endpointKey(entry.trip, entry.day, "hotel", "to") === "departure";
+  const app = transitApp(entry.cityTrip, transport);
+  const backByTaxi = entry.plan.returnLeg ? uberUrl(entry.plan.returnLeg, entry.places, { fromHere: true, toDeparture }) : null;
   const nowMinute = minuteNow(entry, now);
   const position = days.indexOf(entry);
   const markerStatus = Object.fromEntries(entry.plan.visits.map((visit) => [visit.stopId, visitStatus(entry.progress, visit.stopId)]).filter(([, status]) => status !== "pending"));
@@ -185,10 +191,11 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       const completed = entry.progress?.completed.find((visit) => visit.stopId === focus.stopId);
       const leave = leaveBy(focus);
       const isNext = focus === next;
-      const note = stop?.source ? exportNote(stop.source) : "";
       // From the city as it is now, so a note written after planning shows.
       const current = entry.cityTrip.stops.find((candidate) => candidate.id === focus.stopId);
       const yourNote = current?.note;
+      // The original itinerary's line, until a guide's notes say what the place is.
+      const note = stop?.source && !aboutLines(current?.about).length ? exportNote(stop.source) : "";
       return <div className="trip-card">
         <div className="trip-card-label">{isNext ? "Next" : "Stop"} · {index + 1} of {entry.plan.visits.length}{selected && next && focus !== next && <button type="button" className="chip" onClick={() => setSelected(null)}>Back to next</button>}</div>
         <div className="trip-card-title"><h2>{stopName(focus.stopId)}</h2>{journaling && <FavouriteButton className="icon-button" on={favourite(focus.stopId)} name={stopName(focus.stopId)} onChange={(on) => onJournal!({ kind: "favourite", cityId: entry.cityId, day: entry.day, stopId: focus.stopId, on })} />}</div>
@@ -199,6 +206,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         {status === "pending" && rainAt(focus) !== undefined && <RainWarning chance={rainAt(focus)!} onSwap={onSwap ? () => { const target = entry; exit(); onSwap(target.cityId, target.day, focus.stopId); } : undefined} />}
         {selected && <PlacePhotos key={photoKey ?? focus.stopId} placeName={stopName(focus.stopId)} variant="carousel" total={photo.total} frames={photo.frames} loading={photo.loading} errors={photo.errors} disabledMessage={photo.disabledMessage} onRequest={photo.request} onRetry={photo.retry} />}
         {yourNote && <p className="stop-note">{yourNote}</p>}
+        {selected && <PlaceAbout about={current?.about} />}
         {selected && note && <p className="trip-card-note">{note}</p>}
         <div className="trip-card-actions">
           <a className="button primary small" href={directionsUrl(focus.leg, entry.places, { fromHere: entry.isToday && status === "pending" })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>
@@ -212,7 +220,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       <div className="trip-card-label">Today</div>
       <h2>All done for today</h2>
       {entry.plan.returnLeg && <><p className="trip-card-leave">{toDeparture ? `On to ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`} · {durationLabel(entry.plan.returnLeg.minutes)} {entry.plan.returnLeg.mode === "WALK" ? "walk" : "by transit"}</p>
-        <div className="trip-card-actions"><a className="button primary small" href={directionsUrl(entry.plan.returnLeg, entry.places, { fromHere: true, toDeparture })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a></div></>}
+        <div className="trip-card-actions"><a className="button primary small" href={directionsUrl(entry.plan.returnLeg, entry.places, { fromHere: true, toDeparture })} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>{backByTaxi && <a className="button secondary small" href={backByTaxi} target="_blank" rel="noreferrer"><CarTaxiFront size={15} />Uber</a>}</div></>}
     </div>;
     return <div className="trip-card">
       <div className="trip-card-label">{entry.isToday ? "Today" : entry.label}</div>
@@ -261,7 +269,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       <div className="trip-timeline">
         {entry.replanned && <p className="trip-mode-note">Today was replanned; showing the updated day.</p>}
         {entry.day === 0 && entry.trip.arrival && <TransferLine trip={entry.trip} kind="arrival">{ticketLinks({ cityId: entry.cityId, target: "arrival", stopId: null })}</TransferLine>}
-        {entry.day === 0 && entry.plan.arrivalLeg && <LegDetails edge={entry.plan.arrivalLeg} places={entry.places} />}
+        {entry.day === 0 && entry.plan.arrivalLeg && <LegDetails edge={entry.plan.arrivalLeg} places={entry.places} app={app} taxiFromHere={entry.isToday} />}
         {entry.progress?.completed.filter((visit) => !entry.plan.visits.some((planned) => planned.stopId === visit.stopId)).map((visit) => <p className="trip-timeline-done" key={visit.stopId}><Check size={14} />{stopName(visit.stopId)} · {formatMinute(entry.cityTrip, entry.day, visit.start)}–{formatMinute(entry.cityTrip, entry.day, visit.end)}</p>)}
         {entry.plan.visits.length > 0 && <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{entry.trip.hotel}</strong><span>Leave {firstLeave !== undefined ? formatMinute(entry.trip, entry.day, firstLeave) : ""}</span></div></div>}
         {entry.plan.visits.map((visit, index) => {
@@ -269,7 +277,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
           const status = visitStatus(entry.progress, visit.stopId);
           const alternatives = stop?.alternativeGroup ? entry.plan.visits.filter((other) => other.stopId !== visit.stopId && entry.trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [];
           return <div key={visit.stopId} className={`trip-timeline-stop ${status}`}>
-            <LegDetails edge={visit.leg} places={entry.places} />
+            <LegDetails edge={visit.leg} places={entry.places} app={app} taxiFromHere={entry.isToday} />
             <button type="button" className={`itinerary-stop ${selected === visit.stopId ? "selected" : ""} ${visit === next ? "next" : ""}`} onClick={() => { setSelected(visit.stopId); setSnap("peek"); }}>
               <span className="stop-number">{status === "done" ? <Check size={13} /> : index + 1}</span>
               <span className="stop-heading"><strong>{stopName(visit.stopId)}{isMustSee(entry.cityTrip.stops.find((candidate) => candidate.id === visit.stopId) ?? { priority: 1 }) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}{favourite(visit.stopId) && <Heart size={12} className="favourite-icon" role="img" aria-label="Favourite" />}</strong><span>{formatMinute(entry.trip, entry.day, visit.start)} - {formatMinute(entry.trip, entry.day, visit.end)} · {visit.end - visit.start} min{status === "skipped" ? " · skipped" : ""}</span>{status === "pending" && rainAt(visit) !== undefined && <RainWarning chance={rainAt(visit)!} />}{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}</span>
@@ -277,8 +285,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
             </button>
           </div>;
         })}
-        {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
-        {entry.day === entry.trip.days - 1 && entry.plan.departureLeg && <LegDetails edge={entry.plan.departureLeg} places={entry.places} />}
+        {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} app={app} taxiFromHere={entry.isToday} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
+        {entry.day === entry.trip.days - 1 && entry.plan.departureLeg && <LegDetails edge={entry.plan.departureLeg} places={entry.places} app={app} taxiFromHere={entry.isToday} />}
         {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure">{ticketLinks({ cityId: entry.cityId, target: "departure", stopId: null })}</TransferLine>}
         {plans[entry.cityId]?.snapshot && <OmittedPlaces trip={entry.trip} schedule={plans[entry.cityId].snapshot!.schedule} />}
         {(journaling || dayJournal.note) && <DayNote key={entry.key} note={dayJournal.note} onSave={journaling ? (text) => onJournal!({ kind: "note", cityId: entry.cityId, day: entry.day, text }) : undefined} />}

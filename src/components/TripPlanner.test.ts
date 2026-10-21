@@ -100,7 +100,7 @@ describe("tickets", () => {
     await settle();
     const links = () => [...container.querySelectorAll(".ticket a")].map((link) => [link.textContent, link.getAttribute("href")]);
     expect(links()).toEqual([["Eurostar.pdf", `/api/trips/${entry.data.id}/tickets/${train.id}`]]);
-    expect(container.querySelector(".transfer-fields:last-of-type .ticket")).not.toBeNull();
+    expect([...container.querySelectorAll(".transfer-fields")].find((fieldset) => fieldset.querySelector("legend")?.textContent?.startsWith("Leaving"))?.querySelector(".ticket")).toBeTruthy();
 
     await act(async () => (container.querySelector(".stop-summary") as HTMLElement).click());
     const input = container.querySelector(".stop-details input[type=file]") as HTMLInputElement;

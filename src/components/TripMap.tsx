@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { APIProvider, AdvancedMarker, InfoWindow, Map as GoogleMap, useMap } from "@vis.gl/react-google-maps";
 import { decode } from "@googlemaps/polyline-codec";
 import { Hotel, LocateFixed, MapPinned } from "lucide-react";
-import type { Place, Schedule, TravelEdge, Trip } from "@/lib/trip";
+import type { Place, Schedule, StopAbout, TravelEdge, Trip } from "@/lib/trip";
 import type { PlacePhoto } from "@/lib/place-photos";
 import { placeMarkerLabel } from "@/lib/map-markers";
+import { PlaceAbout } from "./PlaceAbout";
 import { PlacePhotos } from "./PlacePhotos";
 import { transferIcons } from "./TransferFields";
 
@@ -16,13 +17,15 @@ type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | n
   padding?: google.maps.Padding; fitToken?: number; popup?: boolean; zoomOnSelect?: boolean; fitCurrentLocation?: boolean;
   markerStatus?: Record<string, "done" | "skipped" | "next">; centerOn?: { lat: number; lng: number; token: number };
   // A click on the map itself, not on a marker.
-  onMapClick?: () => void };
+  onMapClick?: () => void;
+  // What a guide says about the selected place, shown in its popup.
+  about?: StopAbout };
 
 // Room for the city and day chip and the route legend along the top (stacked on narrow screens) and the assistant tab on
 // the right, so no marker is fitted underneath them.
 const overlayPadding: google.maps.Padding = { top: 130, right: 70, bottom: 60, left: 60 };
 
-function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry, padding, fitToken, popup = true, zoomOnSelect = false, fitCurrentLocation = true, markerStatus, centerOn }: Props) {
+function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry, padding, fitToken, popup = true, zoomOnSelect = false, fitCurrentLocation = true, markerStatus, centerOn, about }: Props) {
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
   const stopIds = visits ? visits.visits.map((visit) => visit.stopId) : selectedRoute ? [selectedRoute.to].filter((id) => id !== "hotel") : trip.stops.map((stop) => stop.id);
@@ -88,7 +91,7 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
       return places[id] && <AdvancedMarker key={id} position={places[id].location} title={trip.stops.find((stop) => stop.id === id)?.name ?? places[id].name} onClick={() => onSelect(id)}><span className={`place-marker ${selected === id ? "selected" : ""} ${markerOrder && visitIndex < 0 ? "unscheduled" : ""} ${markerStatus?.[id] ?? ""}`}>{placeMarkerLabel(id, index, markerOrder)}</span></AdvancedMarker>;
     })}
     {popup && selected && selectedPlace && selectedName && <InfoWindow position={selectedPlace.location} onCloseClick={() => onSelect(null)} shouldFocus={false}>
-      <div className="map-photo-popup"><h2>{selectedName}</h2><PlacePhotos key={selectedPlace.id} placeName={selectedName} variant="popup" total={photoTotal} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => onPhotoRequest(selectedPlace.id, index)} onRetry={(index) => onPhotoRetry(selectedPlace.id, index)} /></div>
+      <div className="map-photo-popup"><h2>{selectedName}</h2><PlacePhotos key={selectedPlace.id} placeName={selectedName} variant="popup" total={photoTotal} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => onPhotoRequest(selectedPlace.id, index)} onRetry={(index) => onPhotoRetry(selectedPlace.id, index)} />{selected !== "hotel" && <PlaceAbout about={about} />}</div>
     </InfoWindow>}
   </>;
 }
