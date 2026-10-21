@@ -75,7 +75,7 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
     if (!map) return;
     const legs = selectedRoute ? [selectedRoute] : visits ? [...(visits.arrivalLeg ? [visits.arrivalLeg] : []), ...visits.visits.map((visit) => visit.leg), ...(visits.returnLeg ? [visits.returnLeg] : []), ...(visits.departureLeg ? [visits.departureLeg] : [])] : [];
     const lines = legs.filter((leg) => leg.polyline).map((leg) => new google.maps.Polyline({
-      map, path: decode(leg.polyline!).map(([lat, lng]) => ({ lat, lng })), strokeColor: leg.mode === "WALK" ? "#137765" : "#426eab", strokeWeight: 4, strokeOpacity: 0.85,
+      map, path: decode(leg.polyline!).map(([lat, lng]) => ({ lat, lng })), strokeColor: leg.mode === "WALK" ? "#137765" : leg.mode === "DRIVE" ? "#6b5b8e" : "#426eab", strokeWeight: 4, strokeOpacity: 0.85,
     }));
     return () => lines.forEach((line) => line.setMap(null));
   }, [map, visits, selectedRoute]);

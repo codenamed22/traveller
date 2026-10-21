@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, newDayProgress, recoveryMinute, type DayProgress } from "./day-recovery";
 import type { Journey } from "./journey";
-import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type SavedPlan, type Stop, type TravelEdge, type Trip, type Visit } from "./trip";
+import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type RouteLeg, type SavedPlan, type Stop, type Trip, type Visit } from "./trip";
 
 // One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
 // snapshot, or today's replan); `cityTrip` is the city as it is now, which keys and validates day progress like the planner.
@@ -118,7 +118,7 @@ export function markPending(entry: TripModeDay, stopId: string): DayProgress {
 }
 
 // Google Maps directions for one leg. From here leaves out the origin, so Google Maps starts from the phone's location.
-export function directionsUrl(edge: TravelEdge, places: Record<string, Place>, options: { fromHere?: boolean; toDeparture?: boolean } = {}) {
+export function directionsUrl(edge: RouteLeg, places: Record<string, Place>, options: { fromHere?: boolean; toDeparture?: boolean } = {}) {
   const origin = places[edge.from];
   // Last leg of a direct departure day: "hotel" stands for the airport or station.
   const destination = options.toDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
@@ -130,6 +130,6 @@ export function directionsUrl(edge: TravelEdge, places: Record<string, Place>, o
   }
   url.searchParams.set("destination", destination?.name ?? edge.to);
   if (destination) url.searchParams.set("destination_place_id", destination.id);
-  url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
+  url.searchParams.set("travelmode", { WALK: "walking", TRANSIT: "transit", DRIVE: "driving" }[edge.mode]);
   return url.toString();
 }

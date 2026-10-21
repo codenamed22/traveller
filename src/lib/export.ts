@@ -1,11 +1,11 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { Journey } from "./journey";
-import { arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type Transfer, type TravelEdge, type Trip } from "./trip";
+import { arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type RouteLeg, type Transfer, type Trip } from "./trip";
 
 // Shareable exports of the accepted itinerary: a printable page (save as PDF), an Excel workbook and a calendar file.
 // Everything is built from the saved plan snapshots, so an export never calls Google or changes the trip.
 
-export type ExportTravel = { mode: "Walk" | "Transit"; minutes: number; km: number; lines: string[]; fare?: string; directionsUrl: string; estimated: boolean };
+export type ExportTravel = { mode: "Walk" | "Transit" | "Car"; minutes: number; km: number; lines: string[]; fare?: string; directionsUrl: string; estimated: boolean };
 export type ExportVisit = { stopId: string; start: string; end: string; startInstant: string; endInstant: string; minutes: number; name: string; address: string; booked: boolean; optional: boolean; travel: ExportTravel; mapsUrl: string; yourNote?: string; note: string; sourceUrl?: string; alternativeTo?: string[] };
 export type ExportDay = { day: number; date: string; label: string; leave: string; visits: ExportVisit[]; back?: { time: string; travel: ExportTravel; to?: string; address?: string } };
 // Getting into or out of the city: the arrival runs until you are at the hotel, the departure from leaving the hotel.
@@ -28,15 +28,15 @@ function localClock(trip: Trip, instant: string) {
   try { return Temporal.Instant.from(instant).toZonedDateTimeISO(trip.timeZone).toPlainTime().toString({ smallestUnit: "minute" }); } catch { return null; }
 }
 
-function travel(trip: Trip, edge: TravelEdge, places: Record<string, Place>): ExportTravel {
+function travel(trip: Trip, edge: RouteLeg, places: Record<string, Place>): ExportTravel {
   const url = new URL("https://www.google.com/maps/dir/");
   const [origin, destination] = [places[edge.from], places[edge.to]];
   url.searchParams.set("api", "1"); url.searchParams.set("origin", origin?.name ?? edge.from); url.searchParams.set("destination", destination?.name ?? edge.to);
   if (origin?.id) url.searchParams.set("origin_place_id", origin.id);
   if (destination?.id) url.searchParams.set("destination_place_id", destination.id);
-  url.searchParams.set("travelmode", edge.mode === "WALK" ? "walking" : "transit");
+  url.searchParams.set("travelmode", { WALK: "walking", TRANSIT: "transit", DRIVE: "driving" }[edge.mode]);
   const lines = (edge.steps ?? []).filter((step) => step.line).map((step) => `${step.line}${step.from && step.to ? ` ${step.from} → ${step.to}` : ""}${step.departure && localClock(trip, step.departure) ? ` (${localClock(trip, step.departure)})` : ""}`);
-  return { mode: edge.mode === "WALK" ? "Walk" : "Transit", minutes: Math.round(edge.minutes), km: Math.round(edge.meters / 100) / 10, lines, ...(edge.fare ? { fare: edge.fare } : {}), directionsUrl: url.toString(), estimated: Boolean(edge.assumed || edge.timetableDate) };
+  return { mode: ({ WALK: "Walk", TRANSIT: "Transit", DRIVE: "Car" } as const)[edge.mode], minutes: Math.round(edge.minutes), km: Math.round(edge.meters / 100) / 10, lines, ...(edge.fare ? { fare: edge.fare } : {}), directionsUrl: url.toString(), estimated: Boolean(edge.assumed || edge.timetableDate) };
 }
 
 // Original itinerary notes keep their own clock times ("17:50 – 18:35 | Toki"); those lines would contradict the plan.
@@ -71,7 +71,7 @@ export function exportNote(source: string) {
 }
 
 export function travelLabel(leg: ExportTravel) {
-  return `${leg.mode} ${leg.minutes} min${leg.mode === "Walk" ? ` · ${leg.km} km` : ""}${leg.lines.length ? ` · ${leg.lines.join("; ")}` : ""}${leg.fare ? ` · ${leg.fare}` : ""}`;
+  return `${leg.mode} ${leg.minutes} min${leg.mode !== "Transit" ? ` · ${leg.km} km` : ""}${leg.lines.length ? ` · ${leg.lines.join("; ")}` : ""}${leg.fare ? ` · ${leg.fare}` : ""}`;
 }
 
 // Uses each city's accepted plan; a plan made before the city's latest edits is flagged as out of date.

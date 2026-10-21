@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Temporal } from "@js-temporal/polyfill";
-import { applyScheduleDurations, dayStart, instantAt, instantForMinute, minuteAt, newStop, newTrip, persistedPlan, planningPreferences, withMeasuredTransfers, type Trip } from "./trip";
+import { applyScheduleDurations, dayStart, departureTimes, instantAt, instantForMinute, minuteAt, newStop, newTrip, persistedPlan, planningPreferences, withMeasuredTransfers, withTransferRoutes, type Trip } from "./trip";
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
@@ -984,6 +984,22 @@ describe("airport and station transfers", () => {
     expect(legs.departure).toBeUndefined();
     expect(places).toEqual({ arrival: expect.objectContaining({ id: "midi-place", name: "Brussels-Midi" }) });
     expect(warnings).toEqual([]);
+  });
+
+  it("times a car or taxi by driving, in the traffic expected when it leaves", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-21T08:00:00Z") });
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => { requests.push(JSON.parse(init!.body as string)); return Response.json({ routes: [{ duration: "2280s", distanceMeters: 31_000, polyline: { encodedPolyline: "abc" } }] }); }));
+    const trip: Trip = { ...transit(fixture()), startDate: "2027-01-03",
+      departure: { mode: "FLIGHT", time: "09:55", place: "CDG", placeId: "cdg-place", location: { lat: 49.0, lng: 2.55 }, bufferMinutes: 180, taxi: true } };
+    const { legs, warnings } = await routeTransfers(trip, hotel);
+    expect(legs.departure).toEqual({ day: 0, from: "hotel", to: "departure", mode: "DRIVE", minutes: 38, meters: 31_000, polyline: "abc" });
+    // Before public transport runs: 09:55 − 3 h at the airport − the 45 min assumed, so leaving about 06:10.
+    expect(requests).toEqual([expect.objectContaining({ origin: { placeId: "hotel-place" }, destination: { placeId: "cdg-place" }, travelMode: "DRIVE", routingPreference: "TRAFFIC_AWARE", departureTime: instantForMinute(trip, 0, minuteAt(trip, 0, "06:10")).toString() })]);
+    expect(warnings).toEqual([]);
+    expect(departureTimes(withTransferRoutes(trip, legs))).toMatchObject({ transfer: 38, leaveHotel: minuteAt(trip, 0, "06:17") });
+    vi.useRealTimers();
   });
 
   it("leaves a car and an unrouted transfer to the typed minutes", async () => {

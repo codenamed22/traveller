@@ -2,7 +2,7 @@ import "server-only";
 import { writeFile } from "node:fs/promises";
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, arrivalTimes, assumedGroupEdge, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, withTransferRoutes, type BookingTravelCheck, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type Transfer, type TravelEdge, type TravelMode, type Trip } from "./trip";
+import { allowsTravelEdge, allowsVisitPair, applyPlanningFixes, arrivalTimes, assumedGroupEdge, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, groupAllowedDays, instantAt, instantForMinute, minuteAt, planningPreferences, returnDeadline, stopAllowedOnDay, travelModes, tripDate, tripForDay, withTransferRoutes, type BookingTravelCheck, type RouteLeg, type Place, type PlanningFailureCode, type PlanningFix, type ProvisionalPlan, type SavedPlan, type Schedule, type Transfer, type TravelEdge, type TravelMode, type Trip } from "./trip";
 import { HttpError } from "./server";
 import { blockedDayFixes, kmBetween, solveTrip, solveTripByDays, PlanningError, squeezeIns, travelEstimator, twoLegBound, sampledRouteGaps, sampledRouteReachability, visitsOutsideHours, type SolverStage } from "./planner";
 import { validateSchedule } from "./schedule-validation";
@@ -262,6 +262,19 @@ export async function computeLeg(trip: Trip, day: number, from: string, to: stri
       departure: step.transitDetails?.stopDetails?.departureTime, arrival: step.transitDetails?.stopDetails?.arrivalTime,
     }))),
   };
+}
+
+// A car or taxi between the hotel and the airport or station, in the traffic expected when it leaves.
+async function computeDrive(trip: Trip, day: number, from: string, to: string, departure: number, places: Record<string, Pick<Place, "id">>, budget: RequestBudget): Promise<RouteLeg | null> {
+  budget.consume("routes", 1);
+  const leaves = instantForMinute(trip, day, departure);
+  const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline", {
+    origin: { placeId: places[from].id }, destination: { placeId: places[to].id }, travelMode: "DRIVE", languageCode: "en",
+    // Traffic needs a time still ahead; a trip already under way is timed without it.
+    ...(leaves.epochMilliseconds > Date.now() ? { routingPreference: "TRAFFIC_AWARE", departureTime: leaves.toString() } : {}),
+  }, budget.requestSignal());
+  const route = routeResponse.parse(body).routes[0];
+  return route ? { day, from, to, mode: "DRIVE", minutes: minutesFromDuration(route.duration), meters: route.distanceMeters, ...(route.polyline ? { polyline: route.polyline.encodedPolyline } : {}) } : null;
 }
 
 function recoveryWaypoint(request: RecoveryRequest, id: string, role: "from" | "to" = "from") {
@@ -863,12 +876,13 @@ export type PlanningStage = {
 const transferWalkMinutes = 15;
 
 // The routes between the airport or station and the hotel: from it once you have landed and cleared it, and to it in time
-// for the train or flight. A direct departure already ends the last day there, and a car isn't routed. Where Google has
-// no route, or the place can't be found, the typed or default minutes stand.
+// for the train or flight, by public transport or, when chosen, by car or taxi. A direct departure already ends the last
+// day there, and arriving or leaving by your own car isn't routed. Where Google has no route, or the place can't be
+// found, the typed or default minutes stand.
 export async function routeTransfers(trip: Trip, hotel: Place, signal?: AbortSignal) {
   const budget = new RequestBudget(8, signal);
   const places: Record<string, Place> = { hotel };
-  const legs: { arrival?: TravelEdge; departure?: TravelEdge } = {};
+  const legs: { arrival?: RouteLeg; departure?: RouteLeg } = {};
   const warnings: string[] = [];
   const hub = async (transfer: Transfer): Promise<Place | undefined> => {
     if (transfer.placeId && transfer.location) return { id: transfer.placeId, name: transfer.place || "", address: "", location: transfer.location };
@@ -889,6 +903,11 @@ export async function routeTransfers(trip: Trip, hotel: Place, signal?: AbortSig
     if (!place) { warnings.push(`${name} could not be found on the map, so the time to and from the hotel is your own estimate.`); return; }
     places[kind] = { ...place, name: transfer.place || place.name };
     const [from, to] = kind === "arrival" ? [kind, "hotel"] : ["hotel", kind];
+    if (transfer.taxi) {
+      const drive = await computeDrive(trip, day, from, to, departure, places, budget).catch(() => null);
+      if (drive) legs[kind] = drive; else warnings.push(`Google returned no route between ${name} and the hotel, so that transfer uses your own estimate.`);
+      return;
+    }
     const modes = travelModes(trip).filter((mode) => mode === "TRANSIT" || kmBetween(place.location, hotel.location) <= 2);
     const options = (await Promise.all(modes.map((mode) => computeLeg(trip, day, from, to, mode, departure, places, budget, true, to).catch(() => null))))
       .filter((edge): edge is TravelEdge => edge !== null && allowsTravelEdge(trip, edge)).sort((left, right) => left.minutes - right.minutes);

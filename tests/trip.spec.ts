@@ -944,6 +944,9 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await expect(search.getByLabel("Place or address")).toHaveValue(/Gare du Nord/);
   await search.getByRole("button", { name: "Close dialog" }).click();
   await leaving.getByLabel("Check out in the morning and go straight there from the last visit").uncheck();
+  // An early flight or train, before public transport runs, can be reached by car or taxi instead.
+  await expect(leaving.getByLabel("To the station by")).toHaveValue("TRANSIT");
+  await leaving.getByLabel("To the station by").selectOption("TAXI");
   await page.screenshot({ path: testInfo.outputPath("arrival-departure.png"), fullPage: true });
 
   await page.getByRole("button", { name: "Plan my days", exact: true }).first().click();
@@ -951,7 +954,7 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await dialog.getByRole("button", { name: "Optimize preview" }).click();
   await dialog.getByRole("button", { name: "Use this plan" }).click();
   await expect(dialog).toHaveCount(0);
-  expect(submitted.at(-1)).toMatchObject({ arrival: { mode: "FLIGHT", time: "13:20", place: "Paris Charles de Gaulle", reference: "AF 1234" }, departure: { mode: "TRAIN", time: "17:00", transferMinutes: 25 } });
+  expect(submitted.at(-1)).toMatchObject({ arrival: { mode: "FLIGHT", time: "13:20", place: "Paris Charles de Gaulle", reference: "AF 1234" }, departure: { mode: "TRAIN", time: "17:00", transferMinutes: 25, taxi: true } });
   await page.getByRole("button", { name: /^Itinerary/ }).click();
   await expect(page.getByLabel("Arrival")).toContainText("Land at Paris Charles de Gaulle 13:20 · AF 1234");
   await expect(page.getByLabel("Arrival")).toContainText("At Private hotel about 14:40");

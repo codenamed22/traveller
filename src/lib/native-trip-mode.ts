@@ -4,7 +4,7 @@ import { journalEntry } from "./journal";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type SavedPlan, type Transfer, type TravelEdge, type Trip } from "./trip";
+import { endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 import { tripRecap, type RecapTravel } from "./recap";
 import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
@@ -21,7 +21,7 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // walked and rode on a day that has started, on the planned routes to the visits made (as the recap counts it).
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
-  mode: TravelEdge["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
+  mode: RouteLeg["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
   steps: string[]; fare?: string; directions: string; directionsFromHere: string;
 };
 export type NativeVisit = {
@@ -53,13 +53,13 @@ function epoch(trip: Trip, day: number, minute: number) {
   try { return instantForMinute(trip, day, minute).epochMilliseconds; } catch { return undefined; }
 }
 
-function leg(edge: TravelEdge, places: Record<string, Place>, toDeparture = false): NativeLeg {
+function leg(edge: RouteLeg, places: Record<string, Place>, toDeparture = false): NativeLeg {
   const destination = toDeparture && edge.to === "hotel" && places.departure ? places.departure : places[edge.to];
   const from = places[edge.from]?.location;
   return {
-    mode: edge.mode, minutes: Math.round(edge.minutes), label: `${durationLabel(edge.minutes)} ${edge.mode === "WALK" ? "walk" : "by transit"}`,
+    mode: edge.mode, minutes: Math.round(edge.minutes), label: `${durationLabel(edge.minutes)} ${{ WALK: "walk", TRANSIT: "by transit", DRIVE: "by car" }[edge.mode]}`,
     // As the web timeline's leg summary.
-    detail: `${edge.mode === "WALK" ? "Walk" : "Public transit"} · ${Math.round(edge.minutes)} min${edge.assumed ? " (assumed, not checked with Google)" : ""}${edge.timetableDate ? ` (timetable of ${edge.timetableDate})` : ""}${edge.mode === "WALK" ? ` · ${(edge.meters / 1000).toFixed(1)} km` : ""}`,
+    detail: `${{ WALK: "Walk", TRANSIT: "Public transit", DRIVE: "Car or taxi" }[edge.mode]} · ${Math.round(edge.minutes)} min${edge.assumed ? " (assumed, not checked with Google)" : ""}${edge.timetableDate ? ` (timetable of ${edge.timetableDate})` : ""}${edge.mode !== "TRANSIT" ? ` · ${(edge.meters / 1000).toFixed(1)} km` : ""}`,
     ...(edge.polyline ? { polyline: edge.polyline } : {}), ...(from ? { from } : {}), ...(destination ? { to: destination.location } : {}),
     steps: edge.steps?.map((step) => `${step.line ? `${step.line} ` : ""}${step.from && step.to ? `${step.from} to ${step.to}` : step.instruction}`) ?? [],
     ...(edge.fare ? { fare: edge.fare } : {}),

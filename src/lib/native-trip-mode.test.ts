@@ -195,5 +195,11 @@ describe("native trip mode snapshot", () => {
     // 18:00 − 30 min at the station − the 22 min route: leave at 17:08 (16:08 UTC).
     expect(day.departure).toMatchObject({ leaveAt: Date.parse("2026-12-31T16:08:00Z"), leg: { mode: "TRANSIT", minutes: 22, label: "22 min by transit", from: { lat: 48.85, lng: 4.89 }, to: { lat: 48.88, lng: 4.89 }, steps: ["4 Odéon to Gare du Nord"] } });
     expect(day.arrival).toBeUndefined();
+    // By taxi: a car leg, with its distance.
+    const taxi = structuredClone(journey);
+    taxi.plans[paris.id]!.snapshot!.schedule.days[0].departureLeg = { day: 0, from: "hotel", to: "departure", mode: "DRIVE", minutes: 38, meters: 31_000 };
+    const [byCar] = nativeTripMode(taxi, Temporal.Instant.from("2026-12-31T08:00:00Z"), { canTrack: true, photos: false }).days;
+    expect(byCar.departure?.leg).toMatchObject({ mode: "DRIVE", label: "38 min by car", detail: "Car or taxi · 38 min · 31.0 km", steps: [] });
+    expect(byCar.departure?.leg?.directions).toContain("travelmode=driving");
   });
 });

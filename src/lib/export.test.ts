@@ -160,6 +160,12 @@ describe("itinerary export", () => {
     expect(page.indexOf("Walk 18 min · 1.4 km")).toBeGreaterThan(page.indexOf("Leave: Train"));
     const row = itineraryRows(exported).find((entry) => entry[5] === "Leave: Train leaves Amsterdam Centraal at 17:00")!;
     expect(row.slice(8, 14)).toEqual(["Walk 18 min · 1.4 km", 18, "Amsterdam Centraal", "Leave Motel One 16:22: 18 min to Amsterdam Centraal, 20 min there before departure", null, { link: amsterdam.departure!.travel!.directionsUrl, text: "Directions" }]);
+    // By taxi, the route is a drive.
+    const taxi: Schedule = { ...schedule, days: [schedule.days[0], { ...schedule.days[1], departureLeg: { day: 1, from: "hotel", to: "departure", mode: "DRIVE", minutes: 14, meters: 4200 } }] };
+    const driven = itineraryExport({ ...data, cities: [withMeasuredTransfers(travelled, taxi), data.cities[1]], plans: { ...data.plans, [trip.id]: persistedPlan(taxi, withMeasuredTransfers(travelled, taxi), places) } }).cities[0].departure!.travel!;
+    expect(driven).toMatchObject({ mode: "Car", minutes: 14, km: 4.2 });
+    expect(driven.directionsUrl).toContain("travelmode=driving");
+    expect(itineraryHtml({ ...exported, cities: [{ ...amsterdam, departure: { ...amsterdam.departure!, travel: driven } }] }, false)).toContain("Car 14 min · 4.2 km");
     // Without a routed leg the transfer keeps its own estimate and no directions.
     expect(itineraryExport({ ...data, cities: [travelled, data.cities[1]], plans: { ...data.plans, [trip.id]: persistedPlan(snapshot.schedule, travelled, snapshot.places) } }).cities[0].arrival!.travel).toBeUndefined();
   });

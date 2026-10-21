@@ -111,6 +111,8 @@ export const transferSchema = z.object({
   // The airport or station confirmed on the map; needed to route a direct departure to it.
   placeId: z.string().trim().min(1).max(300).optional(),
   location: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).strict().optional(),
+  // By car or taxi between the hotel and the airport or station, timed by driving instead of public transport.
+  taxi: z.boolean().optional(),
   // Departure only: check out in the morning and go there from the last visit, bags in hand, instead of returning to
   // the hotel first.
   direct: z.boolean().optional(),
@@ -230,9 +232,11 @@ export type TravelEdge = {
   alternatives?: TravelEdge[];
 };
 export type Visit = { stopId: string; start: number; end: number; leg: TravelEdge };
+// The route between the hotel and the airport or station: like a visit's leg, but it can also be by car or taxi.
+export type RouteLeg = Omit<TravelEdge, "mode"> & { mode: TravelMode | "DRIVE" };
 // arrivalLeg (first day, from "arrival" to "hotel") and departureLeg (last day, from "hotel" to "departure") are the
 // routes between the airport or station and the hotel.
-export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge; arrivalLeg?: TravelEdge; departureLeg?: TravelEdge };
+export type DayPlan = { day: number; date: string; visits: Visit[]; returnLeg?: TravelEdge; arrivalLeg?: RouteLeg; departureLeg?: RouteLeg };
 // Where a place left out of the plan could still go: between two visits (or at the start or end of a day), with the
 // least extra travel, and how much later the following visits would start. Times are estimates from the plan's routes.
 export type SqueezeIn = { stopId: string; day: number; after?: string; before?: string; start: number; end: number; extraMinutes: number; delayMinutes?: number; overCap?: { category: "breakfast" | "lunch" | "dinner" | "meal" | "coffee"; count: number }; nearMeal?: { stopId: string; minutes: number; after: boolean } };
@@ -250,14 +254,15 @@ const routeFieldsSchema = z.object({
   assumed: z.boolean().optional(), estimated: z.boolean().optional(), timetableDate: z.iso.date().optional(),
 }).strict();
 const travelEdgeSchema = routeFieldsSchema.extend({ alternatives: z.array(routeFieldsSchema).max(8).optional() });
+const routeLegSchema = travelEdgeSchema.extend({ mode: z.enum(["WALK", "TRANSIT", "DRIVE"]) });
 export const dayPlanSchema = z.object({
   day: z.number().int().min(0).max(6), date: z.iso.date(),
   visits: z.array(z.object({
     stopId: z.uuid(), start: z.number().min(0).max(2880), end: z.number().min(0).max(2880), leg: travelEdgeSchema,
   }).strict().refine((visit) => visit.end > visit.start, "A visit must end after it starts.")).max(maxStopsPerCity),
   returnLeg: travelEdgeSchema.optional(),
-  arrivalLeg: travelEdgeSchema.optional(),
-  departureLeg: travelEdgeSchema.optional(),
+  arrivalLeg: routeLegSchema.optional(),
+  departureLeg: routeLegSchema.optional(),
 }).strict();
 export const scheduleSchema = z.object({
   days: z.array(dayPlanSchema).max(7),
@@ -484,8 +489,8 @@ export function withMeasuredTransfers(trip: Trip, schedule: Pick<Schedule, "days
   return withTransferRoutes(trip, { arrival: schedule.days.find((day) => day.day === 0)?.arrivalLeg, departure: schedule.days.find((day) => day.day === trip.days - 1)?.departureLeg });
 }
 
-export function withTransferRoutes(trip: Trip, legs: { arrival?: TravelEdge; departure?: TravelEdge }): Trip {
-  const minutes = (leg: TravelEdge | undefined) => leg && Math.min(360, Math.ceil(leg.minutes));
+export function withTransferRoutes(trip: Trip, legs: { arrival?: RouteLeg; departure?: RouteLeg }): Trip {
+  const minutes = (leg: RouteLeg | undefined) => leg && Math.min(360, Math.ceil(leg.minutes));
   const arrival = minutes(legs.arrival);
   const departure = minutes(legs.departure);
   const changed = (transfer: Transfer | undefined, routed: number | undefined) => transfer && routed !== undefined && transfer.routeMinutes !== routed;
