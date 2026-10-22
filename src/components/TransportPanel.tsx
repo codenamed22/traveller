@@ -12,8 +12,12 @@ const kinds: { value: TransportCard["kind"]; label: string }[] = [
   { value: "tap", label: "Tap a bank card" },
 ];
 
+// What's typed stays as typed while the field has focus, even emptied on the way to another number; it shows what was
+// kept once the field is left.
 function Amount({ label, value, onChange, step = 0.01, min = 0, max = 10_000 }: { label: string; value: number | undefined; onChange: (value: number | undefined) => void; step?: number; min?: number; max?: number }) {
-  return <label className="field">{label}<input type="number" inputMode="decimal" min={min} max={max} step={step} value={value ?? ""} onChange={(event) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  return <label className="field">{label}<input type="number" inputMode="decimal" min={min} max={max} step={step} value={draft ?? value ?? ""} onBlur={() => setDraft(null)} onChange={(event) => {
+    setDraft(event.target.value);
     const number = event.target.value === "" ? undefined : Number(event.target.value);
     onChange(number !== undefined && Number.isFinite(number) ? number : undefined);
   }} /></label>;
@@ -30,7 +34,7 @@ export function TransportCardFields({ city, card, entries, onChange }: { city: s
   return <div className="transport-card-fields">
     <div className="form-grid"><label className="field">Pay with<select value={card.kind} onChange={(event) => change({ kind: event.target.value as TransportCard["kind"] })}>{kinds.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}</select></label><label className="field">Card name<input value={card.name} maxLength={60} placeholder="Navigo Easy" onChange={(event) => change({ name: event.target.value })} /></label></div>
     <div className="form-grid three">
-      <Amount label="Travellers" step={1} min={1} max={9} value={card.travellers} onChange={(value) => change({ travellers: Math.min(9, Math.max(1, Math.round(value ?? 1))) })} />
+      <label className="field">Travellers<select value={card.travellers} onChange={(event) => change({ travellers: Number(event.target.value) })}>{Array.from({ length: 9 }, (_, index) => <option key={index} value={index + 1}>{index + 1}</option>)}</select></label>
       <label className="field">Currency<input value={card.currency} maxLength={3} onChange={(event) => change({ currency: event.target.value.toUpperCase() })} /></label>
       <Amount label={card.kind === "tickets" ? "Ticket price" : "Fare per ride"} value={card.ridePrice} onChange={(value) => change({ ridePrice: value ?? 0 })} />
     </div>

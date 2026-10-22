@@ -985,7 +985,12 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await expect(around.getByLabel("Pay with")).toHaveValue("balance");
   await expect(around.getByLabel("Fare per ride")).toHaveValue("2.55");
   await expect(around.getByLabel("Day pass")).toHaveValue("12.3");
-  await around.getByLabel("Travellers").fill("2");
+  await around.getByLabel("Travellers").selectOption("2");
+  await expect(around.getByLabel("Travellers")).toHaveValue("2");
+  // A price emptied on the way to another stays empty while it's typed.
+  await around.getByLabel("Fare per ride").fill("");
+  await around.getByLabel("Fare per ride").pressSequentially("2.6");
+  await expect(around.getByLabel("Fare per ride")).toHaveValue("2.6");
   await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 14:55");
   // The routed time replaces the assumed 45 min; the typed minutes stay as the fallback.
   await expect(arriving.getByRole("status")).toHaveText("Sightseeing starts about 14:55 on Mon 12 Oct (lands 13:20, 45 min at the airport, 35 min to the hotel, 15 min to drop bags).");
