@@ -53,10 +53,13 @@ describe("meals a plan leaves out", () => {
     expect(routineGaps(trip, schedule, places).filter((gap) => gap.day === 0).map((gap) => gap.meal)).toEqual(["dinner"]);
   });
 
-  it("has no breakfast on the day you arrive or a day that starts at noon", () => {
+  it("has no breakfast on the day you arrive, a day that starts at noon, or one that sets off in the afternoon", () => {
     const { trip, schedule, places } = fixture();
     const arriving: Trip = { ...trip, arrival: { mode: "TRAIN", place: "Gare du Nord", placeId: "g-nord", time: "08:00" } };
     expect(routineGaps(arriving, schedule, places).filter((gap) => gap.meal === "breakfast").map((gap) => gap.day)).toEqual([1]);
     expect(routineGaps({ ...trip, dailyStart: "12:00" }, schedule, places).some((gap) => gap.meal === "breakfast")).toBe(false);
+    // Nor before a day's first visit in the afternoon.
+    const late = { ...schedule, days: schedule.days.map((plan) => ({ ...plan, visits: plan.visits.map((visit) => ({ ...visit, start: visit.start + 6 * 60, end: visit.end + 6 * 60 })) })) };
+    expect(routineGaps(trip, late, places).some((gap) => gap.meal === "breakfast")).toBe(false);
   });
 });

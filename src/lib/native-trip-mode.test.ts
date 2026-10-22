@@ -128,6 +128,18 @@ describe("native trip mode snapshot", () => {
     expect(nativeTripMode(journey, christmasEve, { canTrack: true, photos: false })).not.toHaveProperty("transport");
   });
 
+  it("carries the meals each day leaves out for the owner, with where the plan has them", () => {
+    const { journey, amsterdam } = fixture();
+    const [today, tomorrow] = nativeTripMode(journey, christmasEve, { canTrack: true, photos: false }).days;
+    // The museum's booking runs into lunch on the day you arrive; a dinner the next day isn't known to be one.
+    expect(today.meals).toEqual([
+      { meal: "lunch", title: "No lunch planned", start: minuteAt(amsterdam, 0, "12:25"), end: minuteAt(amsterdam, 0, "13:25"), near: "Rijksmuseum", location: { lat: 52.359, lng: 4.89 } },
+      { meal: "dinner", title: "No dinner planned", start: minuteAt(amsterdam, 0, "18:40"), end: minuteAt(amsterdam, 0, "19:55"), near: "Motel One", location: { lat: 52.36, lng: 4.89 } },
+    ]);
+    expect(tomorrow.meals?.map((meal) => meal.meal)).toEqual(["lunch", "dinner"]);
+    expect(nativeTripMode(journey, christmasEve, { canTrack: false, photos: false }).days.some((day) => day.meals)).toBe(false);
+  });
+
   it("carries the day's forecast and the chance of rain during outdoor visits", () => {
     const { journey, amsterdam, coffee, museum } = fixture();
     // The museum's garden, say: a park. Rain is likely all morning.

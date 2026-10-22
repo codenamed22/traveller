@@ -1,6 +1,8 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { dayProgressSchema, newDayProgress, recoveryMinute, type DayProgress } from "./day-recovery";
+import { routineGaps, type RoutineGap } from "./gaps";
 import type { Journey } from "./journey";
+import { meters } from "./nearby";
 import { legEnd } from "./transport";
 import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type RouteLeg, type SavedPlan, type Stop, type Trip, type Visit } from "./trip";
 
@@ -62,6 +64,33 @@ export function daySummary(plan: DayPlan) {
   const first = plan.visits[0];
   const last = plan.visits.at(-1);
   return { stops: plan.visits.length, leave: first ? leaveBy(first) : undefined, back: last && plan.returnLeg ? last.end + plan.returnLeg.minutes : last?.end, travel: Math.round(travel) };
+}
+
+// Meals the day's plan leaves out, as the planner shows them, from the city as it is now so a meal place added since
+// fills its gap; a day replanned since it began has had its breakfast.
+export function dayMeals(entry: TripModeDay): RoutineGap[] {
+  return routineGaps(entry.cityTrip, { days: [entry.plan] }, entry.places).filter((gap) => !(entry.replanned && gap.meal === "breakfast"));
+}
+
+// Shown on the day from half an hour before the meal until it would end.
+export const mealSoon = (gap: { start: number; end: number }, nowMinute: number) => nowMinute >= gap.start - 30 && nowMinute < gap.end;
+
+// Where to look for somewhere to eat, and for when: near you while you're in the city, otherwise where the plan has you;
+// from now once the meal's time has come, for as long as the meal takes, before midnight.
+export function mealSearch(gap: Pick<RoutineGap, "start" | "end" | "location">, nowMinute: number, here?: { lat: number; lng: number }) {
+  const location = here && (!gap.location || meters(here, gap.location) < 25_000) ? here : gap.location;
+  const start = Math.max(gap.start, Math.ceil(nowMinute));
+  return { location, here: Boolean(location && location === here), start, end: Math.min(start + gap.end - gap.start, 24 * 60 - 1) };
+}
+
+// Walking directions to a place from the phone's location.
+export function walkingUrl(place: { id: string; name: string }) {
+  const url = new URL("https://www.google.com/maps/dir/");
+  url.searchParams.set("api", "1");
+  url.searchParams.set("destination", place.name);
+  url.searchParams.set("destination_place_id", place.id);
+  url.searchParams.set("travelmode", "walking");
+  return url.toString();
 }
 
 export function durationLabel(minutes: number) {

@@ -9,9 +9,10 @@ import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import type { Journey } from "@/lib/journey";
 import { journalEntry, type JournalAction } from "@/lib/journal";
 import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
-import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, type TripModeDay } from "@/lib/trip-mode";
+import { dayLabel, dayMeals, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, mealSearch, mealSoon, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, walkingUrl, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
+import { MealGap } from "./MealGap";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { PlaceAbout } from "./PlaceAbout";
 import { PlacePhotos } from "./PlacePhotos";
@@ -167,6 +168,8 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   const dayJournal = journalEntry({ journal }, entry.cityId, entry.date);
   const favourite = (stopId: string) => Boolean(dayJournal.favourites?.includes(stopId));
   const journaling = Boolean(onJournal) && entry.started;
+  // A meal the day leaves out, as it comes up, with places nearby to walk to; the owner's, as the lookup costs.
+  const meals = canTrack && entry.isToday && !selected ? dayMeals(entry).filter((gap) => mealSoon(gap, nowMinute)) : [];
 
   function record(kind: "done" | "skip", visit: Visit) {
     const stop = entry.trip.stops.find((candidate) => candidate.id === visit.stopId);
@@ -269,6 +272,11 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     <BottomSheet label="Day plan" snap={snap} sizes={sheetSizes} onSnap={setSnap} onSwipe={step} onHeight={setSheetHeight} header={<>
       {entry.stale && <p className="trip-mode-note">Plan is out of date. Replan in the planner.</p>}
       {card()}
+      {meals.map((gap) => {
+        const search = mealSearch(gap, nowMinute, location);
+        return <MealGap key={`${entry.key}:${gap.meal}`} gap={gap} start={formatMinute(entry.cityTrip, entry.day, search.start)} end={formatMinute(entry.cityTrip, entry.day, search.end)} location={search.location} here={search.here}
+          action={(place) => <a className="button secondary small" href={walkingUrl(place)} target="_blank" rel="noreferrer" aria-label={`Directions to ${place.name}`}><Navigation size={14} />Directions</a>} />;
+      })}
     </>}>
       <div className="trip-timeline">
         {entry.replanned && <p className="trip-mode-note">Today was replanned; showing the updated day.</p>}

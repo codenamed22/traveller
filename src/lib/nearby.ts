@@ -30,13 +30,15 @@ export function openThrough(hours: Place["hours"], date: string, start: string, 
   return !intervals || intervals.some(([open, close]) => open <= minutes(start) && minutes(end) <= close);
 }
 
-// Straight-line distance at a walker's pace, with a fifth more for streets.
-function walk(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+// Straight-line distance.
+export function meters(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
   const radians = (degrees: number) => degrees * Math.PI / 180;
   const a = Math.sin(radians(to.lat - from.lat) / 2) ** 2 + Math.cos(radians(from.lat)) * Math.cos(radians(to.lat)) * Math.sin(radians(to.lng - from.lng) / 2) ** 2;
-  const meters = 2 * 6_371_000 * Math.asin(Math.sqrt(a));
-  return Math.max(1, Math.round(meters * 1.2 / 80));
+  return 2 * 6_371_000 * Math.asin(Math.sqrt(a));
 }
+
+// At a walker's pace, with a fifth more for streets.
+const walk = (from: { lat: number; lng: number }, to: { lat: number; lng: number }) => Math.max(1, Math.round(meters(from, to) * 1.2 / 80));
 
 // The three best places open for the meal, still trading, rated 4.2 or more by at least 50 people: by rating, pulled
 // towards 4 for places few have rated.

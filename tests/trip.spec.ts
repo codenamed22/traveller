@@ -1924,6 +1924,52 @@ test("a meal the plan leaves out is shown in the itinerary, with places nearby t
   await expect(page.getByText("Bistro", { exact: true }).first()).toBeVisible();
 });
 
+test("trip mode shows a meal the plan leaves out as it comes up, with places near you to walk to", async ({ page, context }, testInfo) => {
+  // 12:05 in Paris, between the museum and the park.
+  await page.clock.install({ time: new Date("2026-10-13T10:05:00Z") });
+  await context.grantPermissions(["geolocation"]);
+  await context.setGeolocation({ latitude: 48.853, longitude: 2.352 });
+  const museum = { ...newStop("Museum"), placeId: "museum-id", duration: 90 };
+  const park = { ...newStop("Park"), placeId: "park-id", duration: 90 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "18:00", stops: [museum, park] };
+  const at = (hour: number, minute = 0) => hour * 60 + minute;
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: "2026-10-13", visits: [
+    { stopId: museum.id, start: at(10), end: at(11, 30), leg: { day: 0, from: "hotel", to: museum.id, mode: "WALK" as const, minutes: 15, meters: 1100 } },
+    { stopId: park.id, start: at(12, 30), end: at(14), leg: { day: 0, from: museum.id, to: park.id, mode: "WALK" as const, minutes: 20, meters: 1500 } },
+  ], returnLeg: { day: 0, from: park.id, to: "hotel", mode: "WALK" as const, minutes: 20, meters: 1500 } }] };
+  const place = (id: string, name: string, lat: number) => ({ id, name, address: `${name}, Paris`, location: { lat, lng: 2.35 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel", 48.87), [museum.id]: place("museum-id", "Museum", 48.86), [park.id]: place("park-id", "Park", 48.85) });
+  const asked: Record<string, unknown>[] = [];
+  await page.route("**/api/places/nearby", async (route) => {
+    asked.push(route.request().postDataJSON());
+    await route.fulfill({ json: { places: [{ id: "bistro-id", name: "Bistro", address: "1 Rue, Paris", location: { lat: 48.854, lng: 2.352 }, rating: 4.6, reviews: 1240, price: "Moderate", walkMinutes: 2 }] } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "meals.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  await page.keyboard.press("Escape");
+  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
+  await expect(tripMode.locator(".trip-card")).toContainText("Museum");
+  // Breakfast has been and gone; lunch is coming up, and the phone is in Paris.
+  await expect(tripMode.getByRole("region", { name: "No breakfast planned" })).toHaveCount(0);
+  const lunch = tripMode.getByRole("region", { name: "No lunch planned" });
+  await expect(lunch).toContainText("Near you");
+  await lunch.getByRole("button", { name: "Suggest" }).click();
+  await expect(lunch.getByRole("listitem")).toHaveText([/Bistro4\.6 ★ \(1,240\) · 2 min walk · Moderate/]);
+  expect(asked).toEqual([{ meal: "lunch", location: { lat: 48.853, lng: 2.352 }, date: "2026-10-13", start: "12:25", end: "13:25" }]);
+  const directions = new URL((await lunch.getByRole("link", { name: "Directions to Bistro" }).getAttribute("href"))!);
+  expect([directions.searchParams.get("destination_place_id"), directions.searchParams.get("travelmode"), directions.searchParams.has("origin")]).toEqual(["bistro-id", "walking", false]);
+  await expect(lunch.getByRole("button", { name: /^Add/ })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("trip-mode-meal.png") });
+  // A place chosen on the map has the card to itself.
+  await tripMode.getByRole("button", { name: "Show the whole day" }).click();
+  await tripMode.locator(".itinerary-stop", { hasText: "Park" }).click();
+  await expect(tripMode.locator(".trip-card")).toContainText("Stop · 2 of 2");
+  await expect(lunch).toHaveCount(0);
+});
+
 test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByRole("button", { name: "New trip", exact: true }).click();

@@ -367,7 +367,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }) : [];
   const lastVisit = currentDay?.visits.at(-1)?.stopId;
   const afterReturn = (gap: RoutineGap) => Boolean(currentDay?.returnLeg) && gap.near === "hotel" && gap.after === lastVisit;
-  const mealRow = (gap: RoutineGap) => <MealGap key={`${gap.date}:${gap.meal}`} gap={gap} start={formatMinute(itineraryTrip, day, gap.start)} end={formatMinute(itineraryTrip, day, gap.end)} onAdd={(place) => addMeal(gap, place)} />;
+  const mealRow = (gap: RoutineGap) => <MealGap key={`${gap.date}:${gap.meal}`} gap={gap} start={formatMinute(itineraryTrip, day, gap.start)} end={formatMinute(itineraryTrip, day, gap.end)} action={(place) => <button type="button" className="button secondary small" aria-label={`Add ${place.name}`} onClick={() => addMeal(gap, place)}><Plus size={14} />Add</button>} />;
   // Rain likely during an outdoor visit on the day shown.
   const rainAt = (stop: Stop, visit: { start: number; end: number }) => {
     try { return rainWarningFor(forecasts[trip.id], itineraryTrip, stop, recoveryPlaces[stop.id], instantForMinute(itineraryTrip, day, visit.start).epochMilliseconds, instantForMinute(itineraryTrip, day, visit.end).epochMilliseconds); } catch { return undefined; }

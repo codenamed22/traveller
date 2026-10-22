@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
 import { newDayProgress } from "./day-recovery";
 import { minuteAt, newStop, newTrip, persistedPlan, type DayPlan, type Place, type Schedule, type TravelEdge, type Trip } from "./trip";
-import { daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus } from "./trip-mode";
+import { dayMeals, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, mealSearch, mealSoon, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, walkingUrl } from "./trip-mode";
 
 const place = (id: string, name: string): Place => ({ id, name, address: `${name} street`, location: { lat: 52.37, lng: 4.89 } });
 const leg = (from: string, to: string, minutes: number, mode: TravelEdge["mode"] = "WALK"): TravelEdge => ({ day: 0, from, to, mode, minutes, meters: 900 });
@@ -50,6 +50,8 @@ describe("trip mode days", () => {
     const [today] = tripModeDays([amsterdam], plans, { [amsterdam.id]: { "2026-12-24": progress } }, christmasEve);
     expect(today.replanned).toBe(true);
     expect(today.plan.visits.map((visit) => visit.end - visit.start)).toEqual([90]);
+    // Setting off at 10:40 leaves room for breakfast, but a day replanned since it began has had it.
+    expect(dayMeals(today).map((gap) => gap.meal)).toEqual(["lunch", "dinner"]);
   });
 
   it("finds the next visit, when to leave and a summary of the day", () => {
@@ -98,6 +100,24 @@ describe("trip mode days", () => {
     // A skipped booking is no longer missed.
     const missed = markSkipped(today, museum);
     expect(markPending({ ...today, progress: missed }, museum.id)).toMatchObject({ skipped: [], missedBookings: [], version: 2 });
+  });
+
+  it("shows a meal the day leaves out as it comes up, and looks near you for somewhere to eat from now", () => {
+    const { amsterdam, plans } = fixture();
+    const [today] = tripModeDays([amsterdam], plans, undefined, christmasEve);
+    const lunch = dayMeals(today).find((gap) => gap.meal === "lunch")!;
+    expect(lunch).toMatchObject({ start: minuteAt(amsterdam, 0, "12:25"), end: minuteAt(amsterdam, 0, "13:25"), nearName: "Rijksmuseum" });
+    // From half an hour before until it would end.
+    expect(["11:50", "11:55", "13:24", "13:25"].map((time) => mealSoon(lunch, minuteAt(amsterdam, 0, time)))).toEqual([false, true, true, false]);
+    // Near you in the city, from now for an hour; from a phone in another country, near the museum.
+    expect(mealSearch(lunch, minuteAt(amsterdam, 0, "12:00"), { lat: 52.36, lng: 4.88 })).toEqual({ location: { lat: 52.36, lng: 4.88 }, here: true, start: minuteAt(amsterdam, 0, "12:25"), end: minuteAt(amsterdam, 0, "13:25") });
+    expect(mealSearch(lunch, minuteAt(amsterdam, 0, "12:50") + 0.4, { lat: 51.5, lng: -0.12 })).toEqual({ location: lunch.location, here: false, start: minuteAt(amsterdam, 0, "12:51"), end: minuteAt(amsterdam, 0, "13:51") });
+    expect(mealSearch({ start: 23 * 60, end: 24 * 60 + 15, location: lunch.location }, 23 * 60 + 10)).toMatchObject({ start: 23 * 60 + 10, end: 24 * 60 - 1 });
+    // A meal place pinned to the day since fills it.
+    const withLunch: Trip = { ...amsterdam, stops: [...amsterdam.stops, { ...newStop("Foodhallen"), day: 0, kind: "meal", slot: "lunch" }] };
+    expect(dayMeals(tripModeDays([withLunch], plans, undefined, christmasEve)[0]).map((gap) => gap.meal)).toEqual(["dinner"]);
+    const walk = new URL(walkingUrl({ id: "g-foodhallen", name: "Foodhallen" }));
+    expect([walk.searchParams.has("origin"), walk.searchParams.get("destination_place_id"), walk.searchParams.get("travelmode")]).toEqual([false, "g-foodhallen", "walking"]);
   });
 
   it("links directions from the previous stop, or from wherever the phone is", () => {
