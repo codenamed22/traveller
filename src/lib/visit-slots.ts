@@ -358,9 +358,17 @@ export function capCategory(trip: Pick<Trip, "stops">, stop: Stop, place?: Place
 
 // Regular weekly hours as [start, end] minute intervals for one trip day; null means no restriction is known.
 export function openingIntervals(trip: Trip, day: number, place?: Pick<Place, "hours">): [number, number][] | null {
-  const hours = place?.hours;
+  const merged = dateIntervals(place?.hours, tripDate(trip, day));
+  if (!merged) return null;
+  const shift = minuteOrWall(trip, day, trip.dailyStart) - wallMinutes(trip.dailyStart);
+  return merged.map(([start, end]) => [start + shift, end + shift]);
+}
+
+// Regular weekly hours on a date, as [start, end] minutes from its midnight (past 1440 for hours after midnight); null
+// when nothing is known or the place never closes that day.
+export function dateIntervals(hours: Place["hours"], date: string): [number, number][] | null {
   if (!hours?.length || hours.some((period) => !period.close)) return null;
-  const weekday = Temporal.PlainDate.from(tripDate(trip, day)).dayOfWeek % 7;
+  const weekday = Temporal.PlainDate.from(date).dayOfWeek % 7;
   const intervals: [number, number][] = [];
   for (const period of hours) {
     const open = period.open.hour * 60 + period.open.minute;
@@ -380,8 +388,7 @@ export function openingIntervals(trip: Trip, day: number, place?: Pick<Place, "h
     else merged.push([...interval]);
   }
   if (merged.some(([start, end]) => start <= 0 && end >= 1440)) return null;
-  const shift = minuteOrWall(trip, day, trip.dailyStart) - wallMinutes(trip.dailyStart);
-  return merged.map(([start, end]) => [start + shift, end + shift]);
+  return merged;
 }
 
 function namePosition(source: string, name: string) {

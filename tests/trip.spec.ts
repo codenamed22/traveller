@@ -1884,6 +1884,46 @@ test("a card counted in euros takes each ride's Google fare, and a fare can be c
   await expect(chip).toHaveText("€15.90");
 });
 
+test("a meal the plan leaves out is shown in the itinerary, with places nearby to add for it", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-10-12T08:00:00Z") });
+  const museum = { ...newStop("Museum"), placeId: "museum-id", duration: 90 };
+  const park = { ...newStop("Park"), placeId: "park-id", duration: 90 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "18:00", stops: [museum, park] };
+  const at = (hour: number, minute = 0) => hour * 60 + minute;
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: "2026-10-13", visits: [
+    { stopId: museum.id, start: at(10), end: at(11, 30), leg: { day: 0, from: "hotel", to: museum.id, mode: "WALK" as const, minutes: 15, meters: 1100 } },
+    { stopId: park.id, start: at(12, 30), end: at(14), leg: { day: 0, from: museum.id, to: park.id, mode: "WALK" as const, minutes: 20, meters: 1500 } },
+  ], returnLeg: { day: 0, from: park.id, to: "hotel", mode: "WALK" as const, minutes: 20, meters: 1500 } }] };
+  const place = (id: string, name: string, lat: number) => ({ id, name, address: `${name}, Paris`, location: { lat, lng: 2.35 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel", 48.87), [museum.id]: place("museum-id", "Museum", 48.86), [park.id]: place("park-id", "Park", 48.85) });
+  const asked: Record<string, unknown>[] = [];
+  await page.route("**/api/places/nearby", async (route) => {
+    asked.push(route.request().postDataJSON());
+    await route.fulfill({ json: { places: [
+      { id: "bistro-id", name: "Bistro", address: "1 Rue, Paris", location: { lat: 48.851, lng: 2.35 }, primaryType: "french_restaurant", rating: 4.6, reviews: 1240, price: "Moderate", walkMinutes: 4 },
+      { id: "brasserie-id", name: "Brasserie", address: "2 Rue, Paris", location: { lat: 48.852, lng: 2.35 }, rating: 4.4, reviews: 800, walkMinutes: 6 },
+    ] } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "meals.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.getByRole("region", { name: "No breakfast planned" })).toContainText("Near Hotel");
+  const lunch = page.getByRole("region", { name: "No lunch planned" });
+  // At the park by the middle of lunchtime.
+  await expect(lunch).toContainText("Near Park");
+  await lunch.getByRole("button", { name: "Suggest" }).click();
+  await expect(lunch.getByRole("listitem")).toHaveText([/Bistro4\.6 ★ \(1,240\) · 4 min walk · Moderate/, /Brasserie4\.4 ★ \(800\) · 6 min walk/]);
+  expect(asked).toEqual([{ meal: "lunch", location: { lat: 48.85, lng: 2.35 }, date: "2026-10-13", start: "12:25", end: "13:25" }]);
+  await page.screenshot({ path: testInfo.outputPath("meal-suggestions.png") });
+  await lunch.getByRole("button", { name: "Add Bistro" }).click();
+  await expect(page.getByRole("status")).toContainText("Added");
+  await expect(lunch).toHaveCount(0);
+  await page.getByRole("button", { name: /^Places/ }).click();
+  await expect(page.getByText("Bistro", { exact: true }).first()).toBeVisible();
+});
+
 test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByRole("button", { name: "New trip", exact: true }).click();

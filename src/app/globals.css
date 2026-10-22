@@ -193,6 +193,16 @@ summary::-webkit-details-marker { display: none; }
 .place-marker.selected { background: #b87428; }
 .itinerary-content { padding: 20px 23px 35px; }
 .itinerary-start { display: flex; align-items: center; gap: 11px; padding: 9px 0; }
+.meal-gap { margin: 6px 0; padding: 9px 11px; border: 1px dashed #dcc78f; border-radius: 6px; background: #fffbef; }
+.meal-gap-head { display: flex; align-items: center; gap: 9px; color: #6f5317; }
+.meal-gap-head > span, .meal-suggestions li > span { flex: 1; min-width: 0; display: grid; }
+.meal-gap-head strong, .meal-suggestions strong { font-size: 13px; }
+.meal-gap-head small, .meal-suggestions small { font-size: 11px; color: var(--muted); }
+.meal-suggestions { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.meal-suggestions li { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid #efe5c8; }
+.meal-suggestions strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meal-gap .provider-attribution { margin: 6px 0 0; font-size: 11px; }
+.meal-gap .notice, .meal-gap .quiet { margin: 8px 0 0; }
 .itinerary-start > div { display: grid; gap: 3px; min-width: 0; }
 .itinerary-start strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .itinerary-start span:not(.hotel-marker) { font-size: 11px; color: var(--muted); }

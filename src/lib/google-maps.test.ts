@@ -4,7 +4,7 @@ import { applyScheduleDurations, dayStart, departureTimes, instantAt, instantFor
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, getPlacePhoto, planWithGoogle, transitFares, routeTransfers, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, nearbyMeals, planWithGoogle, transitFares, routeTransfers, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -54,6 +54,36 @@ describe("fares for a transport card's rides", () => {
   it("needs Google to be set up", async () => {
     vi.stubEnv("GOOGLE_MAPS_API_KEY", "");
     await expect(transitFares({ legs: [{ key: "2026-12-29|back", lines: "", origin: { lat: 0, lng: 0 }, destination: { lat: 0, lng: 0 }, departure: "2026-12-29T08:10:00Z" }] })).rejects.toThrow("Route services are unavailable.");
+  });
+});
+
+describe("places to eat near a meal the plan leaves out", () => {
+  const lunch = { meal: "lunch" as const, location: { lat: 48.86, lng: 2.33 }, date: "2026-12-29", start: "12:25", end: "13:25" };
+  const hours = { periods: Array.from({ length: 7 }, (_, day) => ({ open: { day, hour: 11, minute: 30 }, close: { day, hour: 23, minute: 0 } })) };
+  const place = (id: string, rating: number) => ({ id, displayName: { text: `Restaurant ${id}` }, formattedAddress: "Paris", location: { latitude: 48.861, longitude: 2.331 }, regularOpeningHours: hours, businessStatus: "OPERATIONAL", rating, userRatingCount: 300, priceLevel: "PRICE_LEVEL_MODERATE" });
+
+  it("asks for restaurants within 800 m with their rating, hours and price, and farther when that finds fewer than three", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const asked: { url: string; fields: string | null; body: { includedTypes: string[]; locationRestriction: { circle: { radius: number } } } }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string);
+      asked.push({ url, fields: new Headers(init!.headers).get("X-Goog-FieldMask"), body });
+      return Response.json({ places: body.locationRestriction.circle.radius === 800 ? [place("a", 4.6), place("low", 3.9)] : [place("a", 4.6), place("b", 4.4), place("c", 4.3), place("d", 4.25)] });
+    }));
+    const found = await nearbyMeals(lunch);
+    expect(found.map((each) => each.id)).toEqual(["a", "b", "c"]);
+    expect(found[0]).toMatchObject({ name: "Restaurant a", price: "Moderate", rating: 4.6, reviews: 300 });
+    expect(asked.map((each) => each.body.locationRestriction.circle.radius)).toEqual([800, 1500]);
+    expect(asked[0].url).toBe("https://places.googleapis.com/v1/places:searchNearby");
+    expect(asked[0].body.includedTypes).toEqual(["restaurant"]);
+    expect(asked[0].fields).toContain("places.regularOpeningHours");
+    expect(asked[0].fields).toContain("places.userRatingCount");
+    // Three good places close by: no second search.
+    asked.length = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => { asked.push({ url, fields: null, body: JSON.parse(init!.body as string) }); return Response.json({ places: [place("a", 4.6), place("b", 4.4), place("c", 4.3)] }); }));
+    expect(await nearbyMeals({ ...lunch, meal: "breakfast", start: "11:30", end: "12:15" })).toHaveLength(3);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].body.includedTypes).toContain("bakery");
   });
 });
 

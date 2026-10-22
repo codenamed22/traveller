@@ -39,6 +39,9 @@ import { applyTransportAction, mergeTransportEntries, suggestedTransitApp, trans
 import { adviceText, faresToCheck, passAdvice, transportStatus, withFares } from "@/lib/transport-status";
 import type { FoundFare } from "@/lib/fares";
 import { TransportCardFields } from "./TransportPanel";
+import { MealGap } from "./MealGap";
+import { mealMinutes, routineGaps, type RoutineGap } from "@/lib/gaps";
+import type { NearbyPlace } from "@/lib/nearby";
 import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
 import { nativeStore, nativeTripMode } from "@/lib/native-trip-mode";
@@ -357,6 +360,14 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const itineraryPlaces = savedRecovery?.places ?? savedPlan?.snapshot?.places ?? places;
   const recoveryOrigin = checkedDay?.origin ?? savedRecovery?.origin;
   const recoveryPlaces = recoveryOrigin ? { ...(checkedDay ? places : itineraryPlaces), current: { id: recoveryOrigin.location ? "" : itineraryPlaces[recoveryOrigin.id]?.id ?? "", name: recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name ?? "Current location", address: "", location: recoveryOrigin.location ?? itineraryPlaces[recoveryOrigin.id]?.location ?? { lat: 0, lng: 0 } } } : itineraryPlaces;
+  // Meals the day's plan leaves out that are still to come; a day replanned since it began has had its breakfast.
+  const mealGaps = currentDay && !checkedDay ? routineGaps(trip, { days: [currentDay] }, recoveryPlaces).filter((gap) => {
+    if (savedRecovery && gap.meal === "breakfast") return false;
+    try { return instantForMinute(itineraryTrip, day, gap.end).epochMilliseconds > now.epochMilliseconds; } catch { return true; }
+  }) : [];
+  const lastVisit = currentDay?.visits.at(-1)?.stopId;
+  const afterReturn = (gap: RoutineGap) => Boolean(currentDay?.returnLeg) && gap.near === "hotel" && gap.after === lastVisit;
+  const mealRow = (gap: RoutineGap) => <MealGap key={`${gap.date}:${gap.meal}`} gap={gap} start={formatMinute(itineraryTrip, day, gap.start)} end={formatMinute(itineraryTrip, day, gap.end)} onAdd={(place) => addMeal(gap, place)} />;
   // Rain likely during an outdoor visit on the day shown.
   const rainAt = (stop: Stop, visit: { start: number; end: number }) => {
     try { return rainWarningFor(forecasts[trip.id], itineraryTrip, stop, recoveryPlaces[stop.id], instantForMinute(itineraryTrip, day, visit.start).epochMilliseconds, instantForMinute(itineraryTrip, day, visit.end).epochMilliseconds); } catch { return undefined; }
@@ -535,6 +546,15 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     const stop = newStop(adding.trim());
     edit({ stops: [...trip.stops, stop] });
     setAdding(""); setSelected(stop.id);
+  }
+
+  // A place suggested for a meal the plan leaves out, pinned to its day for the next plan.
+  function addMeal(gap: RoutineGap, place: NearbyPlace) {
+    if (trip.stops.length >= maxStopsPerCity) { setError(`A city can contain at most ${maxStopsPerCity} stops.`); return; }
+    const stop: Stop = { ...newStop(place.name), placeId: place.id, location: place.location, day: gap.day, duration: mealMinutes[gap.meal], kind: "meal", slot: gap.meal };
+    edit({ stops: [...trip.stops, stop] });
+    setPlaces((current) => ({ ...current, [stop.id]: { id: place.id, name: place.name, address: place.address, location: place.location, ...(place.primaryType ? { primaryType: place.primaryType } : {}), ...(place.types ? { types: place.types } : {}) } }));
+    setError(""); setNotice("Added");
   }
 
   async function findPlaces(query: string) {
@@ -805,13 +825,15 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
               {day === 0 && itineraryTrip.arrival && !recoveryOrigin && <TransferLine trip={itineraryTrip} kind="arrival" />}
               {day === 0 && currentDay.arrivalLeg && !recoveryOrigin && <LegDetails edge={currentDay.arrivalLeg} places={recoveryPlaces} app={cityApp} />}
               <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{recoveryOrigin ? recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name : itineraryTrip.hotel}</strong><span>Depart {checkedDay || savedRecovery ? new Date(checkedDay?.departureAt ?? savedRecovery!.departureAt).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", timeZone: itineraryTrip.timeZone }) : formatMinute(itineraryTrip, day, currentDay.visits[0] ? Math.min(dayStart(itineraryTrip, day), currentDay.visits[0].start - currentDay.visits[0].leg.minutes) : dayStart(itineraryTrip, day))}</span></div></div>
+              {mealGaps.filter((gap) => gap.after === null).map(mealRow)}
               {currentDay?.visits.map((visit, index) => {
                 const stop = itineraryTrip.stops.find((entry) => entry.id === visit.stopId);
                 if (!stop) return null;
                 const alternatives = stop.alternativeGroup ? currentDay.visits.filter((other) => other.stopId !== stop.id && itineraryTrip.stops.find((entry) => entry.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => itineraryTrip.stops.find((entry) => entry.id === other.stopId)!.name) : [];
-                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} app={cityApp} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(trip.stops.find((entry) => entry.id === stop.id) ?? stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}{trip.stops.find((entry) => entry.id === stop.id)?.note && <span className="stop-note">{trip.stops.find((entry) => entry.id === stop.id)!.note}</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{rainAt(stop, visit) !== undefined && <RainWarning chance={rainAt(stop, visit)!} onSwap={canSwap ? () => assistant.current?.prefill(swapPrompt(stop.name, `Day ${day + 1}`, rainAt(stop, visit))) : undefined} />}{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}{selected === stop.id && <PlaceAbout about={trip.stops.find((entry) => entry.id === stop.id)?.about} />}</div>;
+                return <div key={visit.stopId}><LegDetails edge={visit.leg} places={recoveryPlaces} app={cityApp} onMode={checkedDay || stale ? undefined : (mode) => editStop(stop.id, { mode })} /><button className={`itinerary-stop ${selected === stop.id ? "selected" : ""}`} onClick={() => selectLocation(stop.id)}><span className="stop-number">{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(trip.stops.find((entry) => entry.id === stop.id) ?? stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{formatMinute(itineraryTrip, day, visit.start)} - {formatMinute(itineraryTrip, day, visit.end)} · {visit.end - visit.start} min</span>{alternatives.length > 0 && <span className="alternative-note">Alternative to {alternatives.join(", ")}; both fit</span>}{trip.stops.find((entry) => entry.id === stop.id)?.note && <span className="stop-note">{trip.stops.find((entry) => entry.id === stop.id)!.note}</span>}</span>{stop.fixedTime && <LockKeyhole size={15} />}</button>{rainAt(stop, visit) !== undefined && <RainWarning chance={rainAt(stop, visit)!} onSwap={canSwap ? () => assistant.current?.prefill(swapPrompt(stop.name, `Day ${day + 1}`, rainAt(stop, visit))) : undefined} />}{selected === stop.id && <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex); }} onRetry={(photoIndex) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, photoIndex, true); }} />}{selected === stop.id && <PlaceAbout about={trip.stops.find((entry) => entry.id === stop.id)?.about} />}{mealGaps.filter((gap) => gap.after === stop.id && !afterReturn(gap)).map(mealRow)}</div>;
               })}
               {currentDay?.returnLeg && <><LegDetails edge={currentDay.returnLeg} places={recoveryPlaces} app={cityApp} endpointToDeparture={endpointKey(itineraryTrip, day, "hotel", "to") === "departure"} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{endpointKey(itineraryTrip, day, "hotel", "to") === "departure" ? `At ${itineraryTrip.departure!.place || "the station"}` : `Back to ${itineraryTrip.hotel}`}</strong><span>{formatMinute(itineraryTrip, day, (currentDay.visits.at(-1)?.end ?? (checkedDay || savedRecovery ? recoveryMinute(itineraryTrip, day, checkedDay?.departureAt ?? savedRecovery!.departureAt) : dayStart(itineraryTrip, day))) + currentDay.returnLeg.minutes)}</span></div></div></>}
+              {mealGaps.filter(afterReturn).map(mealRow)}
               {day === itineraryTrip.days - 1 && currentDay.departureLeg && <LegDetails edge={currentDay.departureLeg} places={recoveryPlaces} app={cityApp} />}
               {day === itineraryTrip.days - 1 && itineraryTrip.departure && <TransferLine trip={itineraryTrip} kind="departure" />}
               {!currentDay?.visits.length && <p className="notice">No sights assigned to this day.</p>}

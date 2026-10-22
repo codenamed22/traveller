@@ -11,6 +11,7 @@ import { solveTripWithOrTools } from "./ortools";
 import { alternativeGroups, isRequiredStop, usesVisitTiming } from "./visit-slots";
 import { RouteSamples } from "./route-samples";
 import { fareRoutesResponse, pickFare, type FareRequest, type FoundFare } from "./fares";
+import { nearbyTypes, pickNearby, type NearbyCandidate, type NearbyPlace, type NearbyRequest } from "./nearby";
 import { liveRouteKey, recoveryContext, recoveryInputErrors, recoveryMinute, remainingIds, validateDayRecovery, type RecoveryOption, type RecoveryRequest, type RecoveryResult } from "./day-recovery";
 
 const jointPlanningLimit = 25;
@@ -284,6 +285,25 @@ function recoveryWaypoint(request: RecoveryRequest, id: string, role: "from" | "
   const placeId = endpointKey(request.trip, request.day, actual, role) === "departure" ? request.trip.departure!.placeId : actual === "hotel" ? request.trip.hotelPlaceId : request.trip.stops.find((stop) => stop.id === actual)?.placeId;
   if (!placeId) throw new HttpError(400, "Confirm your origin, hotel, and remaining destinations on the map first.");
   return { placeId };
+}
+
+const nearbyResponse = z.object({ places: z.array(placeResponse.extend({ rating: z.number().min(0).max(5).optional(), userRatingCount: z.number().int().min(0).optional(), priceLevel: z.string().max(50).optional() })).default([]) });
+
+// Places to eat near where a day's plan has you (pickNearby): within 800 m, and to 1.5 km when that finds fewer than
+// three. Rating, hours and price put each search on Google's Nearby Search Enterprise SKU.
+export async function nearbyMeals(input: NearbyRequest, signal?: AbortSignal): Promise<NearbyPlace[]> {
+  const search = async (radius: number): Promise<NearbyCandidate[]> => {
+    const body = await googleRequest("https://places.googleapis.com/v1/places:searchNearby", "places.id,places.displayName,places.formattedAddress,places.location,places.primaryType,places.types,places.regularOpeningHours,places.businessStatus,places.rating,places.userRatingCount,places.priceLevel", {
+      includedTypes: nearbyTypes[input.meal], maxResultCount: 20, rankPreference: "POPULARITY", languageCode: "en",
+      locationRestriction: { circle: { center: { latitude: input.location.lat, longitude: input.location.lng }, radius } },
+    }, signal);
+    return nearbyResponse.parse(body).places.map((place) => ({
+      ...normalizePlace(place), ...(place.rating !== undefined ? { rating: place.rating } : {}), ...(place.userRatingCount !== undefined ? { reviews: place.userRatingCount } : {}), ...(place.priceLevel ? { priceLevel: place.priceLevel } : {}),
+    }));
+  };
+  const close = await search(800);
+  const found = pickNearby(close, input);
+  return found.length >= 3 ? found : pickNearby([...close, ...await search(1500)], input);
 }
 
 // What Google says each ride costs one traveller, a few asked at a time. A ride it couldn't be asked about is left out,
