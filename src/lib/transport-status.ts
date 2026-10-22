@@ -253,3 +253,48 @@ export function withFares(journey: Journey, cityId: string, legs: FareLeg[], fou
   void _fares;
   return { ...journey, transport: withCity(journey.transport, cityId, { ...rest, ...(Object.keys(kept).length ? { fares: kept } : {}) }) };
 }
+
+// A planned day where a day pass would cost less than its rides, or where a bank card's rides reach the daily cap.
+// Today counts only the rides still to come, which a pass bought now would cover; days gone by, and days a pass already
+// covers, have nothing to say. `cost` and `pass` are money for all the travellers.
+export type PassAdvice = { key: string; date: string; isToday: boolean; rides: number; cost: number; pass?: number; cap?: number };
+export function passAdvice(status: TransportStatus, timeZone: string): PassAdvice[] {
+  const { card } = status;
+  const passes = status.entries.flatMap(({ entry }) => entry.kind === "pass" && !entry.voided && entry.validUntil ? [entry] : []);
+  return status.days.flatMap((day): PassAdvice[] => {
+    const ahead = day.rides.filter((ride) => !ride.counted);
+    if (!ahead.length) return [];
+    if (card.kind === "tap") {
+      if (card.dailyCap === undefined) return [];
+      const cap = round(card.dailyCap * card.travellers), cost = round(day.rides.reduce((sum, ride) => sum + ride.price, 0));
+      return cost > cap ? [{ key: day.key, date: day.date, isToday: day.isToday, rides: day.rides.length, cost, cap }] : [];
+    }
+    if (card.dayPass === undefined) return [];
+    let start: number, end: number;
+    try {
+      const midnight = Temporal.PlainDate.from(day.date).toZonedDateTime({ timeZone });
+      [start, end] = [midnight.epochMilliseconds, midnight.add({ days: 1 }).epochMilliseconds];
+    } catch { return []; }
+    if (passes.some((pass) => pass.at < end && pass.validUntil! > start)) return [];
+    const cost = round(ahead.reduce((sum, ride) => sum + (card.kind === "tickets" ? ride.price * card.ridePrice : ride.price), 0));
+    const pass = round(card.dayPass * card.travellers);
+    return cost > pass ? [{ key: day.key, date: day.date, isToday: day.isToday, rides: ahead.length, cost, pass }] : [];
+  });
+}
+
+// "6 rides ≈ €15.30; a day pass (€12.30) is cheaper" or "5 rides ≈ €12.00, capped at €8.50".
+export function adviceText(card: TransportCard, advice: PassAdvice) {
+  const money = (value: number) => formatAmount(card, value, "money");
+  const rides = `${advice.rides} ${advice.rides === 1 ? "ride" : "rides"} ≈ ${money(advice.cost)}`;
+  if (advice.cap !== undefined) return `${rides}, capped at ${money(advice.cap)}`;
+  return `${rides}; ${card.travellers > 1 ? `day passes (${money(advice.pass ?? 0)}) are` : `a day pass (${money(advice.pass ?? 0)}) is`} cheaper`;
+}
+
+// What each city's card has cost so far, for the recap and the export: "€42.10".
+export type TransportSpend = { cityId: string; city: string; spent: string };
+export function transportSpend(journey: CardJourney, now: Temporal.Instant): TransportSpend[] {
+  return journey.cities.flatMap((city) => {
+    const status = transportStatus(journey, city.id, now);
+    return status && status.spent > 0 ? [{ cityId: city.id, city: city.city || city.title, spent: formatAmount(status.card, status.spent, "money") }] : [];
+  });
+}

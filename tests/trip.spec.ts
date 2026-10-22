@@ -1748,7 +1748,7 @@ test("a chosen place's card in trip mode stays below the bar and scrolls when it
   await page.screenshot({ path: testInfo.outputPath("trip-mode-about.png") });
 });
 
-test("a transport card in trip mode counts the rides, takes top-ups and stays where it's dragged", async ({ page }, testInfo) => {
+test("a transport card in trip mode counts the rides, takes top-ups, says when a day pass is cheaper and stays where it's dragged", async ({ page }, testInfo) => {
   // 10:00 in Paris on the first day of the trip.
   await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
   const coffee = { ...newStop("Coffee"), placeId: "coffee-id", duration: 45 };
@@ -1761,7 +1761,7 @@ test("a transport card in trip mode counts the rides, takes top-ups and stays wh
   ], returnLeg: { day: 0, from: museum.id, to: "hotel", mode: "WALK" as const, minutes: 20, meters: 1500 } }] };
   const place = (id: string, name: string) => ({ id, name, address: `${name}, Paris`, location: { lat: 48.86, lng: 2.35 } });
   const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel"), [coffee.id]: place("coffee-id", "Coffee"), [museum.id]: place("museum-id", "Museum") });
-  const card = { kind: "tickets", name: "Navigo Easy", currency: "EUR", travellers: 2, ridePrice: 2.55, airportPrice: 14 };
+  const card = { kind: "tickets", name: "Navigo Easy", currency: "EUR", travellers: 2, ridePrice: 2.55, dayPass: 2, airportPrice: 14 };
   const journey = { id: crypto.randomUUID(), title: "Paris", cities: [trip], plans: { [trip.id]: plan }, transport: { [trip.id]: { card } } };
   const open = async () => {
     if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Today's plan" }).click();
@@ -1770,6 +1770,11 @@ test("a transport card in trip mode counts the rides, takes top-ups and stays wh
   await page.goto("/");
   await page.getByRole("button", { name: "Connections and settings" }).click();
   await page.getByLabel("Open trip backup").setInputFiles({ name: "transport.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ journey })) });
+  await page.keyboard.press("Escape");
+  // The metro to the coffee for two costs more than two day passes.
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.locator(".pass-advice")).toHaveText("1 ride ≈ €5.10; day passes (€4.00) are cheaper");
+  await page.screenshot({ path: testInfo.outputPath("pass-advice.png") });
   await open();
   const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
   const chip = tripMode.getByRole("button", { name: /^Transport card/ });
@@ -1780,6 +1785,8 @@ test("a transport card in trip mode counts the rides, takes top-ups and stays wh
   await expect(panel).toContainText("Navigo Easyfor 2");
   await expect(panel).toContainText("Today0 rides · 1 to go");
   await expect(panel).toContainText("To add2 tickets");
+  await expect(panel.locator(".pass-advice")).toHaveText("Today: 1 ride ≈ €5.10; day passes (€4.00) are cheaper");
+  await expect(panel.getByRole("button", { name: "Day pass" })).toHaveClass(/primary/);
   await panel.getByRole("button", { name: "Top up" }).click();
   await expect(panel.getByLabel("Tickets")).toHaveValue("10");
   await expect(panel.getByLabel("Paid")).toHaveValue("25.5");
@@ -1793,6 +1800,7 @@ test("a transport card in trip mode counts the rides, takes top-ups and stays wh
   await expect(chip).toHaveText("8 tickets");
   await chip.click();
   await expect(panel).toContainText("Today1 ride · 0 to go");
+  await expect(panel.locator(".pass-advice")).toHaveCount(0);
   await panel.getByRole("button", { name: "Airport ride" }).click();
   await expect(panel).toContainText("Spent€53.50");
   await expect(chip).toHaveText("8 tickets");
@@ -1821,6 +1829,11 @@ test("a transport card in trip mode counts the rides, takes top-ups and stays wh
   await (await download).saveAs(output);
   const backup = JSON.parse(await readFile(output, "utf8"));
   expect(backup.journey.transport[trip.id].entries.map((entry: { kind: string; amount?: number; paid?: number; voided?: boolean }) => [entry.kind, entry.amount ?? entry.paid, Boolean(entry.voided)])).toEqual([["topup", 10, false], ["ride", 28, true]]);
+
+  // The recap says what the card cost.
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Trip recap" }).click();
+  await expect(page.getByRole("dialog", { name: "Recap" }).locator(".recap-transport")).toHaveText("Transport: €25.50");
 });
 
 test("a card counted in euros takes each ride's Google fare, and a fare can be corrected", async ({ page }, testInfo) => {

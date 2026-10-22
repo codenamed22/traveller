@@ -1,5 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { Journey } from "./journey";
+import { transportSpend } from "./transport-status";
 import { aboutLines, arrivalTimes, departureTimes, endpointKey, formatMinute, instantForMinute, planningKey, plannedStopIds, squeezeInNote, tripDate, type Place, type RouteLeg, type Transfer, type Trip } from "./trip";
 
 // Shareable exports of the accepted itinerary: a printable page (save as PDF), an Excel workbook and a calendar file.
@@ -11,7 +12,8 @@ export type ExportDay = { day: number; date: string; label: string; leave: strin
 // Getting into or out of the city: the arrival runs until you are at the hotel, the departure from leaving the hotel.
 // `travel` is the route between the airport or station and the hotel, when the plan found one.
 export type ExportTransfer = { kind: "arrival" | "departure"; date: string; label: string; title: string; time: string; detail: string; place: string; startInstant: string; endInstant: string; travel?: ExportTravel };
-export type ExportCity = { arrival?: ExportTransfer; departure?: ExportTransfer; id: string; city: string; hotel: string; hotelAddress: string; startDate: string; endDate: string; planned: boolean; outOfDate: boolean; generatedAt?: string; days: ExportDay[]; notScheduled: { name: string; fits?: string }[] };
+// `transport` is what the city's transport card cost, from the trip mode counter.
+export type ExportCity = { arrival?: ExportTransfer; departure?: ExportTransfer; transport?: string; id: string; city: string; hotel: string; hotelAddress: string; startDate: string; endDate: string; planned: boolean; outOfDate: boolean; generatedAt?: string; days: ExportDay[]; notScheduled: { name: string; fits?: string }[] };
 export type ItineraryExport = { title: string; cities: ExportCity[]; exportedAt: string };
 
 const dateLabel = (date: string) => Temporal.PlainDate.from(date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short" });
@@ -76,6 +78,7 @@ export function travelLabel(leg: ExportTravel) {
 
 // Uses each city's accepted plan; a plan made before the city's latest edits is flagged as out of date.
 export function itineraryExport(journey: Journey, now = Temporal.Now.instant()): ItineraryExport {
+  const spend = transportSpend(journey, now);
   return {
     title: journey.title, exportedAt: now.toString(),
     cities: journey.cities.map((current): ExportCity => {
@@ -85,7 +88,8 @@ export function itineraryExport(journey: Journey, now = Temporal.Now.instant()):
       const name = (id: string) => trip.stops.find((stop) => stop.id === id)?.name ?? "Removed place";
       const route = (kind: "arrival" | "departure") => { const leg = snapshot?.schedule.days.find((day) => day.day === (kind === "arrival" ? 0 : trip.days - 1))?.[kind === "arrival" ? "arrivalLeg" : "departureLeg"]; return leg && travel(trip, leg, places); };
       const [arrival, departure] = [transferExport(trip, "arrival", route("arrival")), transferExport(trip, "departure", route("departure"))];
-      const base = { ...(arrival ? { arrival } : {}), ...(departure ? { departure } : {}), id: current.id, city: current.city || current.title, hotel: trip.hotel, hotelAddress: places.hotel?.address ?? "", startDate: current.startDate, endDate: tripDate(current, current.days - 1) };
+      const transport = spend.find((each) => each.cityId === current.id)?.spent;
+      const base = { ...(arrival ? { arrival } : {}), ...(departure ? { departure } : {}), ...(transport ? { transport } : {}), id: current.id, city: current.city || current.title, hotel: trip.hotel, hotelAddress: places.hotel?.address ?? "", startDate: current.startDate, endDate: tripDate(current, current.days - 1) };
       if (!snapshot) return { ...base, planned: false, outOfDate: false, days: [], notScheduled: current.stops.map((stop) => ({ name: stop.name })) };
       // Alternatives imported from one itinerary line share its note; name the pairing instead of repeating the note.
       const scheduled = snapshot.schedule.days.flatMap((day) => day.visits.map((visit) => visit.stopId));
@@ -170,6 +174,7 @@ export function itineraryHtml(data: ItineraryExport, autoPrint = true) {
           ${day.back ? `${leg(day.back.travel)}<p class="back">${day.back.to ? `At ${html(day.back.to)}` : `Back at ${html(city.hotel || "the hotel")}`} around ${html(day.back.time)}</p>` : ""}
         </article>`).join("")}
       ${city.departure ? transfer(city.departure) : ""}
+      ${city.transport ? `<p class="meta">Transport: ${html(city.transport)}</p>` : ""}
       ${city.notScheduled.length ? `<p class="meta">${city.planned ? "Not in this plan" : "Places"}: ${city.notScheduled.map((place) => html(place.fits ? `${place.name} (could fit ${place.fits})` : place.name)).join(", ")}</p>` : ""}
     </section>`).join("");
   return `<!doctype html>
@@ -248,6 +253,7 @@ export function itineraryRows(data: ItineraryExport): Cell[][] {
       if (day.back) rows.push([city.city, day.date, day.label, day.back.time, "", day.back.to ? `To ${day.back.to}` : `Back to ${city.hotel || "hotel"}`, "", null, travelLabel(day.back.travel), day.back.travel.minutes, day.back.to ? day.back.address ?? "" : city.hotelAddress, "", null, { link: day.back.travel.directionsUrl, text: "Directions" }]);
     }
     if (city.departure) rows.push(transfer(city, city.departure));
+    if (city.transport) rows.push([city.city, city.endDate, "", "", "", `Transport: ${city.transport}`, "", null, "", null, "", "", null, null]);
   }
   return rows;
 }

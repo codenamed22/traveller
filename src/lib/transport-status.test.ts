@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Journey } from "./journey";
 import { withProgress } from "./native-actions";
 import { applyTransportAction, mergeTransportEntries, withTransportCard, type RideFare, type TransportAction, type TransportCard, type TransportEntry } from "./transport";
-import { dayPassUntil, faresToCheck, formatAmount, rideDays, topUpPrice, transportStatus, withFares } from "./transport-status";
+import { adviceText, dayPassUntil, faresToCheck, formatAmount, passAdvice, rideDays, topUpPrice, transportSpend, transportStatus, withFares } from "./transport-status";
 import { minuteAt, newStop, newTrip, persistedPlan, type Schedule, type TravelEdge, type Trip } from "./trip";
 import { markDone, markPending, tripModeDays } from "./trip-mode";
 
@@ -313,5 +313,49 @@ describe("fares from Google and fares entered", () => {
     const newer = withGoogle(trip, paris.id, { [`2026-12-29|${louvre.id}`]: fare("hotel", louvre.id, "1", 2.6, morning.epochMilliseconds + 1) });
     expect(mergeTransportEntries(trip, newer).transport![paris.id].fares![`2026-12-29|${louvre.id}`].amount).toBe(2.6);
     expect(mergeTransportEntries(newer, trip).transport![paris.id].fares![`2026-12-29|${louvre.id}`].amount).toBe(2.6);
+  });
+});
+
+describe("day passes and what the card cost", () => {
+  const advice = (journey: Journey, cityId: string, now: Temporal.Instant) => {
+    const status = transportStatus(journey, cityId, now)!;
+    return passAdvice(status, "Europe/Paris").map((each) => ({ date: each.date, text: adviceText(status.card, each) }));
+  };
+
+  it("says when a day pass costs less than a day's rides, counting today's still to come", () => {
+    const { journey, paris, louvre, at } = fixture({ ...navigo, travellers: 1, dayPass: 7 });
+    const before = instant("2026-12-28T10:00:00Z");
+    // Three rides at a ticket each on the first day; one on the second.
+    expect(advice(journey, paris.id, before)).toEqual([{ date: "2026-12-29", text: "3 rides ≈ €7.65; a day pass (€7.00) is cheaper" }]);
+    // With the Louvre done, two rides are left today, less than a pass.
+    const noon = instant("2026-12-29T11:00:00Z");
+    expect(advice(done(journey, paris.id, louvre.id, at(0, "11:30"), noon), paris.id, noon)).toEqual([]);
+    // For two, passes for both.
+    const { journey: two, paris: city } = fixture({ ...navigo, dayPass: 3.5 });
+    expect(advice(two, city.id, before)[0].text).toBe("3 rides ≈ €15.30; day passes (€7.00) are cheaper");
+  });
+
+  it("has nothing to say for a day a pass already covers, or a card without a pass price", () => {
+    const { journey, paris } = fixture({ ...navigo, travellers: 1, dayPass: 7 });
+    const morning = instant("2026-12-29T07:30:00Z");
+    const covered = record(journey, paris.id, entry("pass", "2026-12-29T07:00:00Z", { paid: 7, validUntil: dayPassUntil("Europe/Paris", instant("2026-12-29T07:00:00Z")) }));
+    expect(advice(covered, paris.id, morning)).toEqual([]);
+    const { journey: none, paris: city } = fixture({ ...navigo, travellers: 1, dayPass: undefined });
+    expect(advice(none, city.id, morning)).toEqual([]);
+  });
+
+  it("notes a day whose bank card rides reach the daily cap", () => {
+    const { journey, paris } = fixture({ ...ovpay, dailyCap: 5 });
+    const [first] = passAdvice(transportStatus(journey, paris.id, instant("2026-12-28T10:00:00Z"))!, "Europe/Paris");
+    expect(first).toMatchObject({ date: "2026-12-29", rides: 3, cap: 5 });
+    expect(adviceText(ovpay, first)).toMatch(/^3 rides ≈ €6\.\d\d, capped at €5\.00$/);
+  });
+
+  it("totals what each city's card cost", () => {
+    const { journey, paris } = fixture();
+    const now = instant("2026-12-29T10:00:00Z");
+    expect(transportSpend(journey, now)).toEqual([]);
+    const trip = record(journey, paris.id, entry("topup", "2026-12-29T07:00:00Z", { amount: 10, paid: 25.5 }), entry("ride", "2026-12-29T08:00:00Z", { paid: 28 }));
+    expect(transportSpend(trip, now)).toEqual([{ cityId: paris.id, city: "Paris", spent: "€53.50" }]);
   });
 });

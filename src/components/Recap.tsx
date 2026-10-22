@@ -7,6 +7,7 @@ import type { JournalAction } from "@/lib/journal";
 import type { Journey } from "@/lib/journey";
 import { appHandles, postToApp } from "@/lib/native-bridge";
 import { tripRecap, type RecapTravel, type RecapVisit } from "@/lib/recap";
+import { transportSpend } from "@/lib/transport-status";
 import { durationLabel } from "@/lib/trip-mode";
 import { Dialog } from "./Dialog";
 import { DayNote, FavouriteButton } from "./Journal";
@@ -22,13 +23,16 @@ function statusText(visit: RecapVisit) {
   return visit.status === "skipped" ? "Skipped" : visit.status === "missed" ? "Not visited" : "Later today";
 }
 
-// How the trip went: each day's visits, planned against done, with the day's note and favourites to keep or change.
+// How the trip went: each day's visits, planned against done, with the day's note and favourites to keep or change, and
+// what each city's transport card cost.
 export function RecapDialog({ journey, now, onJournal, onClose }: { journey: Journey; now: Temporal.Instant; onJournal?: (action: JournalAction) => void; onClose: () => void }) {
   const recap = useMemo(() => tripRecap(journey, now), [journey, now]);
+  const spend = useMemo(() => transportSpend(journey, now), [journey, now]);
   const { totals } = recap;
   const summary = [plural(totals.days, "day"), plural(totals.done, "visit"), totals.skipped ? `${totals.skipped} skipped` : "", totals.missed ? `${totals.missed} not visited` : "", travelText(totals), totals.favourites ? plural(totals.favourites, "favourite") : ""].filter(Boolean).join(" · ");
   return <Dialog title="Recap" className="recap-dialog" onClose={onClose}>
     <p className="recap-summary">{summary}</p>
+    {spend.length > 0 && <p className="recap-transport">Transport: {spend.map((each) => spend.length > 1 ? `${each.city} ${each.spent}` : each.spent).join(" · ")}</p>}
     {appHandles("travellerMemories") && <button type="button" className="button secondary small recap-photos" onClick={() => postToApp("travellerMemories", { journeyId: journey.id })}><Images size={15} />Photos</button>}
     {recap.days.map((day) => <section key={day.key} className="recap-day" aria-label={`${day.label}, ${day.city}`}>
       <h3>{day.label}<small>{day.city}</small></h3>

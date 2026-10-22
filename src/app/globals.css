@@ -234,6 +234,7 @@ summary::-webkit-details-marker { display: none; }
 .day-note textarea { resize: vertical; min-height: 54px; }
 .day-note-text { margin: 14px 0 0; font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
 .recap-summary { margin: -8px 0 6px; color: var(--muted); font-size: 13px; }
+.recap-transport { margin: -2px 0 8px; color: var(--muted); font-size: 13px; }
 .recap-photos { margin-bottom: 12px; }
 .recap-day { border-top: 1px solid var(--line); padding: 14px 0 4px; }
 .recap-day h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; }
@@ -516,6 +517,9 @@ body.trip-mode-open { overflow: hidden; }
 .transport-entries li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transport-entries small { color: var(--muted); }
 .transport-entries .icon-button { width: 26px; height: 26px; }
+.pass-advice { display: flex; align-items: flex-start; gap: 7px; margin: 10px 0 12px; padding: 7px 10px; border-radius: 5px; background: #eef4f0; color: var(--green); font-size: 12px; line-height: 1.45; }
+.pass-advice svg { flex-shrink: 0; margin-top: 1px; }
+.transport-panel .pass-advice { margin: 0; }
 .transport-rides { margin: 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--line); display: grid; gap: 2px; }
 .transport-rides li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 .transport-rides li.counted { color: var(--ink); }

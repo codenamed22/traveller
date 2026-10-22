@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signIn, signOut } from "next-auth/react";
 import { ZodError } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, Compass, Copy, Download, Eye, FileInput, Navigation, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Star, Trash2, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, Compass, Copy, Download, Eye, FileInput, Navigation, FolderOpen, Hotel, List, LoaderCircle, LockKeyhole, Map, MapPin, MapPinOff, Plus, Route, Save, Search, Settings2, ShieldCheck, Star, TicketPercent, Trash2, UserRound, X } from "lucide-react";
 import { Dialog } from "./Dialog";
 import { ImportReview } from "./ImportReview";
 import { TripMap } from "./TripMap";
@@ -36,7 +36,7 @@ import { RecapDialog } from "./Recap";
 import { hasRecap } from "@/lib/recap";
 import { tripModeDays } from "@/lib/trip-mode";
 import { applyTransportAction, mergeTransportEntries, suggestedTransitApp, transitApp, withoutTransportEntries, withTransitApp, withTransportCard, type TransitApp, type TransportAction, type TransportCard } from "@/lib/transport";
-import { faresToCheck, withFares } from "@/lib/transport-status";
+import { adviceText, faresToCheck, passAdvice, transportStatus, withFares } from "@/lib/transport-status";
 import type { FoundFare } from "@/lib/fares";
 import { TransportCardFields } from "./TransportPanel";
 import { inApp, postToApp } from "@/lib/native-bridge";
@@ -341,6 +341,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   }
   const tripModeReady = journey.cities.some((city) => journey.plans[city.id]?.snapshot);
   const recapReady = useMemo(() => tripModeReady && hasRecap(journey, now), [tripModeReady, journey, now]);
+  // The day's rides on the city's card against a day pass, or its bank card's cap.
+  const passTip = useMemo(() => {
+    const status = transportStatus(journey, trip.id, now);
+    const advice = status && passAdvice(status, trip.timeZone).find((each) => each.date === date);
+    return status && advice ? adviceText(status.card, advice) : undefined;
+  }, [journey, trip.id, trip.timeZone, now, date]);
   const todayInTrip = useMemo(() => tripModeReady && tripModeDays(journey.cities, journey.plans, journey.execution, now).some((entry) => entry.isToday), [tripModeReady, journey, now]);
   const mapSchedule = tab === "places" ? null : checkedDay ? { generatedAt: checkedDay.checkedAt, warnings: [], omitted: [], days: [checkedDay.day] } : savedRecovery ? { generatedAt: savedRecovery.checkedAt, warnings: [], omitted: [], days: [savedRecovery.day] } : execution ? null : result?.schedule ?? null;
   const markerOrder = tab === "places"
@@ -795,6 +801,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
             {stale && <p className="notice warning">This itinerary is out of date. Plan again after your changes.</p>}
             {!currentDay ? <div className="empty-stops"><span className="empty-icon"><Route size={25} /></span><h2>{execution ? "Remaining today" : stale ? "Schedule needs refresh" : savedPlan ? "Saved itinerary" : "No itinerary yet"}</h2>{dayStopIds ? <ol className="saved-order">{remainingIds(dayStopIds, progress).map((id) => <li key={id}>{trip.stops.find((stop) => stop.id === id)?.name ?? "Removed stop"}{progress.remaining?.durations[id] ? ` · ${progress.remaining.durations[id]} min` : ""}</li>)}</ol> : stale && <p>Your saved itinerary is unchanged.</p>}{execution ? <p className="quiet">Travel times need refreshing.</p> : <button className="button primary" disabled={!trip.stops.length || Boolean(busy)} onClick={() => savedPlan ? void refreshTimes() : setPlanningOpen(true)}><Route size={16} />{savedPlan ? "Refresh travel times" : "Plan my days"}</button>}</div> : <>
               {!checkedDay && (savedRecovery || savedPlan?.snapshot) && <div className="notice"><strong>Saved {savedRecovery ? "day plan" : "itinerary"} · {currentDay.date} · {itineraryTrip.timeZone}</strong><p>Routes generated {savedRecovery?.checkedAt ?? savedPlan?.snapshot?.schedule.generatedAt}. Not a live travel check.</p>{!execution && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void refreshTimes()}><Route size={15} />Refresh travel times</button>}</div>}
+              {passTip && !checkedDay && !stale && <p className="pass-advice"><TicketPercent size={14} />{passTip}</p>}
               {day === 0 && itineraryTrip.arrival && !recoveryOrigin && <TransferLine trip={itineraryTrip} kind="arrival" />}
               {day === 0 && currentDay.arrivalLeg && !recoveryOrigin && <LegDetails edge={currentDay.arrivalLeg} places={recoveryPlaces} app={cityApp} />}
               <div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{recoveryOrigin ? recoveryOrigin.location ? "Current device location" : recoveryOrigin.id === "hotel" ? itineraryTrip.hotel : itineraryTrip.stops.find((stop) => stop.id === recoveryOrigin.id)?.name : itineraryTrip.hotel}</strong><span>Depart {checkedDay || savedRecovery ? new Date(checkedDay?.departureAt ?? savedRecovery!.departureAt).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", timeZone: itineraryTrip.timeZone }) : formatMinute(itineraryTrip, day, currentDay.visits[0] ? Math.min(dayStart(itineraryTrip, day), currentDay.visits[0].start - currentDay.visits[0].leg.minutes) : dayStart(itineraryTrip, day))}</span></div></div>

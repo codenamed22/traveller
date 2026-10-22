@@ -1,6 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
 import { asJourney, type Journey } from "./journey";
+import { applyTransportAction, withTransportCard } from "./transport";
 import { exportFilename, exportNote, itineraryExport, itineraryHtml, itineraryIcs, itineraryRows, itineraryXlsx } from "./export";
 import { minuteAt, newStop, newTrip, persistedPlan, withMeasuredTransfers, type Place, type Schedule, type TravelEdge, type Trip } from "./trip";
 
@@ -203,5 +204,16 @@ describe("itinerary export", () => {
     expect(amsterdam.departure).toMatchObject({ time: "21:10", detail: "Checked out; at Amsterdam Centraal by 21:10, 20 min before departure" });
     expect(itineraryHtml(exported, false)).toContain("At Amsterdam Centraal around 19:55");
     expect(itineraryRows(exported).map((row) => row[5])).toContain("To Amsterdam Centraal");
+  });
+  it("adds what each city's transport card cost to the page and the workbook", () => {
+    const { journey: data, trip } = journey();
+    const now = Temporal.Instant.from("2026-12-24T12:00:00Z");
+    const carded = { ...data, transport: withTransportCard(undefined, trip.id, { kind: "balance", name: "OV", currency: "EUR", travellers: 1, ridePrice: 3.4 }) };
+    expect(itineraryExport(carded, now).cities[0].transport).toBeUndefined();
+    const paid = applyTransportAction(carded, { kind: "transport-entry", cityId: trip.id, entry: { id: crypto.randomUUID(), at: Date.parse("2026-12-24T08:00:00Z"), kind: "topup", amount: 20, paid: 20 } }, now).journey;
+    const exported = itineraryExport(paid, now);
+    expect(exported.cities.map((city) => city.transport)).toEqual(["€20.00", undefined]);
+    expect(itineraryHtml(exported)).toContain("Transport: €20.00");
+    expect(itineraryRows(exported).find((row) => row[5] === "Transport: €20.00")?.slice(0, 2)).toEqual(["Amsterdam", "2026-12-25"]);
   });
 });

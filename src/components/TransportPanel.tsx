@@ -2,8 +2,8 @@
 
 import { useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, Check, Circle, CreditCard, Minus, Pencil, Plane, Plus, Ticket, Trash2, X } from "lucide-react";
-import { dayPassUntil, formatAmount, topUpPrice, type PricedRide, type TransportStatus } from "@/lib/transport-status";
+import { ArrowUpRight, Check, Circle, CreditCard, Minus, Pencil, Plane, Plus, Ticket, TicketPercent, Trash2, X } from "lucide-react";
+import { adviceText, dayPassUntil, formatAmount, passAdvice, topUpPrice, type PricedRide, type TransportStatus } from "@/lib/transport-status";
 import { entryLabel, suggestedCard, type TransitApp, type TransportAction, type TransportCard, type TransportEntry } from "@/lib/transport";
 
 const kinds: { value: TransportCard["kind"]; label: string }[] = [
@@ -61,8 +61,19 @@ const localDay = (at: number, timeZone: string) => {
   try { return Temporal.Instant.fromEpochMilliseconds(at).toZonedDateTimeISO(timeZone).toPlainDate().toString(); } catch { return ""; }
 };
 
+// Today's and tomorrow's rides against a day pass, or a bank card's cap: "Today: 6 rides ≈ €15.30; a day pass (€12.30) is
+// cheaper".
+function passTips(status: TransportStatus, timeZone: string) {
+  try {
+    const today = Temporal.Now.instant().toZonedDateTimeISO(timeZone).toPlainDate();
+    const when = { [today.toString()]: "Today", [today.add({ days: 1 }).toString()]: "Tomorrow" };
+    return passAdvice(status, timeZone).flatMap((advice) => when[advice.date] ? [{ ...advice, isToday: advice.date === today.toString(), text: `${when[advice.date]}: ${adviceText(status.card, advice)}` }] : []);
+  } catch { return []; }
+}
+
 // The card's chip in trip mode, kept in a corner and dragged to another, and what it opens: the balance, today's rides
-// and what to add, with buttons to record what the plan can't know, and each of today's rides with its fare to correct.
+// and what to add, whether a day pass is cheaper today or tomorrow, with buttons to record what the plan can't know, and
+// each of today's rides with its fare to correct.
 export function TransportChip({ cityId, timeZone, status, app, bottom, hidden, onAction }: {
   cityId: string; timeZone: string; status: TransportStatus; app: TransitApp | null; bottom: number; hidden: boolean; onAction: (action: TransportAction) => void;
 }) {
@@ -106,6 +117,8 @@ export function TransportChip({ cityId, timeZone, status, app, bottom, hidden, o
   }
   const each = card.travellers > 1 ? " each" : "";
   const formLabel = form === "set" ? "The card shows" : form === "fare" ? `${card.kind === "tickets" ? "Tickets" : "Fare"}${each}` : card.kind === "tickets" ? "Tickets" : "Amount";
+  const tips = passTips(status, timeZone);
+  const passToday = tips.some((tip) => tip.isToday && tip.pass !== undefined);
   const rides = [...today?.rides ?? []].sort((left, right) => left.at - right.at);
   const rideNames = new globalThis.Map(status.days.flatMap((day) => day.rides).map((ride) => [ride.key, ride.name]));
   const describe = (entry: TransportEntry) => {
@@ -149,12 +162,13 @@ export function TransportChip({ cityId, timeZone, status, app, bottom, hidden, o
         {status.toAdd !== undefined && <div className="transport-add"><dt>To add</dt><dd>{formatAmount(card, status.toAdd)}</dd></div>}
         <div><dt>Spent</dt><dd>{money(status.spent)}</dd></div>
       </dl>
+      {tips.map((tip) => <p key={tip.key} className="pass-advice"><TicketPercent size={14} />{tip.text}</p>)}
       <div className="transport-actions">
         <button type="button" className="button secondary small" onClick={() => add({ kind: "ride" })}><Plus size={14} />Ride</button>
         <button type="button" className="button secondary small" disabled={!today || today.count <= 0} onClick={() => lastRide ? remove(lastRide.entry) : add({ kind: "ride", amount: -1 })}><Minus size={14} />Ride</button>
         {card.airportPrice !== undefined && <button type="button" className="button secondary small" onClick={() => add({ kind: "ride", paid: Math.round(card.airportPrice! * card.travellers * 100) / 100 })}><Plane size={14} />Airport ride</button>}
         {!tap && <button type="button" className="button secondary small" onClick={() => openForm("topup")}>Top up</button>}
-        {card.dayPass !== undefined && <button type="button" className="button secondary small" onClick={() => add({ kind: "pass", paid: Math.round(card.dayPass! * card.travellers * 100) / 100, validUntil: dayPassUntil(timeZone, Temporal.Now.instant()) })}><Ticket size={14} />Day pass</button>}
+        {card.dayPass !== undefined && <button type="button" className={`button ${passToday ? "primary" : "secondary"} small`} onClick={() => add({ kind: "pass", paid: Math.round(card.dayPass! * card.travellers * 100) / 100, validUntil: dayPassUntil(timeZone, Temporal.Now.instant()) })}><Ticket size={14} />Day pass</button>}
         {!tap && <button type="button" className="button secondary small" onClick={() => openForm("set")}>Card shows…</button>}
         {app && <a className="button secondary small" href={app.url} target="_blank" rel="noreferrer"><ArrowUpRight size={14} />Open {app.name}</a>}
       </div>
