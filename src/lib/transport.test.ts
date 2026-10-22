@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createJourney, duplicateJourney, journeySchema } from "./journey";
-import { suggestedTransitApp, transitApp, uberUrl, withTransitApp } from "./transport";
+import { suggestedCard, suggestedTransitApp, transitApp, uberUrl, withTransitApp, withTransportCard } from "./transport";
 import type { Place, RouteLeg } from "./trip";
 
 const place = (id: string, name: string, lat: number, lng: number): Place => ({ id, name, address: `${name}, Paris`, location: { lat, lng } });
@@ -32,6 +32,21 @@ describe("public transport apps", () => {
     expect(journeySchema.safeParse({ ...journey, transport: { [id]: { app: { name: "IDFM", url: "http://example.com" } } } }).error?.issues[0].message).toBe("Use an https link for the transport app.");
     const kept = journeySchema.parse({ ...journey, transport: { [id]: { app: { name: "IDFM", url: "https://example.com/app" } } } });
     expect(duplicateJourney(kept).transport).toEqual(kept.transport);
+  });
+
+  it("keeps the card in a copy of the trip, without what was recorded or looked up for it", () => {
+    const journey = createJourney("Winter", "2026-12-24", [{ city: "Paris", days: 2, startDate: null, timeZone: "Europe/Paris" }]);
+    const id = journey.cities[0].id;
+    const card = suggestedCard("Paris, France");
+    // Paris is counted in euros: a metro ride and a bus ride cost differently.
+    expect(card).toEqual({ kind: "balance", name: "Navigo Easy", currency: "EUR", travellers: 1, ridePrice: 2.55, dayPass: 12.3, airportPrice: 14 });
+    expect(suggestedCard("Amsterdam")).toMatchObject({ kind: "tap", dailyCap: 10.5 });
+    expect(suggestedCard("Lyon")).toMatchObject({ kind: "tickets", name: "", ridePrice: 0 });
+    const fares = { "2026-12-24|back": { from: "x", to: "hotel", lines: "8", amount: 2.55, currency: "EUR", at: 1 } };
+    const kept = journeySchema.parse({ ...journey, transport: { [id]: { card, entries: [{ id: crypto.randomUUID(), at: 1, kind: "ride" }], fares } } });
+    expect(duplicateJourney(kept).transport).toEqual({ [id]: { card } });
+    expect(withTransportCard(kept.transport, id, undefined)).toBeUndefined();
+    expect(journeySchema.safeParse({ ...journey, transport: { [id]: { card: { ...card, currency: "eu" } } } }).error?.issues[0].message).toBe("Use a three-letter currency code, such as EUR.");
   });
 });
 

@@ -490,6 +490,40 @@ body.trip-mode-open { overflow: hidden; }
 .trip-mode-tools { position: absolute; right: 12px; display: grid; gap: 10px; transition: bottom 220ms ease; }
 .trip-mode-toast { position: absolute; left: 0; right: 0; width: fit-content; margin: 0 auto; top: calc(66px + env(safe-area-inset-top, 0px)); z-index: 3; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px); padding: 9px 14px; border-radius: 20px; background: #273330; color: #fff; font-size: 13px; box-shadow: 0 4px 14px #0003; }
 .trip-mode-toast span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transport-chip-wrap { position: absolute; z-index: 3; transition: bottom 220ms ease; }
+.transport-chip-wrap.top-left { top: calc(66px + env(safe-area-inset-top, 0px)); left: 12px; }
+.transport-chip-wrap.top-right { top: calc(66px + env(safe-area-inset-top, 0px)); right: 12px; }
+.transport-chip-wrap.bottom-left { left: 12px; }
+.transport-chip { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 13px 0 11px; border: 0; border-radius: 18px; background: var(--paper); color: var(--ink); font-size: 13px; font-weight: 600; box-shadow: 0 2px 10px #0002; touch-action: none; user-select: none; cursor: grab; white-space: nowrap; }
+.transport-chip svg { color: var(--green); }
+.transport-chip.short svg, .transport-add dd { color: var(--amber); }
+.transport-panel { position: absolute; top: calc(100% + 8px); left: 0; width: min(300px, calc(100vw - 24px)); max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; display: grid; gap: 10px; padding: 12px; border-radius: 12px; background: var(--paper); box-shadow: 0 8px 26px #0003; }
+.top-right .transport-panel { left: auto; right: 0; }
+.bottom-left .transport-panel { top: auto; bottom: calc(100% + 8px); }
+.transport-panel header { display: flex; align-items: center; gap: 6px; }
+.transport-panel header strong { font-size: 14px; }
+.transport-panel header span { flex: 1; color: var(--muted); font-size: 12px; }
+.transport-panel header .icon-button { margin-left: auto; width: 28px; height: 28px; }
+.transport-panel dl { margin: 0; display: grid; gap: 4px; }
+.transport-panel dl div { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.transport-panel dt { color: var(--muted); }
+.transport-panel dd { margin: 0; font-weight: 600; text-align: right; }
+.transport-actions, .transport-form-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.transport-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: end; padding-top: 8px; border-top: 1px solid var(--line); }
+.transport-form-actions { grid-column: 1 / -1; }
+.transport-entries { margin: 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--line); display: grid; gap: 2px; }
+.transport-entries li { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.transport-entries li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transport-entries small { color: var(--muted); }
+.transport-entries .icon-button { width: 26px; height: 26px; }
+.transport-rides { margin: 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--line); display: grid; gap: 2px; }
+.transport-rides li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.transport-rides li.counted { color: var(--ink); }
+.transport-rides li.counted svg { color: var(--green); }
+.transport-rides li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transport-rides .icon-button { width: 26px; height: 26px; }
+.transport-form-title { grid-column: 1 / -1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transport-card-fields { display: grid; gap: 11px; }
 .trip-mode-toast button { border: 0; background: transparent; color: #9fe0c5; font-weight: 600; padding: 2px 4px; }
 .bottom-sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; display: flex; flex-direction: column; background: var(--paper); border-radius: 16px 16px 0 0; box-shadow: 0 -4px 20px #0002; padding-bottom: env(safe-area-inset-bottom, 0px); transition: height 220ms ease; max-width: 640px; margin: 0 auto; }
 .bottom-sheet.dragging { transition: none; }

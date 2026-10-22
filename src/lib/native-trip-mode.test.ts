@@ -108,6 +108,26 @@ describe("native trip mode snapshot", () => {
     expect(nativeTripMode(kept, christmasEve, { canTrack: false, photos: false })).not.toHaveProperty("journal");
   });
 
+  it("carries each city's transport card for the owner, with what each ride costs and whether it's counted", () => {
+    const { journey, amsterdam, coffee, museum } = fixture();
+    const card = { kind: "tickets" as const, name: "Strippenkaart", currency: "EUR", travellers: 2, ridePrice: 3 };
+    const topUp = { id: crypto.randomUUID(), at: Date.parse("2026-12-24T08:00:00Z"), kind: "topup" as const, amount: 10, paid: 30 };
+    const day = () => tripModeDays(trip.cities, trip.plans, trip.execution, christmasEve)[0];
+    let trip: Journey = { ...journey, transport: { [amsterdam.id]: { card, entries: [topUp] } } };
+    trip = { ...trip, execution: { [amsterdam.id]: { "2026-12-24": markDone(day(), coffee.id, minuteAt(amsterdam, 0, "10:15")) } } };
+    trip = { ...trip, execution: { [amsterdam.id]: { "2026-12-24": markDone(day(), museum.id, minuteAt(amsterdam, 0, "13:00")) } } };
+    const snapshot = nativeTripMode(trip, Temporal.Instant.from("2026-12-24T12:30:00Z"), { canTrack: true, photos: false });
+    expect(snapshot.transport).toEqual([{ cityId: amsterdam.id, card, balance: 8, spent: 30, entries: [{ ...topUp, effect: 10, spent: 30 }] }]);
+    const [today, tomorrow] = snapshot.days;
+    // Only the tram to the museum is a ride; the walks back aren't.
+    expect(today.visits.map((visit) => visit.ride)).toEqual([undefined, { cost: 2, counted: true, price: 2, key: `2026-12-24|${museum.id}` }]);
+    expect(today).not.toHaveProperty("returnRide");
+    expect(today.transportDay).toEqual({ rides: 1, planned: 0, spent: 0, spentUncapped: 2, fares: 0 });
+    expect(tomorrow.transportDay).toMatchObject({ rides: 0, planned: 0 });
+    expect(nativeTripMode(trip, christmasEve, { canTrack: false, photos: false })).not.toHaveProperty("transport");
+    expect(nativeTripMode(journey, christmasEve, { canTrack: true, photos: false })).not.toHaveProperty("transport");
+  });
+
   it("carries the day's forecast and the chance of rain during outdoor visits", () => {
     const { journey, amsterdam, coffee, museum } = fixture();
     // The museum's garden, say: a park. Rain is likely all morning.

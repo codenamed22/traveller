@@ -4,7 +4,7 @@ import { applyScheduleDurations, dayStart, departureTimes, instantAt, instantFor
 
 vi.mock("server-only", () => ({}));
 vi.mock("./server", () => ({ HttpError: class extends Error { constructor(public status: number, message: string) { super(message); } } }));
-import { checkBookingTravel, getPlacePhoto, planWithGoogle, routeTransfers, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
+import { checkBookingTravel, getPlacePhoto, planWithGoogle, transitFares, routeTransfers, searchPlaces, withEstimates, recoverDayWithGoogle, refreshSavedPlanWithGoogle, RequestBudget, samplePinnedPairs, savedPlanRefreshErrors, PlanningFailure, type PlanningStage } from "./google-maps";
 import { liveRouteKey, newDayProgress, validateDayRecovery, type RecoveryRequest } from "./day-recovery";
 import { validateSchedule } from "./schedule-validation";
 import * as dayAssignment from "./days";
@@ -32,6 +32,30 @@ function mockGoogle(walkingSeconds = 600, transitSeconds = 900) {
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+describe("fares for a transport card's rides", () => {
+  it("asks Google about each ride by public transport, with its alternatives, and leaves out one it couldn't ask about", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "test-key");
+    const asked: { fields: string | null; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string);
+      asked.push({ fields: new Headers(init!.headers).get("X-Goog-FieldMask"), body });
+      if (body.origin.location.latLng.latitude === 1) return Response.json({ error: { status: "INTERNAL" } }, { status: 500 });
+      return Response.json({ routes: [{ travelAdvisory: { transitFare: { currencyCode: "EUR", units: "2", nanos: 550_000_000 } }, legs: [{ steps: [{ transitDetails: { transitLine: { nameShort: "8" } } }] }] }] });
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const leg = (key: string, lat: number) => ({ key, lines: "8", origin: { lat, lng: 2.4 }, destination: { lat: 48.86, lng: 2.35 }, departure: "2026-12-29T08:10:00Z" });
+    const found = await transitFares({ preference: "LESS_WALKING", legs: [leg("2026-12-29|back", 48.84), leg("2026-12-30|back", 1)] });
+    expect(found).toEqual({ "2026-12-29|back": { amount: 2.55, currency: "EUR" } });
+    expect(asked[0].fields).toContain("routes.travelAdvisory.transitFare");
+    expect(asked[0].body).toMatchObject({ travelMode: "TRANSIT", departureTime: "2026-12-29T08:10:00Z", computeAlternativeRoutes: true, transitPreferences: { routingPreference: "LESS_WALKING" } });
+  });
+
+  it("needs Google to be set up", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "");
+    await expect(transitFares({ legs: [{ key: "2026-12-29|back", lines: "", origin: { lat: 0, lng: 0 }, destination: { lat: 0, lng: 0 }, departure: "2026-12-29T08:10:00Z" }] })).rejects.toThrow("Route services are unavailable.");
+  });
+});
 
 describe("on-demand place photos", () => {
   it("resolves only the requested first-four photo and never returns provider resource names", async () => {

@@ -10,6 +10,7 @@ import { assignDays } from "./days";
 import { solveTripWithOrTools } from "./ortools";
 import { alternativeGroups, isRequiredStop, usesVisitTiming } from "./visit-slots";
 import { RouteSamples } from "./route-samples";
+import { fareRoutesResponse, pickFare, type FareRequest, type FoundFare } from "./fares";
 import { liveRouteKey, recoveryContext, recoveryInputErrors, recoveryMinute, remainingIds, validateDayRecovery, type RecoveryOption, type RecoveryRequest, type RecoveryResult } from "./day-recovery";
 
 const jointPlanningLimit = 25;
@@ -283,6 +284,30 @@ function recoveryWaypoint(request: RecoveryRequest, id: string, role: "from" | "
   const placeId = endpointKey(request.trip, request.day, actual, role) === "departure" ? request.trip.departure!.placeId : actual === "hotel" ? request.trip.hotelPlaceId : request.trip.stops.find((stop) => stop.id === actual)?.placeId;
   if (!placeId) throw new HttpError(400, "Confirm your origin, hotel, and remaining destinations on the map first.");
   return { placeId };
+}
+
+// What Google says each ride costs one traveller, a few asked at a time. A ride it couldn't be asked about is left out,
+// to be asked again later; one it has no fare for comes back empty.
+export async function transitFares(input: FareRequest, signal?: AbortSignal): Promise<Record<string, FoundFare>> {
+  if (!process.env.GOOGLE_MAPS_API_KEY) throw new HttpError(503, "Route services are unavailable. Check your connections.");
+  const found: Record<string, FoundFare> = {};
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(5, input.legs.length) }, async () => {
+    while (next < input.legs.length) {
+      const leg = input.legs[next++];
+      const at = (point: { lat: number; lng: number }) => ({ location: { latLng: { latitude: point.lat, longitude: point.lng } } });
+      try {
+        const body = await googleRequest("https://routes.googleapis.com/directions/v2:computeRoutes", "routes.travelAdvisory.transitFare,routes.legs.steps.transitDetails.transitLine.nameShort,routes.legs.steps.transitDetails.transitLine.name", {
+          origin: at(leg.origin), destination: at(leg.destination), travelMode: "TRANSIT", departureTime: leg.departure, languageCode: "en", computeAlternativeRoutes: true,
+          ...(input.preference ? { transitPreferences: { routingPreference: input.preference } } : {}),
+        }, signal);
+        found[leg.key] = pickFare(fareRoutesResponse.parse(body).routes, leg.lines);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+      }
+    }
+  }));
+  return found;
 }
 
 export async function freshRouteOptions(request: RecoveryRequest, from: string, to: string, departure: number, budget: RequestBudget): Promise<TravelEdge[]> {

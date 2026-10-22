@@ -77,6 +77,21 @@ describe("the page's calls for the iPhone app", () => {
     expect(() => api(createNativeApi, journey).native.journal(amsterdam.id, 0, { note: "x" })).toThrow("Saving is unavailable");
   });
 
+  it("records what the app adds to a transport card, and takes back one added just before", async () => {
+    const { journey, amsterdam } = fixture();
+    const card = { kind: "tickets" as const, name: "Strippenkaart", currency: "EUR", travellers: 1, ridePrice: 3 };
+    const createNativeApi = await load();
+    const recordTransport = vi.fn();
+    const native = createNativeApi({ journey: { ...journey, transport: { [amsterdam.id]: { card } } }, recordProgress() {}, adjustToday() {}, opened() {}, closed() {}, recordTransport, now: () => now });
+    expect(native.features).toContain("transport");
+    const ride = { kind: "transport-entry", cityId: amsterdam.id, entry: { id: crypto.randomUUID(), at: now.epochMilliseconds, kind: "ride" } };
+    expect(native.transport(ride)).toBe("Ride added");
+    expect(native.transport({ kind: "transport-void", cityId: amsterdam.id, entryId: ride.entry.id })).toBe("Ride removed");
+    expect(recordTransport).toHaveBeenCalledTimes(2);
+    expect(() => native.transport({ kind: "transport-entry", cityId: amsterdam.id })).toThrow("That couldn't be saved.");
+    expect(() => api(createNativeApi, journey).native.transport(ride)).toThrow("Saving is unavailable");
+  });
+
   it("asks the agent for captions only once the traveller has agreed, and remembers it", async () => {
     const { journey } = fixture();
     const createNativeApi = await load();

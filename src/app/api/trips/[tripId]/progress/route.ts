@@ -7,13 +7,17 @@ import { applyJournalAction, journalActionSchema, withJournal } from "@/lib/jour
 import { asJourney, journeySchema, type StoredTrip } from "@/lib/journey";
 import { applyNativeAction, nativeActionSchema, withProgress } from "@/lib/native-actions";
 import { apiError, HttpError, readJson, requireOwner } from "@/lib/server";
+import { applyTransportAction, transportActionSchema } from "@/lib/transport";
 import type { SavedPlan } from "@/lib/trip";
 
 type Context = { params: Promise<{ tripId: string }> };
-const bodySchema = z.object({ actions: z.array(z.union([nativeActionSchema, journalActionSchema])).min(1).max(50) }).strict();
+const bodySchema = z.object({ actions: z.array(z.unknown()).min(1).max(50) }).strict();
+const actionSchema = z.union([nativeActionSchema, journalActionSchema, transportActionSchema]);
 
-// Done, Skip and taking them back, and the day's note and favourites, saved on the iPhone without a connection and sent
-// once it has one, for a trip the page isn't holding. Applied in order on the saved trip; each says whether it was kept, so the app can stop sending it.
+// Done, Skip and taking them back, the day's note and favourites, and what was added to a transport card, saved on the
+// iPhone without a connection and sent once it has one, for a trip the page isn't holding. Applied in order on the saved
+// trip; each says whether it was kept, so the app can stop sending it. One the site doesn't understand, such as from a
+// newer app, is refused on its own and the others are still kept.
 export async function POST(request: Request, context: Context) {
   try {
     const owner = await requireOwner(request);
@@ -27,8 +31,16 @@ export async function POST(request: Request, context: Context) {
       let journey = journeySchema.parse(asJourney(row.data as StoredTrip, row.plan as SavedPlan | null));
       const now = Temporal.Now.instant();
       let changed = false;
-      const results = actions.map((action) => {
+      const results = actions.map((input) => {
         try {
+          const parsed = actionSchema.safeParse(input);
+          if (!parsed.success) return { ok: false, message: "That change isn't supported." };
+          const action = parsed.data;
+          if (action.kind === "transport-entry" || action.kind === "transport-void") {
+            const change = applyTransportAction(journey, action, now);
+            if (change.changed) { journey = change.journey; changed = true; }
+            return { ok: true, message: change.message };
+          }
           if (action.kind === "note" || action.kind === "favourite") {
             const change = applyJournalAction(journey, action);
             const next = withJournal(journey, change.cityId, change.date, change.entry);

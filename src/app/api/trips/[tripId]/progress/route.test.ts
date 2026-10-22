@@ -90,12 +90,30 @@ describe("changes saved on the phone, sent later", () => {
     expect((await send(journey.id, { actions: [action] })).status).toBe(409);
   });
 
+  it("keeps what was added to a transport card, once, and refuses a change it doesn't know on its own", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const card = { kind: "tickets" as const, name: "Strippenkaart", currency: "EUR", travellers: 1, ridePrice: 3 };
+    const ride = { id: crypto.randomUUID(), at: Date.parse("2026-12-24T11:00:00Z"), kind: "ride" as const };
+    mocks.limit.mockResolvedValue([{ data: { ...journey, transport: { [amsterdam.id]: { card, entries: [ride] } } }, plan: null, revision: 4 }]);
+    mocks.returning.mockResolvedValue([{ revision: 5 }]);
+    const topUp = { id: crypto.randomUUID(), at: Date.parse("2026-12-24T11:10:00Z"), kind: "topup", amount: 10, paid: 30 };
+    const response = await send(journey.id, { actions: [
+      { kind: "delete", cityId: amsterdam.id, day: 0, stopId: coffee.id },
+      { kind: "transport-entry", cityId: amsterdam.id, entry: ride },
+      { kind: "transport-entry", cityId: amsterdam.id, entry: topUp },
+      { kind: "transport-void", cityId: amsterdam.id, entryId: ride.id },
+    ] });
+    expect(await response.json()).toEqual({ revision: 5, results: [
+      { ok: false, message: "That change isn't supported." }, { ok: true, message: "Ride added" }, { ok: true, message: "Topped up" }, { ok: true, message: "Ride removed" },
+    ] });
+    expect(mocks.set.mock.calls[0][0].data.transport[amsterdam.id].entries).toEqual([{ ...ride, voided: true }, topUp]);
+  });
+
   it("only takes the owner's saved trips and well-formed changes", async () => {
     const { journey, amsterdam, coffee } = fixture();
     mocks.limit.mockResolvedValue([]);
     expect((await send(journey.id, { actions: [{ kind: "done", cityId: amsterdam.id, day: 0, stopId: coffee.id }] })).status).toBe(404);
     expect((await send(journey.id, { actions: [] })).status).toBe(400);
-    expect((await send(journey.id, { actions: [{ kind: "delete", cityId: amsterdam.id, day: 0, stopId: coffee.id }] })).status).toBe(400);
     expect((await send("not-a-trip", { actions: [{ kind: "done", cityId: amsterdam.id, day: 0, stopId: coffee.id }] })).status).toBe(400);
   });
 });

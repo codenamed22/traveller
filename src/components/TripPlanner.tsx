@@ -26,7 +26,7 @@ import { asJourney, cityPreset, duplicateJourney, journeySchema, popularCities, 
 import { validateSchedule } from "@/lib/schedule-validation";
 import { placePhotoResponseSchema, type PlacePhoto } from "@/lib/place-photos";
 import { alternativeGroups } from "@/lib/visit-slots";
-import { aboutLines, changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, plannedStopIds, provisionalPlanSchema, tripDate, tripSchema, instantForMinute, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
+import { aboutLines, changeStartDate, dayStart, endpointKey, formatMinute, hotelReturnAllowance, isMustSee, maxStopsPerCity, mustSeePriority, newStop, newTrip, persistedPlan, planningFixSchema, planningKey, planningPreferences, plannedStopIds, provisionalPlanSchema, tripDate, tripSchema, instantForMinute, type DayPlan, type Place, type PlanningPreview, type PlanResult, type SavedPlan, type Stop, type Trip } from "@/lib/trip";
 import { OmittedPlaces } from "./OmittedPlaces";
 import { LegDetails } from "./LegDetails";
 import { PlaceAbout, PlaceAboutFields } from "./PlaceAbout";
@@ -35,7 +35,10 @@ import { TripMode } from "./TripMode";
 import { RecapDialog } from "./Recap";
 import { hasRecap } from "@/lib/recap";
 import { tripModeDays } from "@/lib/trip-mode";
-import { suggestedTransitApp, transitApp, withTransitApp, type TransitApp } from "@/lib/transport";
+import { applyTransportAction, mergeTransportEntries, suggestedTransitApp, transitApp, withoutTransportEntries, withTransitApp, withTransportCard, type TransitApp, type TransportAction, type TransportCard } from "@/lib/transport";
+import { faresToCheck, withFares } from "@/lib/transport-status";
+import type { FoundFare } from "@/lib/fares";
+import { TransportCardFields } from "./TransportPanel";
 import { inApp, postToApp } from "@/lib/native-bridge";
 import { saveFile } from "@/lib/save-file";
 import { nativeStore, nativeTripMode } from "@/lib/native-trip-mode";
@@ -60,7 +63,7 @@ async function requestJson(url: string, body?: unknown, method = "POST", signal?
   const data = response.status === 204 ? null : await response.json();
   if (!response.ok) {
     const fixes = planningFixSchema.array().safeParse(data?.fixes);
-    throw Object.assign(new Error(data?.error ?? "The request failed."), fixes.success ? { fixes: fixes.data } : {});
+    throw Object.assign(new Error(data?.error ?? "The request failed."), { status: response.status }, fixes.success ? { fixes: fixes.data } : {});
   }
   return data;
 }
@@ -157,8 +160,12 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       if (saving.current) return;
       saving.current = true;
       try {
-        const response = await requestJson(`/api/trips/${journey.id}`, { journey: parsed.data, revision }, "PUT");
-        setRevision(response.revision); setSavedFor(snapshot);
+        try {
+          const response = await requestJson(`/api/trips/${journey.id}`, { journey: parsed.data, revision }, "PUT");
+          setRevision(response.revision); setSavedFor(snapshot);
+        } catch (cause) {
+          if ((cause as { status?: number }).status !== 409 || !await saveOnNewer(parsed.data)) throw cause;
+        }
         if (offlineSave) { setOfflineSave(false); setError((current) => current === offlineMessage ? "" : current); }
       } catch (cause) {
         // fetch fails with a TypeError when there's no connection; that save is tried again (below).
@@ -168,7 +175,47 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       finally { saving.current = false; }
     }, 1500);
     return () => clearTimeout(timer);
-  }, [snapshot, savedFor, busy, canUseServices, revision, journey, saveRetry, offlineSave]);
+  }, [snapshot, savedFor, busy, canUseServices, revision, journey, saveRetry, offlineSave]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Another device saved the trip first. When all that changed here is what was recorded on transport cards, such as a
+  // ride added on the phone while the laptop had the trip open, it's added to the newer copy instead of failing.
+  async function saveOnNewer(local: Journey) {
+    const saved = savedFor ? journeySchema.safeParse(JSON.parse(savedFor)) : null;
+    if (!saved?.success || JSON.stringify(withoutTransportEntries(saved.data)) !== JSON.stringify(withoutTransportEntries(local))) return false;
+    const latest: SavedTrip = await requestJson(`/api/trips/${local.id}`, undefined, "GET");
+    const merged = journeySchema.parse(mergeTransportEntries(journeySchema.parse(asJourney(latest.data, latest.plan)), local));
+    const response = await requestJson(`/api/trips/${local.id}`, { journey: merged, revision: latest.revision }, "PUT");
+    const sent = JSON.stringify(local);
+    setJourney((current) => {
+      if (JSON.stringify(current) === sent) return merged;
+      // Changed again meanwhile: those changes stay, with the entries from both.
+      const transport = mergeTransportEntries(merged, current).transport;
+      return { ...current, ...(transport ? { transport } : {}) };
+    });
+    setRevision(response.revision); setSavedFor(JSON.stringify(merged));
+    return true;
+  }
+  // Google's fares for the rides each card counts, looked up while the trip is open with a connection and kept on it, so
+  // trip mode and the phone have them. Each city is asked at most once an hour.
+  const fareChecks = useRef(new globalThis.Map<string, number>());
+  useEffect(() => {
+    if (!canUseServices || !journey.transport) return;
+    const timer = setTimeout(() => {
+      if (navigator.onLine === false) return;
+      const now = Temporal.Now.instant();
+      for (const city of journey.cities) {
+        const last = fareChecks.current.get(city.id);
+        if (last !== undefined && Date.now() - last < 3_600_000) continue;
+        const legs = faresToCheck(journey, city.id, now);
+        if (!legs.length) continue;
+        fareChecks.current.set(city.id, Date.now());
+        const preference = planningPreferences(city).transitPreference;
+        requestJson("/api/fares", { ...(preference !== "DEFAULT" ? { preference } : {}), legs: legs.map(({ key, lines, origin, destination, departure }) => ({ key, lines, origin, destination, departure })) })
+          .then((response: { fares: Record<string, FoundFare> }) => setJourney((current) => withFares(current, city.id, legs, response.fares, Temporal.Now.instant())))
+          .catch(() => undefined);
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [canUseServices, journey]);
   // A save that failed for want of a connection, such as on the street, is tried again every 20 seconds and as soon as
   // the connection is back.
   useEffect(() => {
@@ -221,7 +268,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     if (!inApp()) return;
     const target = window as unknown as { travellerNative?: NativeApi };
     target.travellerNative = createNativeApi({
-      journey, recordProgress: recordCityProgress, recordJournal,
+      journey, recordProgress: recordCityProgress, recordJournal, recordTransport,
       adjustToday(cityId, targetDay) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
       opened() { nativeOpen.current = true; },
       ...(canSwap ? { swap(cityId: string, targetDay: number, stopId: string) { nativeOpen.current = false; swapVisit(cityId, targetDay, stopId); } } : {}),
@@ -282,6 +329,15 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     setJourney((current) => {
       try { const change = applyJournalAction(current, action); return withJournal(current, change.cityId, change.date, change.entry); } catch { return current; }
     });
+  }
+  // A top-up, a ride or what the card shows, from trip mode or the app, applied to the trip as it is by then.
+  function recordTransport(action: TransportAction) {
+    setJourney((current) => {
+      try { return applyTransportAction(current, action, Temporal.Now.instant()).journey; } catch { return current; }
+    });
+  }
+  function editTransportCard(card: TransportCard | undefined) {
+    setJourney((current) => ({ ...current, transport: withTransportCard(current.transport, trip.id, card) }));
   }
   const tripModeReady = journey.cities.some((city) => journey.plans[city.id]?.snapshot);
   const recapReady = useMemo(() => tripModeReady && hasRecap(journey, now), [tripModeReady, journey, now]);
@@ -686,6 +742,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
               <TransferFields trip={trip} kind="departure" onChange={(departure) => edit({ departure })} onFind={busy ? undefined : () => openSearch("departure", trip.departure?.place ?? "")}>{ticketField({ cityId: trip.id, target: "departure", stopId: null })}</TransferFields>
               <fieldset className="transfer-fields"><legend>Getting around</legend>
                 <div className="form-grid"><label className="field">Transport app<input value={appSetting.name} maxLength={60} placeholder={suggestedApp?.name ?? "App name"} onChange={(event) => editTransitApp({ name: event.target.value })} /></label><label className="field">App link<input type="url" value={appSetting.url} maxLength={500} placeholder={suggestedApp?.url ?? "https://"} onChange={(event) => editTransitApp({ url: event.target.value })} /></label></div>
+                <TransportCardFields city={trip.city} card={journey.transport?.[trip.id]?.card} entries={journey.transport?.[trip.id]?.entries?.length ?? 0} onChange={editTransportCard} />
               </fieldset>
             </div>
           </details>
@@ -832,7 +889,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     }} />}
     {recapOpen && <RecapDialog journey={journey} now={now} onJournal={recordJournal} onClose={() => setRecapOpen(false)} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}
-    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} journal={journey.journal} onJournal={recordJournal} transport={journey.transport} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
+    {tripMode && <TripMode title={journey.title} cities={journey.cities} plans={journey.plans} execution={journey.execution} start={{ cityId: trip.id, day }} canTrack photos={canLoadPhotos} tickets={tripTickets} forecasts={forecasts} onSwap={canSwap ? swapVisit : undefined} journal={journey.journal} onJournal={recordJournal} transport={journey.transport} onTransport={recordTransport} onProgress={recordCityProgress} exitSignal={tripExit} onClose={() => { setTripMode(false); leaveTripMode(); }} onAdjustToday={adjustToday} />}
     {canUseServices && config.assistant && <Assistant journey={journey} view={{ cityId: trip.id, day, tripMode, today: todayInTrip }} model={config.assistant.model} thoroughModel={config.assistant.thoroughModel} onApply={applyAssistant} onUndo={undoAssistant} onReplan={replanFromAssistant} ref={assistant} />}
   </div>;
 }

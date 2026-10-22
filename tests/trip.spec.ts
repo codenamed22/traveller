@@ -979,6 +979,13 @@ test("arrival and departure narrow the first and last day and appear in the itin
   await around.getByLabel("Transport app").fill("IDFM");
   await around.getByLabel("App link").fill("https://www.iledefrance-mobilites.fr/");
   await expect(arrivalLeg.getByRole("link", { name: "Open IDFM" })).toHaveAttribute("href", "https://www.iledefrance-mobilites.fr/");
+  // A card starts from how Paris charges.
+  await around.getByRole("button", { name: "Add a transport card" }).click();
+  await expect(around.getByLabel("Card name")).toHaveValue("Navigo Easy");
+  await expect(around.getByLabel("Pay with")).toHaveValue("balance");
+  await expect(around.getByLabel("Fare per ride")).toHaveValue("2.55");
+  await expect(around.getByLabel("Day pass")).toHaveValue("12.3");
+  await around.getByLabel("Travellers").fill("2");
   await expect(page.locator(".itinerary-start").filter({ hasText: "Depart" })).toContainText("Depart 14:55");
   // The routed time replaces the assumed 45 min; the typed minutes stay as the fallback.
   await expect(arriving.getByRole("status")).toHaveText("Sightseeing starts about 14:55 on Mon 12 Oct (lands 13:20, 45 min at the airport, 35 min to the hotel, 15 min to drop bags).");
@@ -1734,6 +1741,129 @@ test("a chosen place's card in trip mode stays below the bar and scrolls when it
   expect(label.y).toBeGreaterThanOrEqual(sheet.y);
   await expect(tripMode.locator(".sheet-header")).toHaveClass(/scrolls/);
   await page.screenshot({ path: testInfo.outputPath("trip-mode-about.png") });
+});
+
+test("a transport card in trip mode counts the rides, takes top-ups and stays where it's dragged", async ({ page }, testInfo) => {
+  // 10:00 in Paris on the first day of the trip.
+  await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
+  const coffee = { ...newStop("Coffee"), placeId: "coffee-id", duration: 45 };
+  const museum = { ...newStop("Museum"), placeId: "museum-id", duration: 90 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "21:00", stops: [coffee, museum] };
+  const at = (hour: number, minute = 0) => hour * 60 + minute;
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: "2026-10-13", visits: [
+    { stopId: coffee.id, start: at(9, 30), end: at(10, 15), leg: { day: 0, from: "hotel", to: coffee.id, mode: "TRANSIT" as const, minutes: 20, meters: 4000 } },
+    { stopId: museum.id, start: at(11), end: at(12, 30), leg: { day: 0, from: coffee.id, to: museum.id, mode: "WALK" as const, minutes: 15, meters: 900 } },
+  ], returnLeg: { day: 0, from: museum.id, to: "hotel", mode: "WALK" as const, minutes: 20, meters: 1500 } }] };
+  const place = (id: string, name: string) => ({ id, name, address: `${name}, Paris`, location: { lat: 48.86, lng: 2.35 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel"), [coffee.id]: place("coffee-id", "Coffee"), [museum.id]: place("museum-id", "Museum") });
+  const card = { kind: "tickets", name: "Navigo Easy", currency: "EUR", travellers: 2, ridePrice: 2.55, airportPrice: 14 };
+  const journey = { id: crypto.randomUUID(), title: "Paris", cities: [trip], plans: { [trip.id]: plan }, transport: { [trip.id]: { card } } };
+  const open = async () => {
+    if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Today's plan" }).click();
+    else await page.getByRole("button", { name: "Trip mode" }).click();
+  };
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "transport.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ journey })) });
+  await open();
+  const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
+  const chip = tripMode.getByRole("button", { name: /^Transport card/ });
+  await expect(chip).toHaveText("0 tickets");
+  await chip.click();
+  const panel = tripMode.getByRole("region", { name: "Transport card" });
+  // The metro to the coffee, for two.
+  await expect(panel).toContainText("Navigo Easyfor 2");
+  await expect(panel).toContainText("Today0 rides · 1 to go");
+  await expect(panel).toContainText("To add2 tickets");
+  await panel.getByRole("button", { name: "Top up" }).click();
+  await expect(panel.getByLabel("Tickets")).toHaveValue("10");
+  await expect(panel.getByLabel("Paid")).toHaveValue("25.5");
+  await panel.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(chip).toHaveText("10 tickets");
+  await expect(panel).not.toContainText("To add");
+  await expect(panel).toContainText("Spent€25.50");
+  await page.screenshot({ path: testInfo.outputPath("transport-panel.png") });
+  await panel.getByRole("button", { name: "Close transport card" }).click();
+  await tripMode.locator(".trip-card").getByRole("button", { name: "Done" }).click();
+  await expect(chip).toHaveText("8 tickets");
+  await chip.click();
+  await expect(panel).toContainText("Today1 ride · 0 to go");
+  await panel.getByRole("button", { name: "Airport ride" }).click();
+  await expect(panel).toContainText("Spent€53.50");
+  await expect(chip).toHaveText("8 tickets");
+  await panel.getByRole("button", { name: "Remove airport ride" }).click();
+  await expect(panel).toContainText("Spent€25.50");
+  await panel.getByRole("button", { name: "Close transport card" }).click();
+
+  // Dragged to the bottom, it stays above the day plan, and there after trip mode closes and opens again.
+  const box = (await chip.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(40, viewport.height - 300, { steps: 8 });
+  await page.mouse.up();
+  await expect(tripMode.locator(".transport-chip-wrap")).toHaveClass(/bottom-left/);
+  await expect(panel).toHaveCount(0);
+  await expect.poll(async () => { const moved = (await chip.boundingBox())!; const sheet = (await tripMode.locator(".bottom-sheet").boundingBox())!; return moved.y + moved.height <= sheet.y; }).toBe(true);
+  await page.goBack();
+  await open();
+  await expect(page.locator(".transport-chip-wrap")).toHaveClass(/bottom-left/);
+  await page.goBack();
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("transport-backup.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  expect(backup.journey.transport[trip.id].entries.map((entry: { kind: string; amount?: number; paid?: number; voided?: boolean }) => [entry.kind, entry.amount ?? entry.paid, Boolean(entry.voided)])).toEqual([["topup", 10, false], ["ride", 28, true]]);
+});
+
+test("a card counted in euros takes each ride's Google fare, and a fare can be corrected", async ({ page }, testInfo) => {
+  // 10:00 in Paris on the first day of the trip.
+  await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
+  const coffee = { ...newStop("Coffee"), placeId: "coffee-id", duration: 45 };
+  const museum = { ...newStop("Museum"), placeId: "museum-id", duration: 90 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "21:00", stops: [coffee, museum] };
+  const at = (hour: number, minute = 0) => hour * 60 + minute;
+  const bus = { day: 0, mode: "TRANSIT" as const, minutes: 20, meters: 4000, steps: [{ instruction: "Bus", mode: "TRANSIT", line: "29" }] };
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [], days: [{ day: 0, date: "2026-10-13", visits: [
+    { stopId: coffee.id, start: at(9, 30), end: at(10, 15), leg: { ...bus, from: "hotel", to: coffee.id } },
+    { stopId: museum.id, start: at(11), end: at(12, 30), leg: { ...bus, from: coffee.id, to: museum.id, steps: [{ instruction: "Metro", mode: "TRANSIT", line: "8" }] } },
+  ], returnLeg: { day: 0, from: museum.id, to: "hotel", mode: "WALK" as const, minutes: 20, meters: 1500 } }] };
+  const place = (id: string, name: string) => ({ id, name, address: `${name}, Paris`, location: { lat: 48.86, lng: 2.35 } });
+  const plan = persistedPlan(schedule, trip, { hotel: place("hotel-id", "Hotel"), [coffee.id]: place("coffee-id", "Coffee"), [museum.id]: place("museum-id", "Museum") });
+  const card = { kind: "balance", name: "Navigo Easy", currency: "EUR", travellers: 2, ridePrice: 2.55 };
+  // Google's fares: the bus to the coffee, and the metro to the museum.
+  const fares = { [`2026-10-13|${coffee.id}`]: { from: "hotel", to: coffee.id, lines: "29", amount: 2.05, currency: "EUR", at: Date.parse("2026-10-13T07:00:00Z") }, [`2026-10-13|${museum.id}`]: { from: coffee.id, to: museum.id, lines: "8", amount: 2.55, currency: "EUR", at: Date.parse("2026-10-13T07:00:00Z") } };
+  const topUp = { id: crypto.randomUUID(), at: Date.parse("2026-10-13T07:30:00Z"), kind: "topup", amount: 20, paid: 20 };
+  const journey = { id: crypto.randomUUID(), title: "Paris", cities: [trip], plans: { [trip.id]: plan }, transport: { [trip.id]: { card, entries: [topUp], fares } } };
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "fares.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ journey })) });
+  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
+  const chip = tripMode.getByRole("button", { name: /^Transport card/ });
+  await expect(chip).toHaveText("€20.00");
+  await chip.click();
+  const panel = tripMode.getByRole("region", { name: "Transport card" });
+  const rides = panel.getByRole("list", { name: "Today's rides" });
+  await expect(rides.getByRole("listitem")).toHaveText(["Coffee€4.10", "Museum€5.10"]);
+  await panel.getByRole("button", { name: "Close transport card" }).click();
+  await tripMode.locator(".trip-card").getByRole("button", { name: "Done" }).click();
+  await expect(chip).toHaveText("€15.90");
+  // The bus was a tram that cost more: corrected for both travellers.
+  await chip.click();
+  await panel.getByRole("button", { name: "Change the fare to Coffee" }).click();
+  await expect(panel.getByLabel("Fare each")).toHaveValue("2.05");
+  await panel.getByLabel("Fare each").fill("2.5");
+  await panel.getByRole("button", { name: "Save" }).click();
+  await expect(chip).toHaveText("€15.00");
+  await expect(rides.getByRole("listitem").first()).toHaveText("Coffee€5.00");
+  await expect(panel.locator(".transport-entries")).toContainText("Fare for Coffee · €2.50");
+  await page.screenshot({ path: testInfo.outputPath("transport-fares.png") });
+  await panel.getByRole("button", { name: "Remove fare" }).click();
+  await expect(chip).toHaveText("€15.90");
 });
 
 test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {

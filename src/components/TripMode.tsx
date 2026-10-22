@@ -21,7 +21,9 @@ import { usePlacePhotos } from "./usePlacePhotos";
 import { RainWarning, WeatherBadge, WeatherCredit } from "./Weather";
 import { DayNote, FavouriteButton } from "./Journal";
 import { rainWarningFor, type Forecast } from "@/lib/weather";
-import { transitApp, uberUrl } from "@/lib/transport";
+import { transitApp, uberUrl, type TransportAction } from "@/lib/transport";
+import { transportStatus } from "@/lib/transport-status";
+import { TransportChip } from "./TransportPanel";
 
 type Props = {
   title: string; cities: Trip[]; plans: Record<string, SavedPlan>; execution?: Journey["execution"]; start?: { cityId: string; day: number };
@@ -38,8 +40,8 @@ type Props = {
   forecasts?: Record<string, Forecast>; onSwap?: (cityId: string, day: number, stopId: string) => void;
   // The owner's notes and favourites; `onJournal` keeps them, from the first day of the trip on.
   journal?: Journey["journal"]; onJournal?: (action: JournalAction) => void;
-  // Each city's public transport app, linked on transit legs.
-  transport?: Journey["transport"];
+  // Each city's public transport app, linked on transit legs, and its card; `onTransport` records what's added to it.
+  transport?: Journey["transport"]; onTransport?: (action: TransportAction) => void;
 };
 type Undo = { cityId: string; date: string; previous?: DayProgress; message: string };
 
@@ -49,12 +51,13 @@ const noForecasts: Record<string, Forecast> = {};
 const modeLabel = (visit: Visit) => `${durationLabel(visit.leg.minutes)} ${visit.leg.mode === "WALK" ? "walk" : "by transit"}`;
 
 // Full-screen, map-first view of one day at a time, for using the itinerary while travelling.
-export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap, journal, onJournal, transport }: Props) {
+export function TripMode({ title, cities, plans, execution, start, canTrack, onProgress, onAdjustToday, onClose, exitSignal, photos = false, tickets = noTickets, forecasts = noForecasts, onSwap, journal, onJournal, transport, onTransport }: Props) {
   const ticketLinks = (place: TicketPlace) => ticketsFor(tickets, place).map((ticket, _index, all) => <a key={ticket.id} className="button secondary small" href={`/api/trips/${ticket.tripId}/tickets/${ticket.id}`} target="_blank" rel="noopener"><TicketIcon size={15} />{all.length === 1 ? "Ticket" : ticket.name}</a>);
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
   const [key, setKey] = useState(() => startingDay(days, start)?.key);
   const entry = days.find((candidate) => candidate.key === key) ?? days[0];
+  const cardStatus = useMemo(() => canTrack && onTransport && entry ? transportStatus({ cities, plans, execution, transport }, entry.cityId, now) : null, [canTrack, onTransport, entry, cities, plans, execution, transport, now]);
   const [selected, setSelected] = useState<string | null>(null);
   const [snap, setSnap] = useState<Snap>("peek");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -259,6 +262,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       <button type="button" className="round-button" aria-label="Show my location" aria-pressed={Boolean(location)} onClick={() => locate(true)}><LocateFixed size={19} /></button>
       <button type="button" className="round-button" aria-label="Fit the day on the map" onClick={() => { setSelected(null); setFitToken((value) => value + 1); }}><Maximize2 size={18} /></button>
     </div>
+    {cardStatus && onTransport && <TransportChip key={entry.cityId} cityId={entry.cityId} timeZone={entry.cityTrip.timeZone} status={cardStatus} app={app} bottom={Math.min(sheetHeight, sheetSizes.half) + 14} hidden={snap === "full" || menuOpen} onAction={onTransport} />}
     {locationNote && <p className="trip-mode-toast" role="status">{locationNote}</p>}
     {undo && <div className="trip-mode-toast" role="status"><span>{undo.message}</span><button type="button" onClick={() => { onProgress?.(undo.cityId, undo.date, undo.previous); setUndo(undefined); }}>Undo</button></div>}
 

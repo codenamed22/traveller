@@ -7,7 +7,8 @@ import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
 import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
 import { dayLabel, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 import { tripRecap, type RecapTravel } from "./recap";
-import { legEnd, transitApp, uberUrl, type TransitApp } from "./transport";
+import { legEnd, transitApp, uberUrl, type TransitApp, type TransportCard, type TransportEntry } from "./transport";
+import { transportStatus, type TransportStatus } from "./transport-status";
 import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 
 // What the iPhone app's native trip mode draws. The rules stay here, in the same trip-mode helpers the web trip mode
@@ -21,7 +22,13 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // favourites (`favourite`), through `travellerNative.journal` or the progress route. `travel` is how far the traveller
 // walked and rode on a day that has started, on the planned routes to the visits made (as the recap counts it).
 // Each city's `app` is its public transport app, and each leg's `taxi` an Uber link from the phone's location. A visit's
-// `about` is what a guide says about the place, as labelled lines.
+// `about` is what a guide says about the place, as labelled lines. `transport` is each city's card, for the owner: its
+// balance, what was spent, and each entry's part in them (`effect` on the balance, `spent`, and a ride's `cost` before a
+// cap, or how far a fare moved its ride's price). A visit's `ride` and a day's `returnRide` are what that ride takes off
+// the card and whether the balance has it (`counted`), what it costs (`price`, a pass or what the card showed after it
+// aside) and its `key` for a fare entered for it, and `transportDay` the day's rides and a bank card's spend, so the app
+// can count a Done tapped without a connection: the balance less each ride's cost where it should now count and isn't
+// counted.
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: RouteLeg["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -31,6 +38,12 @@ export type NativeVisit = {
   stopId: string; name: string; placeId?: string; location?: LatLng; start: number; end: number; startLabel: string; endLabel: string;
   leaveBy: number; leaveLabel: string; booked: boolean; status: VisitStatus; doneLabel?: string; note?: string; sourceNote?: string; mustSee?: boolean;
   alternatives: string[]; leg: NativeLeg; about?: { label: string; text: string }[]; startAt?: number; endAt?: number; leaveAt?: number; doneStartAt?: number; doneEndAt?: number; rain?: number; favourite?: boolean;
+  ride?: NativeRide;
+};
+export type NativeRide = { cost: number; counted: boolean; price: number; key: string };
+export type NativeTransport = {
+  cityId: string; card: TransportCard; balance?: number; spent: number; toAdd?: number;
+  entries: (Omit<TransportEntry, "voided"> & { voided?: true; effect: number; spent: number; cost?: number })[];
 };
 // `mode` (flight, train…) picks the arrival or departure line's icon; `leg` is the route between the airport or station
 // and the hotel, when the plan found one.
@@ -40,10 +53,12 @@ export type NativeDay = {
   stale: boolean; replanned: boolean; hotel: { name: string; location?: LatLng }; end: { title: string; short: string; location?: LatLng };
   summary: { stops: number; travel: string; leaveLabel?: string; backLabel?: string }; visits: NativeVisit[]; returnLeg?: NativeLeg;
   arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather; note?: string; travel?: RecapTravel;
+  returnRide?: NativeRide; transportDay?: { rides: number; planned: number; spent: number; spentUncapped: number; fares: number };
 };
 export type NativeTripMode = {
   version: 1; level: 2; journeyId: string; title: string; generatedAt: string; startKey: string | null; canTrack: boolean; photos: boolean;
   cities: { id: string; name: string; dates: string; app?: TransitApp }[]; days: NativeDay[]; tickets?: NativeTicket[]; swap?: boolean; journal?: boolean;
+  transport?: NativeTransport[];
 };
 export type NativeTicket = Omit<Ticket, "tripId" | "stopId"> & { stopId?: string };
 
@@ -84,7 +99,7 @@ function dayBounds(entry: TripModeDay) {
   } catch { return { startsAt: 0, endsAt: 0 }; }
 }
 
-function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, travel?: RecapTravel): NativeDay {
+function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, travel?: RecapTravel, card?: TransportStatus): NativeDay {
   const { trip, places, plan } = entry;
   const stopName = (id: string) => trip.stops.find((stop) => stop.id === id)?.name ?? places[id]?.name ?? "Removed place";
   const toDeparture = endpointKey(trip, entry.day, "hotel", "to") === "departure";
@@ -97,6 +112,12 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
   const omitted = journey.plans[entry.cityId]?.snapshot?.schedule.omitted ?? [];
   const weather = forecast?.days[entry.date];
   const journal = journalEntry(journey, entry.cityId, entry.date);
+  const transportDay = card?.days.find((day) => day.key === entry.key);
+  const ride = (find: (candidate: { stopId?: string; back?: true }) => boolean) => {
+    const found = transportDay?.rides.find(find);
+    return found ? { ride: { cost: found.cost, counted: found.counted, price: found.price, key: found.key } } : {};
+  };
+  const returnRide = ride((candidate) => Boolean(candidate.back)).ride;
   return {
     key: entry.key, cityId: entry.cityId, city: entry.city, day: entry.day, date: entry.date, label: entry.label, timeZone: entry.cityTrip.timeZone,
     ...dayBounds(entry), stale: entry.stale, replanned: entry.replanned,
@@ -131,7 +152,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
         ...(note ? { note } : {}), ...(sourceNote ? { sourceNote } : {}), ...(current && isMustSee(current) ? { mustSee: true } : {}),
         ...(rain !== undefined ? { rain } : {}), ...(journal.favourites?.includes(visit.stopId) ? { favourite: true } : {}),
         alternatives: stop?.alternativeGroup ? plan.visits.filter((other) => other.stopId !== visit.stopId && trip.stops.find((candidate) => candidate.id === other.stopId)?.alternativeGroup === stop.alternativeGroup).map((other) => stopName(other.stopId)) : [],
-        leg: leg(visit.leg, places), ...(about.length ? { about } : {}),
+        leg: leg(visit.leg, places), ...(about.length ? { about } : {}), ...ride((candidate) => candidate.stopId === visit.stopId),
         ...defined({
           startAt, endAt, leaveAt: epoch(trip, entry.day, leaveBy(visit)),
           ...(completed ? { doneStartAt: epoch(entry.cityTrip, entry.day, completed.start), doneEndAt: epoch(entry.cityTrip, entry.day, completed.end) } : {}),
@@ -145,12 +166,17 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
       .map((visit) => ({ title: stopName(visit.stopId), detail: `${clock(entry.cityTrip, entry.day, visit.start)}–${clock(entry.cityTrip, entry.day, visit.end)}` })) ?? [],
     omitted: omitted.map((id) => trip.stops.find((stop) => stop.id === id)?.name ?? "").filter(Boolean),
     ...(weather ? { weather } : {}), ...(journal.note ? { note: journal.note } : {}), ...(travel ? { travel } : {}),
+    ...(returnRide ? { returnRide } : {}),
+    ...(transportDay ? { transportDay: { rides: transportDay.count, planned: transportDay.planned, spent: transportDay.spent, spentUncapped: transportDay.spentUncapped, fares: transportDay.fares } } : {}),
   };
 }
 
 export function nativeTripMode(journey: Journey, now: Temporal.Instant, options: { start?: { cityId: string; day: number }; canTrack: boolean; photos: boolean; tickets?: Ticket[]; forecasts?: Record<string, Forecast>; swap?: boolean }): NativeTripMode {
   const days = tripModeDays(journey.cities, journey.plans, journey.execution, now);
   const travel = Object.fromEntries(tripRecap(journey, now).days.map((day) => [day.key, day.travel]));
+  // The cards are the owner's, like Done and notes.
+  const cards = options.canTrack ? journey.cities.flatMap((city) => { const status = transportStatus(journey, city.id, now); return status ? [{ cityId: city.id, status }] : []; }) : [];
+  const card = (cityId: string) => cards.find((candidate) => candidate.cityId === cityId)?.status;
   const tickets = (options.tickets ?? []).filter((ticket) => ticket.tripId === journey.id)
     .map(({ tripId: _tripId, stopId, ...ticket }) => { void _tripId; return { ...ticket, ...(stopId ? { stopId } : {}) }; });
   return {
@@ -164,9 +190,13 @@ export function nativeTripMode(journey: Journey, now: Temporal.Instant, options:
         ...(app ? { app } : {}),
       };
     }),
-    days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId], travel[entry.key])),
+    days: days.map((entry) => nativeDay(entry, journey, options.forecasts?.[entry.cityId], travel[entry.key], card(entry.cityId))),
     ...(tickets.length ? { tickets } : {}),
     ...(options.swap ? { swap: true } : {}), ...(options.canTrack ? { journal: true } : {}),
+    ...(cards.length ? { transport: cards.map(({ cityId, status }) => ({
+      cityId, card: status.card, ...(status.balance !== undefined ? { balance: status.balance } : {}), spent: status.spent, ...(status.toAdd !== undefined ? { toAdd: status.toAdd } : {}),
+      entries: status.entries.map(({ entry, effect, spent, cost }) => ({ ...entry, effect, spent, ...(cost !== undefined ? { cost } : {}) })),
+    })) } : {}),
   };
 }
 

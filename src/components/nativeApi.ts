@@ -4,10 +4,11 @@ import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
 import { applyJournalAction, journalActionSchema, type JournalAction } from "@/lib/journal";
 import { applyNativeAction, type NativeAction } from "@/lib/native-actions";
+import { applyTransportAction, transportActionSchema, type TransportAction } from "@/lib/transport";
 
 // What the iPhone app calls in the page (`window.travellerNative`), built from one render's trip. The page stays the only
 // place that saves the trip. `features` tells the app which calls this version of the site understands.
-export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap", "journal", "captions"];
+export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "send", "swap", "journal", "captions", "transport"];
 
 type Deps = {
   journey: Journey;
@@ -19,6 +20,7 @@ type Deps = {
   send?: (journeyId: string, actions: unknown[]) => Promise<unknown>;
   swap?: (cityId: string, day: number, stopId: string) => void;
   recordJournal?: (action: JournalAction) => void;
+  recordTransport?: (action: TransportAction) => void;
   captions?: (summary: unknown) => Promise<unknown>;
   now?: () => Temporal.Instant;
 };
@@ -63,7 +65,7 @@ function pruneUndo(date: string) {
   for (const key of memory.keys()) if (key.slice(-10) < date) memory.delete(key);
 }
 
-export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, recordJournal, captions, now: clock = () => Temporal.Now.instant() }: Deps) {
+export function createNativeApi({ journey, recordProgress, adjustToday, opened, closed, photo, send, swap, recordJournal, recordTransport, captions, now: clock = () => Temporal.Now.instant() }: Deps) {
   function apply(action: NativeAction) {
     const change = applyNativeAction(journey, action, clock());
     if (!change.changed) return change.message;
@@ -72,6 +74,8 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
     recordProgress(change.cityId, change.date, change.next);
     return change.message;
   }
+  // The trip with what this render's calls added to the cards, so a ride taken back straight after it was added is found.
+  let withTransport = journey;
   return {
     features: nativeFeatures,
     // The trip these calls change, so the app never records a visit against another one.
@@ -110,6 +114,17 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
       const { message } = applyJournalAction(journey, action.data);
       recordJournal(action.data);
       return message;
+    },
+    // A top-up, a ride, what the card shows or a day pass ({kind: "transport-entry", cityId, entry}), or taking one back
+    // ({kind: "transport-void", cityId, entryId}). The same entry twice is kept once.
+    transport(input: unknown) {
+      if (!recordTransport) throw new Error("Saving is unavailable");
+      const action = transportActionSchema.safeParse(input);
+      if (!action.success) throw new Error("That couldn't be saved.");
+      const change = applyTransportAction(withTransport, action.data, clock());
+      withTransport = change.journey;
+      recordTransport(action.data);
+      return change.message;
     },
     adjustToday,
     // Rain on an outdoor visit: the agent, with a swap for something indoors asked for but not sent. The app closes

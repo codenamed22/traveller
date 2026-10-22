@@ -13,6 +13,17 @@ const saveSchema = z.union([z.object({
   plan: savedPlanSchema.nullable(),
 }).strict(), z.object({ journey: journeySchema, revision: z.number().int().min(0) }).strict()]);
 
+// The saved copy, for a page whose save lost to another device's, to add what it recorded to.
+export async function GET(request: Request, context: Context) {
+  try {
+    const owner = await requireOwner(request);
+    const tripId = z.uuid().parse((await context.params).tripId);
+    const [row] = await database().select({ data: trips.data, plan: trips.plan, revision: trips.revision }).from(trips).where(and(eq(trips.id, tripId), eq(trips.owner, owner))).limit(1);
+    if (!row) throw new HttpError(404, "That trip isn't saved.");
+    return Response.json(row, { headers: { "Cache-Control": "private, no-store" } });
+  } catch (error) { return apiError(error); }
+}
+
 export async function PUT(request: Request, context: Context) {
   try {
     const owner = await requireOwner(request);

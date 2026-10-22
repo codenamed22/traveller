@@ -1,8 +1,8 @@
 import type { Temporal } from "@js-temporal/polyfill";
 import { journalEntry } from "./journal";
 import type { Journey } from "./journey";
-import { formatMinute, isMustSee, type TravelEdge, type Trip, type Visit } from "./trip";
-import { tripModeDays, visitStatus } from "./trip-mode";
+import { formatMinute, isMustSee, type DayPlan, type TravelEdge, type Trip, type Visit } from "./trip";
+import { tripModeDays, visitStatus, type TripModeDay } from "./trip-mode";
 
 // How the trip went, day by day: each visit's planned time against when it was done, what was skipped or never reached,
 // the traveller's notes and favourites, and how far they walked and rode on the planned routes to the visits they made.
@@ -21,9 +21,38 @@ function range(trip: Trip, day: number, start: number, end: number) {
   return from && to ? `${from}–${to}` : undefined;
 }
 
-function addLeg(travel: RecapTravel, edge: TravelEdge | undefined) {
-  if (!edge) return;
+function addLeg(travel: RecapTravel, edge: TravelEdge) {
   if (edge.mode === "WALK") { travel.walkKm += edge.meters / 1000; travel.walkMinutes += edge.minutes; } else travel.transitMinutes += edge.minutes;
+}
+
+// Every visit a day had: as planned, as replanned, and done or skipped there.
+function dayStopIds(entry: TripModeDay, original: DayPlan | undefined) {
+  return [...new Set([
+    ...(original?.visits ?? []).map((visit) => visit.stopId), ...entry.plan.visits.map((visit) => visit.stopId),
+    ...(entry.progress?.completed ?? []).map((visit) => visit.stopId), ...(entry.progress?.skipped ?? []),
+  ])];
+}
+
+// The planned legs a day's travel came to: into each visit made, on the plan as replanned or else as planned, set off
+// on its planned time before the visit began; and back once the day is over (or nothing is left today) and something
+// was visited, set off when the last visit ended. Minutes are the city's, as day progress keeps them.
+export type TravelledLeg = { edge: TravelEdge; minute: number; stopId?: string; back?: true };
+export function travelledLegs(entry: TripModeDay, original: DayPlan | undefined): TravelledLeg[] {
+  const progress = entry.progress;
+  const legs: TravelledLeg[] = [];
+  let pending = false;
+  for (const id of dayStopIds(entry, original)) {
+    const status = visitStatus(progress, id);
+    if (status === "pending") pending = true;
+    if (status !== "done") continue;
+    const edge = (entry.plan.visits.find((visit) => visit.stopId === id) ?? original?.visits.find((visit) => visit.stopId === id))?.leg;
+    const completed = progress!.completed.find((visit) => visit.stopId === id)!;
+    if (edge) legs.push({ edge, minute: completed.start - edge.minutes, stopId: id });
+  }
+  const back = entry.plan.returnLeg ?? original?.returnLeg;
+  const done = progress?.completed ?? [];
+  if (back && (!entry.isToday || !pending) && done.length) legs.push({ edge: back, minute: Math.max(...done.map((visit) => visit.end)), back: true });
+  return legs;
 }
 
 // Every planned day that has started, in trip order. A visit still to come today isn't missed yet.
@@ -36,21 +65,15 @@ export function tripRecap(journey: Journey, now: Temporal.Instant): TripRecap {
     const journal = journalEntry(journey, entry.cityId, entry.date);
     const favourites = new Set(journal.favourites ?? []);
     const progress = entry.progress;
-    const ids = [...new Set([
-      ...(original?.visits ?? []).map((visit) => visit.stopId), ...entry.plan.visits.map((visit) => visit.stopId),
-      ...(progress?.completed ?? []).map((visit) => visit.stopId), ...(progress?.skipped ?? []),
-    ])];
     const find = (visits: Visit[] | undefined, id: string) => visits?.find((visit) => visit.stopId === id);
     const name = (id: string) => entry.cityTrip.stops.find((stop) => stop.id === id)?.name ?? entry.trip.stops.find((stop) => stop.id === id)?.name ?? entry.places[id]?.name ?? "Removed place";
     const travel: RecapTravel = { walkKm: 0, walkMinutes: 0, transitMinutes: 0 };
-    let pending = false;
-    const visits = ids.map((id) => {
+    for (const leg of travelledLegs(entry, original)) addLeg(travel, leg.edge);
+    const visits = dayStopIds(entry, original).map((id) => {
       const status = visitStatus(progress, id);
       const completed = progress?.completed.find((visit) => visit.stopId === id);
       const planned = find(original?.visits, id);
       const replanned = find(entry.plan.visits, id);
-      if (status === "done") addLeg(travel, (replanned ?? planned)?.leg);
-      if (status === "pending") pending = true;
       const stop = entry.cityTrip.stops.find((candidate) => candidate.id === id);
       const visit: RecapVisit = {
         stopId: id, name: name(id), status: status === "pending" ? entry.isToday ? "upcoming" : "missed" : status,
@@ -60,8 +83,6 @@ export function tripRecap(journey: Journey, now: Temporal.Instant): TripRecap {
       };
       return { visit, order: completed?.start ?? planned?.start ?? replanned?.start ?? 1500 };
     }).sort((left, right) => left.order - right.order).map(({ visit }) => visit);
-    // The way back once the day is over, if anything was visited.
-    if ((!entry.isToday || !pending) && visits.some((visit) => visit.status === "done")) addLeg(travel, entry.plan.returnLeg ?? original?.returnLeg);
     return {
       key: entry.key, cityId: entry.cityId, city: entry.city, day: entry.day, date: entry.date, label: entry.label, isToday: entry.isToday,
       ...(journal.note ? { note: journal.note } : {}), visits,

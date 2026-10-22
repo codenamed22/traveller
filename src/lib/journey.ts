@@ -3,7 +3,7 @@ import { z } from "zod";
 import { newTrip, savedPlanSchema, tripDate, tripSchema, type SavedPlan, type Trip } from "./trip";
 import { dayProgressSchema } from "./day-recovery";
 import { journalSchema } from "./journal";
-import { transportSchema } from "./transport";
+import { transportSchema, withoutTransportEntries } from "./transport";
 
 export { savedPlanSchema } from "./trip";
 
@@ -103,10 +103,10 @@ export function restoreJourney(value: unknown): Journey {
   return { ...journey, id: crypto.randomUUID() };
 }
 
-// A copy to plan another version of a trip: the same cities, places and itineraries, without what was done or written on
-// the way. City ids stay, as in a restored backup, so each itinerary still belongs to its city.
+// A copy to plan another version of a trip: the same cities, places and itineraries, without what was done, written or
+// paid on the way. City ids stay, as in a restored backup, so each itinerary still belongs to its city.
 export function duplicateJourney(journey: Journey): Journey {
-  const { execution: _execution, journal: _journal, ...rest } = journey;
+  const { execution: _execution, journal: _journal, ...rest } = withoutTransportEntries(journey);
   void _execution; void _journal;
   return journeySchema.parse({ ...rest, id: crypto.randomUUID(), title: `${journey.title.slice(0, 143)} (copy)` });
 }

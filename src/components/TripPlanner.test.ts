@@ -249,6 +249,63 @@ describe("native trip mode in the iPhone app", () => {
     } finally { vi.useRealTimers(); }
   }, 15_000);
 
+  it("adds a ride the app recorded on the card to the copy another device saved first", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T09:00:00Z"));
+    try {
+      Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage() {} } } } });
+      const { amsterdam, entry } = planned();
+      const card = { kind: "tickets", name: "Strippenkaart", currency: "EUR", travellers: 1, ridePrice: 3 };
+      const opened = { ...entry, data: { ...entry.data, transport: { [amsterdam.id]: { card } } } };
+      // The laptop topped up meanwhile and saved revision 2.
+      const topUp = { id: crypto.randomUUID(), at: Date.parse("2026-12-24T08:50:00Z"), kind: "topup", amount: 10, paid: 30 };
+      const newer = { ...opened, revision: 2, data: { ...opened.data, transport: { [amsterdam.id]: { card, entries: [topUp] } } } };
+      const puts: { journey: { transport: Record<string, { entries: unknown[] }> }; revision: number }[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          puts.push(JSON.parse(String(init.body)));
+          return puts.length === 1 ? Response.json({ error: "This trip changed on another device. Reload it before saving." }, { status: 409 }) : Response.json({ revision: 3 });
+        }
+        return url === `/api/trips/${entry.data.id}` ? Response.json(newer) : Response.json({ trips: [] });
+      }));
+      await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: opened, initialList: null, config } as never)));
+      type Native = { transport: (action: unknown) => string };
+      const ride = { id: crypto.randomUUID(), at: Date.parse("2026-12-24T08:55:00Z"), kind: "ride" };
+      await act(async () => { (window as unknown as { travellerNative: Native }).travellerNative.transport({ kind: "transport-entry", cityId: amsterdam.id, entry: ride }); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1700)); });
+      await settle();
+      expect(puts.map((put) => put.revision)).toEqual([1, 2]);
+      expect(puts[1].journey.transport[amsterdam.id].entries).toEqual([topUp, ride]);
+      expect(container.textContent).not.toContain("changed on another device");
+      expect(container.querySelector(".save-state")?.textContent).toBe("Saved");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("looks up Google's fares for the rides a card paid in money counts, and saves them with the trip", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-12-24T07:00:00Z"));
+    try {
+      const { amsterdam, coffee, entry } = planned();
+      const plan = entry.data.plans[amsterdam.id];
+      const schedule = plan.snapshot!.schedule;
+      const byTram = { ...schedule, days: schedule.days.map((day) => ({ ...day, visits: day.visits.map((visit) => ({ ...visit, leg: { ...visit.leg, mode: "TRANSIT" as const, steps: [{ instruction: "", mode: "TRANSIT", line: "2" }] } })) })) };
+      const card = { kind: "tap", name: "Bank card", currency: "EUR", travellers: 1, ridePrice: 1.16, perKm: 0.217, dailyCap: 10.5 };
+      const opened = { ...entry, data: { ...entry.data, plans: { [amsterdam.id]: { ...plan, snapshot: { ...plan.snapshot!, schedule: byTram } } }, transport: { [amsterdam.id]: { card } } } };
+      const asked: { legs: { key: string; lines: string }[] }[] = [];
+      const puts: { journey: { transport: Record<string, { fares?: Record<string, unknown> }> } }[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/fares") { asked.push(JSON.parse(String(init!.body))); return Response.json({ fares: { [`2026-12-24|${coffee.id}`]: { amount: 3.4, currency: "EUR" } } }); }
+        if (init?.method === "PUT") { puts.push(JSON.parse(String(init.body))); return Response.json({ revision: 2 + puts.length }); }
+        return Response.json({ trips: [] });
+      }));
+      await act(async () => root.render(createElement(TripPlanner, { initialTrip: newTrip(), initialSaved: opened, initialList: null, config } as never)));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 3100)); });
+      await settle();
+      expect(asked.map((body) => body.legs.map((leg) => [leg.key, leg.lines]))).toEqual([[[`2026-12-24|${coffee.id}`, "2"]]]);
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1600)); });
+      await settle();
+      expect(puts.at(-1)!.journey.transport[amsterdam.id].fares).toEqual({ [`2026-12-24|${coffee.id}`]: { from: "hotel", to: coffee.id, lines: "2", amount: 3.4, currency: "EUR", at: Date.parse("2026-12-24T07:00:00Z") } });
+    } finally { vi.useRealTimers(); }
+  }, 10_000);
+
   it("gives the app a copy of the trip shortly after it loads or changes, and says when it's deleted", async () => {
     const messages: { type: string; snapshot?: NativeTripMode; journeyId?: string }[] = [];
     Object.assign(window, { webkit: { messageHandlers: { travellerTripMode: { postMessage: (message: never) => messages.push(message) } } } });
