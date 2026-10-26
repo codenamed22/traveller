@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { APIProvider, AdvancedMarker, InfoWindow, Map as GoogleMap, useMap } from "@vis.gl/react-google-maps";
 import { decode } from "@googlemaps/polyline-codec";
-import { Hotel, LocateFixed, MapPinned } from "lucide-react";
+import { Hotel, LocateFixed, MapPinned, Plus } from "lucide-react";
 import type { Place, Schedule, StopAbout, TravelEdge, Trip } from "@/lib/trip";
 import type { PlacePhoto } from "@/lib/place-photos";
 import { placeMarkerLabel } from "@/lib/map-markers";
@@ -19,13 +19,15 @@ type Props = { trip: Trip; places: Record<string, Place>; schedule: Schedule | n
   // A click on the map itself, not on a marker.
   onMapClick?: () => void;
   // What a guide says about the selected place, shown in its popup.
-  about?: StopAbout };
+  about?: StopAbout;
+  // Trip mode: places for spare time, as grey squares left out of the fit.
+  extras?: { id: string; name: string; location: { lat: number; lng: number } }[] };
 
 // Room for the city and day chip and the route legend along the top (stacked on narrow screens) and the assistant tab on
 // the right, so no marker is fitted underneath them.
 const overlayPadding: google.maps.Padding = { top: 130, right: 70, bottom: 60, left: 60 };
 
-function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry, padding, fitToken, popup = true, zoomOnSelect = false, fitCurrentLocation = true, markerStatus, centerOn, about }: Props) {
+function MapContents({ trip, places, schedule, day, selected, onSelect, currentLocation, selectedRoute, markerOrder, photoTotal, photoFrames, photoLoading, photoErrors, photoDisabledMessage, onPhotoRequest, onPhotoRetry, padding, fitToken, popup = true, zoomOnSelect = false, fitCurrentLocation = true, markerStatus, centerOn, about, extras }: Props) {
   const map = useMap();
   const visits = schedule?.days.find((entry) => entry.day === day);
   const stopIds = visits ? visits.visits.map((visit) => visit.stopId) : selectedRoute ? [selectedRoute.to].filter((id) => id !== "hotel") : trip.stops.map((stop) => stop.id);
@@ -60,13 +62,15 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
     map.fitBounds(bounds, padding ?? overlayPadding);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, locationKey, paddingKey, fitToken]);
+  const selectedExtra = extras?.find((extra) => extra.id === selected)?.location;
   useEffect(() => {
-    if (!map || !selected || !places[selected]) return;
-    focus.current = places[selected].location;
+    const location = selected ? places[selected]?.location ?? selectedExtra : undefined;
+    if (!map || !location) return;
+    focus.current = location;
     if (zoomOnSelect && (map.getZoom() ?? 0) < 16) map.setZoom(16);
     centre(focus.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map, selected, places, zoomOnSelect]);
+  }, [map, selected, places, zoomOnSelect, selectedExtra?.lat, selectedExtra?.lng]);
   useEffect(() => {
     if (!map || !centerOn) return;
     focus.current = { lat: centerOn.lat, lng: centerOn.lng };
@@ -90,6 +94,7 @@ function MapContents({ trip, places, schedule, day, selected, onSelect, currentL
       const visitIndex = markerOrder?.indexOf(id) ?? -1;
       return places[id] && <AdvancedMarker key={id} position={places[id].location} title={trip.stops.find((stop) => stop.id === id)?.name ?? places[id].name} onClick={() => onSelect(id)}><span className={`place-marker ${selected === id ? "selected" : ""} ${markerOrder && visitIndex < 0 ? "unscheduled" : ""} ${markerStatus?.[id] ?? ""}`}>{placeMarkerLabel(id, index, markerOrder)}</span></AdvancedMarker>;
     })}
+    {extras?.map((extra) => <AdvancedMarker key={extra.id} position={extra.location} title={extra.name} onClick={() => onSelect(extra.id)}><span className={`extra-marker ${selected === extra.id ? "selected" : ""}`}><Plus size={15} strokeWidth={2.6} /></span></AdvancedMarker>)}
     {popup && selected && selectedPlace && selectedName && <InfoWindow position={selectedPlace.location} onCloseClick={() => onSelect(null)} shouldFocus={false}>
       <div className="map-photo-popup"><h2>{selectedName}</h2><PlacePhotos key={selectedPlace.id} placeName={selectedName} variant="popup" total={photoTotal} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => onPhotoRequest(selectedPlace.id, index)} onRetry={(index) => onPhotoRetry(selectedPlace.id, index)} />{selected !== "hotel" && <PlaceAbout about={about} />}</div>
     </InfoWindow>}

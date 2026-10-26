@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { describe, expect, it } from "vitest";
-import { applyDayRecovery, liveCheckIsFresh, newDayProgress, recoveryContext, recoveryInputErrors, recoveryPlanKey, recoveryRequestSchema, remainingIds, validateDayRecovery, type RecoveryOption, type RecoveryRequest } from "./day-recovery";
+import { applyDayRecovery, dayMembers, keptAdded, liveCheckIsFresh, newDayProgress, pendingIds, recoveryContext, recoveryInputErrors, recoveryPlanKey, recoveryRequestSchema, remainingIds, validateDayRecovery, type RecoveryOption, type RecoveryRequest } from "./day-recovery";
 import { newStop, newTrip } from "./trip";
 import { solveTrip } from "./planner";
 import { journeySchema } from "./journey";
@@ -99,6 +99,46 @@ describe("day recovery", () => {
     expect(request.progress.remaining).toBeUndefined();
     option.day.returnLeg!.assumed = true;
     expect(validateDayRecovery(request, option).join(" ")).toContain("actual date");
+  });
+  it("fits in a place from spare time, keeps it with the day once added, and lets go of it on undo", () => {
+    const request = fixture();
+    const park = { ...newStop("Park"), optional: true, spare: true as const, duration: 30 };
+    const before = recoveryPlanKey(request.trip, 0, request.stopIds);
+    request.trip.stops.push(park);
+    // Keeping a place for spare time leaves today's progress as it is.
+    expect(recoveryPlanKey(request.trip, 0, request.stopIds)).toBe(before);
+    request.add = park.id;
+    expect(recoveryInputErrors(request, now)).toEqual([]);
+    expect(pendingIds(request)).toEqual([...request.stopIds, park.id]);
+    expect(recoveryInputErrors({ ...request, add: request.stopIds[1] }, now)).toContain("Only a place not planned for today can be added.");
+    expect(recoveryInputErrors({ ...request, add: crypto.randomUUID() }, now)).toContain("Only a place not planned for today can be added.");
+    park.day = 1;
+    expect(recoveryInputErrors(request, now)).toContain("Only a place not planned for today can be added.");
+    park.day = null;
+    const [coffee, museum, canal] = request.stopIds;
+    const leg = (from: string, to: string) => ({ day: 0, from, to, minutes: 10, meters: 800, mode: "WALK" as const });
+    const option: RecoveryOption = { label: "Keep every visit", skipped: [], durations: { [coffee]: 45, [park.id]: 30, [museum]: 60, [canal]: 45 }, day: { day: 0, date: request.trip.startDate, visits: [
+      { stopId: coffee, start: 730, end: 775, leg: leg("current", coffee) },
+      { stopId: park.id, start: 785, end: 815, leg: leg(coffee, park.id) },
+      { stopId: museum, start: 840, end: 900, leg: leg(park.id, museum) },
+      { stopId: canal, start: 910, end: 955, leg: leg(museum, canal) },
+    ], returnLeg: leg(canal, "hotel") } };
+    expect(validateDayRecovery(request, option)).toEqual([]);
+    // Leaving the added place out is a missing visit unless skipping it was approved.
+    const without = { ...option, day: { ...option.day, visits: option.day.visits.filter((visit) => visit.stopId !== park.id).map((visit, index, all) => ({ ...visit, leg: leg(index ? all[index - 1].stopId : "current", visit.stopId) })) } };
+    expect(validateDayRecovery(request, without)).toContain("A remaining visit is missing.");
+    const applied = applyDayRecovery(request.progress, option, undefined, park.id);
+    expect(applied.added).toEqual([park.id]);
+    expect(dayMembers(request.stopIds, applied)).toEqual([...request.stopIds, park.id]);
+    // Once added, it's part of the day: a later replan needs no `add`, and adding it again is refused.
+    const later = { ...request, add: undefined, progress: applied };
+    expect(recoveryInputErrors(later, now)).toEqual([]);
+    expect(pendingIds(later)).toContain(park.id);
+    expect(recoveryInputErrors({ ...later, add: park.id }, now)).toContain("Only a place not planned for today can be added.");
+    // Undo goes back to the plan without it; a visit done there keeps it.
+    expect(keptAdded(applied, applied.previousRemaining)).toEqual({ added: undefined });
+    expect(keptAdded({ ...applied, completed: [{ stopId: park.id, start: 785, end: 815 }] }, undefined)).toEqual({ added: [park.id] });
+    expect(applyDayRecovery(request.progress, without, undefined, park.id).added).toBeUndefined();
   });
   it("requires a real direct hotel return even with no pending visits", () => {
     const request = fixture();

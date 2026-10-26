@@ -15,6 +15,15 @@ describe("independent schedule validator", () => {
     const { trip, schedule } = fixture();
     expect(validateSchedule(trip, schedule)).toEqual([]);
   });
+  it("never plans a place kept for spare time", () => {
+    const { trip, schedule } = fixture();
+    const park = { ...newStop("Park"), optional: true, spare: true as const };
+    const withPark = { ...trip, stops: [...trip.stops, park] };
+    expect(validateSchedule(withPark, schedule)).toEqual([]);
+    const leg: TravelEdge = { day: 0, from: trip.stops[0].id, to: park.id, mode: "WALK", minutes: 10, meters: 700 };
+    const planned = { ...schedule, days: [{ ...schedule.days[0], visits: [...schedule.days[0].visits, { stopId: park.id, start: 670, end: 715, leg }], returnLeg: { ...leg, from: park.id, to: "hotel" } }] };
+    expect(validateSchedule(withPark, planned)).not.toEqual([]);
+  });
   it("rejects late arrival, moved bookings, and missing required stops", () => {
     const { trip, schedule } = fixture();
     schedule.days[0].visits[0].leg.minutes = 55;

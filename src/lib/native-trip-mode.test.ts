@@ -140,6 +140,20 @@ describe("native trip mode snapshot", () => {
     expect(nativeTripMode(journey, christmasEve, { canTrack: false, photos: false }).days.some((day) => day.meals)).toBe(false);
   });
 
+  it("carries the places for spare time on days still to come, and when each day ends", () => {
+    const { journey, amsterdam } = fixture();
+    const park = { ...newStop("Vondelpark"), placeId: "g-vondel", location: { lat: 52.358, lng: 4.868 }, optional: true, spare: true as const, duration: 30, note: "Bring bread" };
+    const city = { ...amsterdam, stops: [...amsterdam.stops, park] };
+    const kept = { ...journey, cities: [city] };
+    const [today, tomorrow] = nativeTripMode(kept, christmasEve, { canTrack: true, photos: false }).days;
+    // Albert Cuyp was left out of the plan, but isn't on the map.
+    expect(today.extras).toEqual([{ stopId: park.id, placeId: "g-vondel", name: "Vondelpark", location: park.location, duration: 30, note: "Bring bread" }]);
+    expect(today.dayEnd).toBe(minuteAt(amsterdam, 0, "21:00"));
+    expect(tomorrow.extras?.map((extra) => extra.name)).toEqual(["Vondelpark"]);
+    // Once a day has gone by, it has none.
+    expect(nativeTripMode(kept, Temporal.Instant.from("2026-12-25T09:00:00Z"), { canTrack: true, photos: false }).days[0].extras).toBeUndefined();
+  });
+
   it("carries the day's forecast and the chance of rain during outdoor visits", () => {
     const { journey, amsterdam, coffee, museum } = fixture();
     // The museum's garden, say: a park. Rain is likely all morning.

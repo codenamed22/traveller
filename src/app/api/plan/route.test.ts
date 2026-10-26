@@ -46,6 +46,13 @@ describe("planning request boundaries", () => {
     expect((await POST(refreshRequest())).status).toBe(401);
     expect(mocks.reserveUsage).not.toHaveBeenCalled();
   });
+  it("plans without the places kept for spare time", async () => {
+    const museum = { ...newStop("Museum"), placeId: "museum" };
+    const park = { ...newStop("Park"), placeId: "park", optional: true, spare: true as const };
+    const trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel", days: 1, stops: [museum, park] };
+    expect((await POST(request(trip))).status).toBe(200);
+    expect(mocks.planWithGoogle).toHaveBeenCalledWith({ ...trip, stops: [museum] }, expect.anything());
+  });
   it("returns an untimed provisional outline without exposing a schedule", async () => {
     const stop = newStop("Day-trip visit");
     const provisional = { status: "provisional", verified: false, code: "missing-data", message: "Return travel is unavailable in the sampled data.", outline: [{ stopIds: [stop.id], allowedDays: [0] }], unresolved: [{ day: 0, direction: "return", outcome: "noRoute" }], warnings: [] };

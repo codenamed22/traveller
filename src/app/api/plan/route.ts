@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { checkBookingTravel, planWithGoogle, refreshSavedPlanWithGoogle, savedPlanRefreshErrors, type PlanningStage } from "@/lib/google-maps";
-import { bookingConflicts, planningFailureCodeSchema, planningFixSchema, provisionalPlanSchema, savedPlanSchema, tripSchema } from "@/lib/trip";
+import { bookingConflicts, planningFailureCodeSchema, planningFixSchema, planningTrip, provisionalPlanSchema, savedPlanSchema, tripSchema } from "@/lib/trip";
 import { apiError, HttpError, requireOwner, reserveUsage, readJson } from "@/lib/server";
 
 export const runtime = "nodejs";
@@ -10,8 +10,10 @@ export async function POST(request: Request) {
   const diagnostics: PlanningStage[] = [];
   try {
     const owner = await requireOwner(request);
-    const { trip, operationId, mode, plan } = z.object({ trip: tripSchema, operationId: z.uuid(), mode: z.enum(["check", "plan", "refresh"]).default("plan"), plan: savedPlanSchema.optional() }).strict()
+    const { trip: input, operationId, mode, plan } = z.object({ trip: tripSchema, operationId: z.uuid(), mode: z.enum(["check", "plan", "refresh"]).default("plan"), plan: savedPlanSchema.optional() }).strict()
       .refine((input) => (input.mode === "refresh") === Boolean(input.plan), "Only itinerary refresh requires a saved plan.").parse(await readJson(request, 3_500_000));
+    // Places kept for spare time are never planned.
+    const trip = planningTrip(input);
     if (mode === "check") {
       const booked = trip.stops.filter((stop) => stop.fixedTime);
       if (booked.length && (!trip.hotelPlaceId || booked.some((stop) => !stop.placeId))) throw new HttpError(400, "Confirm the hotel and fixed bookings on the map before checking travel gaps.");

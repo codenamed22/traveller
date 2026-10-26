@@ -49,6 +49,16 @@ describe("the page's calls for the iPhone app", () => {
     expect(api(await load(), journey).native.features).toEqual(expect.arrayContaining(["record-at", "undo-saved", "reset", "opened", "send"]));
   });
 
+  it("opens Adjust today from the app, with a place from spare time to fit in", async () => {
+    const { journey, amsterdam, coffee } = fixture();
+    const adjustToday = vi.fn();
+    const native = (await load())({ journey, recordProgress() {}, adjustToday, opened() {}, closed() {} });
+    native.adjustToday(amsterdam.id, 0);
+    native.adjustToday(amsterdam.id, 0, coffee.id);
+    native.adjustToday(amsterdam.id, 0, "not a place");
+    expect(adjustToday.mock.calls).toEqual([[amsterdam.id, 0, undefined], [amsterdam.id, 0, coffee.id], [amsterdam.id, 0, undefined]]);
+  });
+
   it("asks the agent to swap a visit when the page can", async () => {
     const { journey, amsterdam, coffee } = fixture();
     const createNativeApi = await load();

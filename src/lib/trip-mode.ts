@@ -4,7 +4,8 @@ import { routineGaps, type RoutineGap } from "./gaps";
 import type { Journey } from "./journey";
 import { meters } from "./nearby";
 import { legEnd } from "./transport";
-import { planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type RouteLeg, type SavedPlan, type Stop, type Trip, type Visit } from "./trip";
+import { dayEnd, planningKey, plannedStopIds, tripDate, type DayPlan, type Place, type RouteLeg, type SavedPlan, type Stop, type Trip, type Visit } from "./trip";
+import { openingIntervals } from "./visit-slots";
 
 // One day of an accepted itinerary as trip mode shows it. `trip` and `places` belong to the plan being shown (the accepted
 // snapshot, or today's replan); `cityTrip` is the city as it is now, which keys and validates day progress like the planner.
@@ -83,14 +84,85 @@ export function mealSearch(gap: Pick<RoutineGap, "start" | "end" | "location">, 
   return { location, here: Boolean(location && location === here), start, end: Math.min(start + gap.end - gap.start, 24 * 60 - 1) };
 }
 
-// Walking directions to a place from the phone's location.
-export function walkingUrl(place: { id: string; name: string }) {
+// Directions to a place from the phone's location.
+export function placeDirections(place: { id: string; name: string }, travelmode: "walking" | "transit" = "walking") {
   const url = new URL("https://www.google.com/maps/dir/");
   url.searchParams.set("api", "1");
   url.searchParams.set("destination", place.name);
   url.searchParams.set("destination_place_id", place.id);
-  url.searchParams.set("travelmode", "walking");
+  url.searchParams.set("travelmode", travelmode);
   return url.toString();
+}
+
+// A place for spare time on a day: kept for it, or optional and left out of the plan; confirmed on the map, not added to
+// or done on any day, planned on none, and free to go on this one. `open` is when it's open that day, in the day's minutes
+// as visits keep them, or null when that isn't known.
+type LatLng = { lat: number; lng: number };
+export type DayExtra = { stopId: string; placeId: string; name: string; location: LatLng; duration: number; note?: string; open: [number, number][] | null };
+
+export function dayExtras(entry: TripModeDay, plans: Record<string, SavedPlan>, execution: Journey["execution"]): DayExtra[] {
+  const saved = plans[entry.cityId];
+  const omitted = new Set(saved?.omitted ?? []);
+  const planned = new Set([...(saved?.days.flatMap((day) => day.stopIds) ?? []), ...entry.plan.visits.map((visit) => visit.stopId)]);
+  const taken = new Set(Object.values(execution?.[entry.cityId] ?? {}).flatMap((progress) => [...progress.completed.map((visit) => visit.stopId), ...(progress.added ?? [])]));
+  return entry.cityTrip.stops.flatMap((stop): DayExtra[] => {
+    const place = entry.places[stop.id];
+    const location = place?.location ?? stop.location;
+    const placeId = place?.id || stop.placeId;
+    if (!(stop.spare || omitted.has(stop.id)) || stop.fixedTime || !placeId || !location || (stop.day !== null && stop.day !== entry.day) || planned.has(stop.id) || taken.has(stop.id)) return [];
+    let open: [number, number][] | null = null;
+    try { open = openingIntervals(entry.cityTrip, entry.day, place); } catch { open = null; }
+    return [{ stopId: stop.id, placeId, name: stop.name, location, duration: stop.duration, ...(stop.note ? { note: stop.note } : {}), open }];
+  });
+}
+
+// About how long getting somewhere takes: on foot up to 1.5 km, otherwise by transit, with a quarter more for streets and
+// ten minutes for waiting. The replan checks the real routes.
+export function travelEstimate(from: LatLng, to: LatLng) {
+  const distance = meters(from, to) * 1.25;
+  return Math.max(1, Math.round(distance <= 1500 ? distance / 80 : 10 + distance / 330));
+}
+
+// Whether an extra fits from now, roughly: getting there from the phone (while it's in the city) or the last place done
+// (or the hotel), open the whole visit, away in time for the next booking, and over by the end of the day. `booking` is
+// the next booking's time, `until` when the place closes after the visit. The replan fits it among the other visits.
+export type ExtraFit = { away: number; walk: boolean; open: boolean; booking?: number; missesBooking: boolean; late: boolean; until?: number; fits: boolean };
+
+export function extraFit(entry: TripModeDay, extra: DayExtra, nowMinute: number, here?: LatLng): ExtraFit {
+  const last = entry.progress?.completed.reduce<{ stopId: string; end: number } | undefined>((latest, visit) => !latest || visit.end > latest.end ? visit : latest, undefined);
+  const hotel = entry.places.hotel?.location ?? entry.cityTrip.hotelLocation;
+  const at = (id: string) => entry.places[id]?.location ?? entry.cityTrip.stops.find((stop) => stop.id === id)?.location;
+  const from = here && meters(here, extra.location) < 25_000 ? here : (last && at(last.stopId)) || hotel;
+  const away = from ? travelEstimate(from, extra.location) : 20;
+  const arrive = Math.ceil(nowMinute) + away;
+  const leave = arrive + extra.duration;
+  const interval = extra.open?.find(([start, end]) => start <= arrive && leave <= end);
+  const open = !extra.open || Boolean(interval);
+  const booked = entry.plan.visits.find((visit) => visit.start > nowMinute && visitStatus(entry.progress, visit.stopId) === "pending" && entry.trip.stops.find((stop) => stop.id === visit.stopId)?.fixedTime);
+  const bookedAt = booked && at(booked.stopId);
+  const missesBooking = Boolean(booked && leave + (bookedAt ? travelEstimate(extra.location, bookedAt) : 20) + 10 > booked.start);
+  let end = Infinity;
+  try { end = dayEnd(entry.cityTrip, entry.day); } catch { /* No end to check. */ }
+  const late = leave > end;
+  return {
+    away, walk: Boolean(from) && meters(from!, extra.location) * 1.25 <= 1500, open, ...(booked ? { booking: booked.start } : {}), missesBooking, late,
+    ...(interval ? { until: interval[1] } : {}), fits: open && !missesBooking && !late,
+  };
+}
+
+// The estimate in a few words, with `clock` writing a minute of the day.
+export function extraFitLabel(fit: ExtraFit, clock: (minute: number) => string) {
+  if (!fit.open) return "Closed then";
+  if (fit.missesBooking) return `Not before your ${clock(fit.booking!)} booking`;
+  if (fit.late) return "Not before the day ends";
+  if (fit.booking !== undefined) return `Fits before your ${clock(fit.booking)} booking`;
+  return fit.until !== undefined ? `Open until ${clock(fit.until)}` : "";
+}
+
+// Today's extras, those that fit first, then the nearest.
+export function rankedExtras(entry: TripModeDay, extras: DayExtra[], nowMinute: number, here?: LatLng) {
+  return extras.map((extra) => ({ extra, fit: extraFit(entry, extra, nowMinute, here) }))
+    .sort((left, right) => Number(right.fit.fits) - Number(left.fit.fits) || left.fit.away - right.fit.away);
 }
 
 export function durationLabel(minutes: number) {

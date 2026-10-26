@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { allowsTravelEdge, dayEnd, dayPlanSchema, instantForMinute, minuteAt, placeSchema, returnDeadline, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
+import { allowsTravelEdge, dayEnd, dayPlanSchema, instantForMinute, minuteAt, placeSchema, planningTrip, returnDeadline, tripDate, tripSchema, type DayPlan, type TravelEdge, type Trip } from "./trip";
 import { earliestStart } from "./visit-slots";
 
 const idsSchema = z.array(z.uuid()).max(60).refine((ids) => new Set(ids).size === ids.length, "Visits must be unique.");
@@ -14,6 +14,8 @@ export const dayProgressSchema = z.object({
   date: z.iso.date(), version: z.number().int().nonnegative(), planKey: z.string().max(200_000),
   timeZone: tripSchema.shape.timeZone.optional(),
   baselineStopIds: idsSchema.optional(),
+  // Places added to the day since it was planned, from spare time in trip mode.
+  added: idsSchema.optional(),
   completed: z.array(z.object({ stopId: z.uuid(), start: z.number().min(0).max(1500), end: z.number().min(0).max(1500) }).strict().refine((visit) => visit.end >= visit.start, "Finish after starting.")).max(60),
   skipped: idsSchema, missedBookings: idsSchema,
   originId: z.union([z.literal("hotel"), z.uuid()]), readyAt: z.number().min(0).max(1500).nullable(),
@@ -25,6 +27,8 @@ export const recoveryRequestSchema = z.object({
   origin: recoveryOriginSchema,
   departureAt: z.iso.datetime(), operationId: z.uuid(), mode: z.enum(["route", "replan"]), targetId: z.union([z.literal("hotel"), z.uuid()]).optional(),
   permissions: z.object({ skipIds: idsSchema, minimumDurations: z.record(z.uuid(), z.number().int().min(5).max(480)) }).strict(),
+  // A place not planned for today to fit in, from spare time.
+  add: z.uuid().optional(),
   preferredRoute: z.object({ to: z.union([z.literal("hotel"), z.uuid()]), key: z.string().max(20_000) }).strict().optional(),
 }).strict();
 export type RecoveryRequest = z.infer<typeof recoveryRequestSchema>;
@@ -43,11 +47,21 @@ export function liveRouteKey(edge?: TravelEdge) { return edge ? JSON.stringify([
 
 export function recoveryPlanKey(trip: Trip, day: number, stopIds: string[]) {
   const parsed = tripSchema.safeParse(trip);
-  const canonical = parsed.success ? parsed.data : trip;
+  // A place kept for spare time leaves today's progress as it is.
+  const canonical = planningTrip(parsed.success ? parsed.data : trip);
   return JSON.stringify({ ...canonical, hotelLocation: undefined, stops: canonical.stops.map((stop) => ({ ...stop, location: undefined, source: "", sourceUrl: undefined, about: undefined })), day, stopIds });
 }
 export function newDayProgress(trip: Trip, day: number, stopIds: string[]): DayProgress {
   return { date: tripDate(trip, day), timeZone: trip.timeZone, version: 0, planKey: recoveryPlanKey(trip, day, stopIds), baselineStopIds: stopIds, completed: [], skipped: [], missedBookings: [], originId: "hotel", readyAt: null };
+}
+// The day's visits: the plan's and the places added since.
+export function dayMembers(stopIds: string[], progress: DayProgress): string[] {
+  return [...stopIds, ...(progress.added ?? []).filter((id) => !stopIds.includes(id))];
+}
+// What's still to visit, with the place being added.
+export function pendingIds(request: Pick<RecoveryRequest, "stopIds" | "progress" | "add">): string[] {
+  const pending = remainingIds(request.stopIds, request.progress);
+  return request.add && !pending.includes(request.add) ? [...pending, request.add] : pending;
 }
 export function remainingIds(stopIds: string[], progress: DayProgress): string[] {
   const done = new Set([...progress.completed.map((visit) => visit.stopId), ...progress.skipped, ...(progress.remaining?.skipped ?? [])]);
@@ -64,20 +78,24 @@ export function recoveryInputErrors(request: RecoveryRequest, now = Temporal.Now
   if (progress.timeZone && progress.timeZone !== trip.timeZone && (progress.completed.length || progress.readyAt !== null)) errors.push(`Actual progress uses ${progress.timeZone}. Restore that city timezone before live recovery.`);
   if (day >= trip.days || tripDate(trip, day) !== now.toZonedDateTimeISO(trip.timeZone).toPlainDate().toString()) errors.push("Live recovery is available only on the actual trip day.");
   if (progress.date !== tripDate(trip, day) || progress.planKey !== recoveryPlanKey(trip, day, stopIds)) errors.push("The trip changed. Reconcile today's progress before refreshing routes.");
-  const members = new Set(stopIds);
+  const members = new Set([...dayMembers(stopIds, progress), ...(request.add ? [request.add] : [])]);
   const completed = new Set(progress.completed.map((visit) => visit.stopId));
   if (progress.completed.some((visit) => visit.end > recoveryMinute(trip, day, now.toString()) + 1)) errors.push("Actual completion cannot be in the future.");
   if (completed.size !== progress.completed.length || progress.completed.some((visit, index) => index > 0 && visit.start < progress.completed[index - 1].end)) errors.push("Actual visits overlap or repeat.");
   const allIds = [...stopIds, ...completed, ...progress.skipped, ...progress.missedBookings, ...(progress.remaining?.stopIds ?? []), ...(progress.remaining?.skipped ?? [])];
   if (allIds.some((id) => !members.has(id) || !trip.stops.some((stop) => stop.id === id)) || [...completed].some((id) => progress.skipped.includes(id))) errors.push("Progress contains unknown or conflicting visits.");
   if (progress.missedBookings.some((id) => !progress.skipped.includes(id) || !trip.stops.find((stop) => stop.id === id)?.fixedTime)) errors.push("Missed booking acknowledgements must refer to explicitly skipped bookings.");
-  if (progress.remaining && stopIds.some((id) => !completed.has(id) && !progress.skipped.includes(id) && !progress.remaining!.skipped.includes(id) && !progress.remaining!.stopIds.includes(id))) errors.push("Saved recovery must explain every unfinished visit.");
+  if (progress.remaining && dayMembers(stopIds, progress).some((id) => !completed.has(id) && !progress.skipped.includes(id) && !progress.remaining!.skipped.includes(id) && !progress.remaining!.stopIds.includes(id))) errors.push("Saved recovery must explain every unfinished visit.");
   for (const [id, duration] of Object.entries(progress.remaining?.durations ?? {})) {
     const stop = trip.stops.find((stop) => stop.id === id);
     if (!stop || !members.has(id) || duration > stop.duration || (stop.fixedTime && duration !== stop.duration)) errors.push("Saved recovery contains invalid visit durations.");
   }
   if (origin.id !== "hotel" && !trip.stops.some((stop) => stop.id === origin.id)) errors.push("Confirm your current location.");
-  const pending = remainingIds(stopIds, progress);
+  if (request.add) {
+    const stop = trip.stops.find((candidate) => candidate.id === request.add);
+    if (!stop || stop.fixedTime || dayMembers(stopIds, progress).includes(request.add) || (stop.day !== null && stop.day !== day)) errors.push("Only a place not planned for today can be added.");
+  }
+  const pending = pendingIds(request);
   const minute = recoveryMinute(trip, day, request.departureAt);
   if (minute < earliestStart(trip, day) || minute > dayEnd(trip, day) || minute + 0.01 < Math.max(progress.readyAt ?? 0, ...progress.completed.map((visit) => visit.end))) errors.push("Departure must follow actual progress and stay within today's hours.");
   const departure = Temporal.Instant.from(request.departureAt);
@@ -100,7 +118,7 @@ export function recoveryInputErrors(request: RecoveryRequest, now = Temporal.Now
 }
 
 export function recoveryLocationErrors(request: RecoveryRequest): string[] {
-  const needed = request.mode === "route" ? [request.targetId!] : [...remainingIds(request.stopIds, request.progress), ...(request.trip.returnToHotel ? ["hotel"] : [])];
+  const needed = request.mode === "route" ? [request.targetId!] : [...pendingIds(request), ...(request.trip.returnToHotel ? ["hotel"] : [])];
   if (!request.origin.location) needed.push(request.origin.id);
   return needed.some((id) => id === "hotel" ? !request.trip.hotelPlaceId : !request.trip.stops.find((stop) => stop.id === id)?.placeId) ? ["Confirm your origin, hotel, and remaining destinations on the map first."] : [];
 }
@@ -108,7 +126,7 @@ export function recoveryLocationErrors(request: RecoveryRequest): string[] {
 export function validateDayRecovery(request: RecoveryRequest, option: RecoveryOption): string[] {
   const errors: string[] = [];
   const { trip, day, progress } = request;
-  const pending = remainingIds(request.stopIds, progress);
+  const pending = pendingIds(request);
   const visited = new Set<string>();
   let previous = "current";
   let end = recoveryMinute(trip, day, request.departureAt);
@@ -138,6 +156,14 @@ export function validateDayRecovery(request: RecoveryRequest, option: RecoveryOp
   return errors;
 }
 
-export function applyDayRecovery(progress: DayProgress, option: RecoveryOption, snapshot?: z.infer<typeof savedRecoverySchema>): DayProgress {
-  return { ...progress, version: progress.version + 1, previousRemaining: progress.remaining, undoAvailable: true, remaining: { stopIds: option.day.visits.map((visit) => visit.stopId), durations: option.durations, skipped: [...new Set([...(progress.remaining?.skipped ?? []), ...option.skipped])], ...(snapshot ? { snapshot: savedRecoverySchema.parse(snapshot) } : {}) } };
+// `add` is the place the replan fitted in, kept with the day's visits from then on.
+export function applyDayRecovery(progress: DayProgress, option: RecoveryOption, snapshot?: z.infer<typeof savedRecoverySchema>, add?: string): DayProgress {
+  const added = add && option.day.visits.some((visit) => visit.stopId === add) ? [...new Set([...(progress.added ?? []), add])] : progress.added;
+  return { ...progress, ...(added?.length ? { added } : {}), version: progress.version + 1, previousRemaining: progress.remaining, undoAvailable: true, remaining: { stopIds: option.day.visits.map((visit) => visit.stopId), durations: option.durations, skipped: [...new Set([...(progress.remaining?.skipped ?? []), ...option.skipped])], ...(snapshot ? { snapshot: savedRecoverySchema.parse(snapshot) } : {}) } };
+}
+// Added places a day keeps once its remaining visits go back (Undo) or are cleared (Update today): those done, and those
+// still in what remains.
+export function keptAdded(progress: DayProgress, remaining: DayProgress["remaining"]): Pick<DayProgress, "added"> {
+  const added = (progress.added ?? []).filter((id) => progress.completed.some((visit) => visit.stopId === id) || remaining?.stopIds.includes(id));
+  return { added: added.length ? added : undefined };
 }

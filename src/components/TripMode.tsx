@@ -2,18 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
-import { ArrowUpRight, CarTaxiFront, Check, ChevronLeft, ChevronRight, Footprints, Heart, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
+import { ArrowUpRight, CarTaxiFront, Check, ChevronLeft, ChevronRight, Clock, Footprints, Heart, Hotel, LocateFixed, LockKeyhole, LogOut, Maximize2, Menu, Navigation, Plus, SkipForward, Star, Ticket as TicketIcon, TrainFront, Undo2, X } from "lucide-react";
 import type { DayProgress } from "@/lib/day-recovery";
 import { exportNote } from "@/lib/export";
 import { ticketsFor, type Ticket, type TicketPlace } from "@/lib/tickets";
 import type { Journey } from "@/lib/journey";
 import { journalEntry, type JournalAction } from "@/lib/journal";
 import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type SavedPlan, type Trip, type Visit } from "@/lib/trip";
-import { dayLabel, dayMeals, daySummary, directionsUrl, durationLabel, leaveBy, markDone, markPending, markSkipped, mealSearch, mealSoon, minuteNow, nextVisit, startingDay, tripModeDays, visitStatus, walkingUrl, type TripModeDay } from "@/lib/trip-mode";
+import { dayExtras, dayLabel, dayMeals, daySummary, directionsUrl, durationLabel, extraFit, extraFitLabel, leaveBy, markDone, markPending, markSkipped, mealSearch, mealSoon, minuteNow, nextVisit, placeDirections, rankedExtras, startingDay, tripModeDays, visitStatus, type DayExtra, type TripModeDay } from "@/lib/trip-mode";
 import { BottomSheet, type Snap } from "./BottomSheet";
 import { LegDetails } from "./LegDetails";
 import { MealGap } from "./MealGap";
-import { OmittedPlaces } from "./OmittedPlaces";
 import { PlaceAbout } from "./PlaceAbout";
 import { PlacePhotos } from "./PlacePhotos";
 import { TransferLine } from "./TransferFields";
@@ -30,7 +29,8 @@ type Props = {
   title: string; cities: Trip[]; plans: Record<string, SavedPlan>; execution?: Journey["execution"]; start?: { cityId: string; day: number };
   // Owners can record Done and Skip on today's visits; viewers of a shared trip cannot.
   canTrack: boolean; onProgress?: (cityId: string, date: string, progress: DayProgress | undefined) => void;
-  onAdjustToday?: (cityId: string, day: number) => void; onClose: () => void;
+  // Opens Adjust today for a day, with `add` a place from spare time to fit in.
+  onAdjustToday?: (cityId: string, day: number, add?: string) => void; onClose: () => void;
   // Changing this asks trip mode to close, as its own close button does.
   exitSignal?: number;
   // Owners can load Google photos of a tapped place; shared viewers cannot.
@@ -58,6 +58,9 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   const days = useMemo(() => tripModeDays(cities, plans, execution, now), [cities, plans, execution, now]);
   const [key, setKey] = useState(() => startingDay(days, start)?.key);
   const entry = days.find((candidate) => candidate.key === key) ?? days[0];
+  // Places for spare time, on days still to come.
+  const extras = useMemo(() => entry && (entry.isToday || !entry.started) ? dayExtras(entry, plans, execution) : [], [entry, plans, execution]);
+  const extraPins = useMemo(() => extras.map((extra) => ({ id: extra.stopId, name: extra.name, location: extra.location })), [extras]);
   const cardStatus = useMemo(() => canTrack && onTransport && entry ? transportStatus({ cities, plans, execution, transport }, entry.cityId, now) : null, [canTrack, onTransport, entry, cities, plans, execution, transport, now]);
   const [selected, setSelected] = useState<string | null>(null);
   const [snap, setSnap] = useState<Snap>("peek");
@@ -69,6 +72,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   const [fitToken, setFitToken] = useState(0);
   const [locationNote, setLocationNote] = useState("");
   const [undo, setUndo] = useState<Undo>();
+  const [extrasOpen, setExtrasOpen] = useState(false);
   const watch = useRef<number | null>(null);
   const pushed = useRef(0);
   const centreOnFix = useRef(false);
@@ -120,11 +124,11 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   }
   function openMenu() { window.history.pushState(null, "", "#trip-menu"); pushed.current += 1; setMenuOpen(true); }
   function closeMenu() { if (window.location.hash === "#trip-menu") { pushed.current = Math.max(0, pushed.current - 1); window.history.back(); } setMenuOpen(false); }
-  function choose(next: TripModeDay) { setKey(next.key); setSelected(null); setSnap("peek"); closeMenu(); }
+  function choose(next: TripModeDay) { setKey(next.key); setSelected(null); setExtrasOpen(false); setSnap("peek"); closeMenu(); }
   function step(direction: 1 | -1) {
     const index = days.findIndex((candidate) => candidate.key === entry?.key);
     const next = days[index + direction];
-    if (next) { setKey(next.key); setSelected(null); }
+    if (next) { setKey(next.key); setSelected(null); setExtrasOpen(false); }
   }
   function locate(centre = true) {
     if (!navigator.geolocation) { setLocationNote("Location isn't available on this device."); return; }
@@ -143,7 +147,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   }
 
   // Photos load for a place you tap, as in the planner.
-  const photoPlaceId = selected ? entry?.places[selected]?.id || entry?.trip.stops.find((stop) => stop.id === selected)?.placeId || undefined : undefined;
+  const photoPlaceId = selected ? entry?.places[selected]?.id || entry?.trip.stops.find((stop) => stop.id === selected)?.placeId || extras.find((extra) => extra.stopId === selected)?.placeId || undefined : undefined;
   const photoKey = photoPlaceId ? `${entry?.cityId}:${photoPlaceId}` : null;
   const photo = usePlacePhotos(photoKey, photoPlaceId, photos);
   if (!entry) return null;
@@ -169,7 +173,13 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   const favourite = (stopId: string) => Boolean(dayJournal.favourites?.includes(stopId));
   const journaling = Boolean(onJournal) && entry.started;
   // A meal the day leaves out, as it comes up, with places nearby to walk to; the owner's, as the lookup costs.
-  const meals = canTrack && entry.isToday && !selected ? dayMeals(entry).filter((gap) => mealSoon(gap, nowMinute)) : [];
+  const meals = canTrack && entry.isToday && !selected && !extrasOpen ? dayMeals(entry).filter((gap) => mealSoon(gap, nowMinute)) : [];
+  const selectedExtra = extras.find((extra) => extra.stopId === selected);
+  const clock = (minute: number) => formatMinute(entry.cityTrip, entry.day, minute);
+  // Adding a place replans today, which only the owner can do.
+  const adding = Boolean(onAdjustToday) && entry.isToday;
+  function addToday(extra: DayExtra) { const target = entry; exit(); onAdjustToday!(target.cityId, target.day, extra.stopId); }
+  function showExtra(extra: DayExtra) { setSelected(extra.stopId); setExtrasOpen(false); setSnap("peek"); }
 
   function record(kind: "done" | "skip", visit: Visit) {
     const stop = entry.trip.stops.find((candidate) => candidate.id === visit.stopId);
@@ -189,7 +199,42 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
     setUndo({ cityId: entry.cityId, date: entry.date, previous: entry.progress, message: wasDone ? `${stop.name} no longer marked done` : `${stop.name} no longer skipped` });
   }
 
+  function extraCard(extra: DayExtra) {
+    const fit = entry.isToday ? extraFit(entry, extra, nowMinute, location) : undefined;
+    const label = fit ? extraFitLabel(fit, clock) : "";
+    const current = entry.cityTrip.stops.find((stop) => stop.id === extra.stopId);
+    const hours = extra.open?.map(([start, end]) => `${clock(start)}–${clock(end)}`).join(", ");
+    return <div className="trip-card">
+      <div className="trip-card-label">Extra place{next && <button type="button" className="chip" onClick={() => setSelected(null)}>Back to next</button>}</div>
+      <div className="trip-card-title"><h2>{extra.name}</h2></div>
+      <p className="trip-card-time">{durationLabel(extra.duration)}{fit ? ` · ${durationLabel(fit.away)} away` : ""}{!fit && hours ? ` · Open ${hours}` : ""}</p>
+      {label && <p className={`trip-card-status ${fit?.fits ? "" : "skipped"}`}><Clock size={14} />{label}</p>}
+      <PlacePhotos key={photoKey ?? extra.stopId} placeName={extra.name} variant="carousel" total={photo.total} frames={photo.frames} loading={photo.loading} errors={photo.errors} disabledMessage={photo.disabledMessage} onRequest={photo.request} onRetry={photo.retry} />
+      {extra.note && <p className="stop-note">{extra.note}</p>}
+      <PlaceAbout about={current?.about} />
+      <div className="trip-card-actions">
+        {adding && <button type="button" className="button primary small" onClick={() => addToday(extra)}><Plus size={15} />Add to today</button>}
+        <a className={`button ${adding ? "secondary" : "primary"} small`} href={placeDirections({ id: extra.placeId, name: extra.name }, fit && !fit.walk ? "transit" : "walking")} target="_blank" rel="noreferrer"><Navigation size={15} />Directions</a>
+      </div>
+    </div>;
+  }
+
+  function extrasList() {
+    return <div className="trip-card">
+      <div className="trip-card-label">Extra time<button type="button" className="chip" onClick={() => setExtrasOpen(false)}>Close</button></div>
+      <ul className="extra-list">{rankedExtras(entry, extras, nowMinute, location).map(({ extra, fit }) => {
+        const label = extraFitLabel(fit, clock);
+        return <li key={extra.stopId}>
+          <button type="button" className="extra-list-place" onClick={() => showExtra(extra)}><strong>{extra.name}</strong><small>{durationLabel(extra.duration)} · {durationLabel(fit.away)} away{label ? ` · ${label}` : ""}</small></button>
+          {adding && <button type="button" className={`button ${fit.fits ? "primary" : "secondary"} small`} aria-label={`Add ${extra.name} to today`} onClick={() => addToday(extra)}><Plus size={14} />Add</button>}
+        </li>;
+      })}</ul>
+    </div>;
+  }
+
   function card() {
+    if (extrasOpen && entry.isToday && extras.length) return extrasList();
+    if (selectedExtra) return extraCard(selectedExtra);
     if (focus) {
       const index = entry.plan.visits.indexOf(focus);
       const status = visitStatus(entry.progress, focus.stopId);
@@ -239,7 +284,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
   const firstLeave = entry.plan.visits[0] ? leaveBy(entry.plan.visits[0]) : undefined;
   // Tapping the map closes an open place and brings the map to it, or lowers the day plan so the map shows.
   function backToMap() {
-    const place = selected ? entry.places[selected] : undefined;
+    const place = selected ? entry.places[selected] ?? selectedExtra : undefined;
     setSelected(null); setSnap("peek");
     if (place) setCenterOn({ ...place.location, token: Date.now() });
   }
@@ -248,7 +293,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
 
   return <div className="trip-mode" role="dialog" aria-modal="true" aria-label={`Trip mode, ${entry.label}`}>
     <div className="trip-mode-map">
-      <TripMap trip={entry.trip} places={entry.places} schedule={{ generatedAt: "", warnings: [], omitted: [], days: [entry.plan] }} day={entry.plan.day} markerOrder={entry.plan.visits.map((visit) => visit.stopId)} selected={selected} onSelect={(id) => { setSelected(id === "hotel" ? null : id); if (id) setSnap("peek"); }} currentLocation={location} fitCurrentLocation={false} padding={padding} fitToken={fitToken} popup={false} zoomOnSelect markerStatus={markerStatus} centerOn={centerOn} onMapClick={backToMap} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} onPhotoRequest={() => {}} onPhotoRetry={() => {}} />
+      <TripMap trip={entry.trip} places={entry.places} schedule={{ generatedAt: "", warnings: [], omitted: [], days: [entry.plan] }} day={entry.plan.day} markerOrder={entry.plan.visits.map((visit) => visit.stopId)} selected={selected} onSelect={(id) => { setSelected(id === "hotel" ? null : id); setExtrasOpen(false); if (id) setSnap("peek"); }} currentLocation={location} fitCurrentLocation={false} padding={padding} fitToken={fitToken} popup={false} zoomOnSelect markerStatus={markerStatus} extras={extraPins} centerOn={centerOn} onMapClick={backToMap} photoFrames={noPhotos} photoLoading={noPhotos} photoErrors={noPhotos} onPhotoRequest={() => {}} onPhotoRetry={() => {}} />
     </div>
 
     <header className="trip-mode-bar">
@@ -275,7 +320,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
       {meals.map((gap) => {
         const search = mealSearch(gap, nowMinute, location);
         return <MealGap key={`${entry.key}:${gap.meal}`} gap={gap} start={formatMinute(entry.cityTrip, entry.day, search.start)} end={formatMinute(entry.cityTrip, entry.day, search.end)} location={search.location} here={search.here}
-          action={(place) => <a className="button secondary small" href={walkingUrl(place)} target="_blank" rel="noreferrer" aria-label={`Directions to ${place.name}`}><Navigation size={14} />Directions</a>} />;
+          action={(place) => <a className="button secondary small" href={placeDirections(place)} target="_blank" rel="noreferrer" aria-label={`Directions to ${place.name}`}><Navigation size={14} />Directions</a>} />;
       })}
     </>}>
       <div className="trip-timeline">
@@ -300,7 +345,13 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         {entry.plan.returnLeg && <><LegDetails edge={entry.plan.returnLeg} places={entry.places} endpointToDeparture={toDeparture} app={app} taxiFromHere={entry.isToday} /><div className="itinerary-start"><span className="hotel-marker small"><Hotel size={15} /></span><div><strong>{toDeparture ? `At ${entry.trip.departure?.place || "the station"}` : `Back to ${entry.trip.hotel}`}</strong><span>{summary.back !== undefined ? formatMinute(entry.trip, entry.day, summary.back) : ""}</span></div></div></>}
         {entry.day === entry.trip.days - 1 && entry.plan.departureLeg && <LegDetails edge={entry.plan.departureLeg} places={entry.places} app={app} taxiFromHere={entry.isToday} />}
         {entry.day === entry.trip.days - 1 && entry.trip.departure && <TransferLine trip={entry.trip} kind="departure">{ticketLinks({ cityId: entry.cityId, target: "departure", stopId: null })}</TransferLine>}
-        {plans[entry.cityId]?.snapshot && <OmittedPlaces trip={entry.trip} schedule={plans[entry.cityId].snapshot!.schedule} />}
+        {extras.length > 0 && <section className="trip-extras" aria-label="Extra places">
+          <h3>Extra places</h3>
+          {extras.map((extra) => <button type="button" key={extra.stopId} className={`itinerary-stop extra ${selected === extra.stopId ? "selected" : ""}`} onClick={() => showExtra(extra)}>
+            <span className="extra-marker"><Plus size={13} strokeWidth={2.6} /></span>
+            <span className="stop-heading"><strong>{extra.name}</strong><span>{durationLabel(extra.duration)}</span></span>
+          </button>)}
+        </section>}
         {(journaling || dayJournal.note) && <DayNote key={entry.key} note={dayJournal.note} onSave={journaling ? (text) => onJournal!({ kind: "note", cityId: entry.cityId, day: entry.day, text }) : undefined} />}
         {forecast && <p className="trip-mode-credit"><WeatherCredit /></p>}
       </div>
@@ -325,6 +376,7 @@ export function TripMode({ title, cities, plans, execution, start, canTrack, onP
         })}</div>
         <div className="trip-menu-footer">
           {onAdjustToday && entry.isToday && <button type="button" className="button secondary" onClick={() => { const target = entry; exit(); onAdjustToday(target.cityId, target.day); }}><ArrowUpRight size={16} />Running late? Adjust today</button>}
+          {entry.isToday && extras.length > 0 && <button type="button" className="button secondary" onClick={() => { closeMenu(); setSelected(null); setExtrasOpen(true); setSnap("half"); }}><Plus size={16} />Extra time? Add a place</button>}
           <button type="button" className="button secondary" onClick={exit}><LogOut size={16} />Exit trip mode</button>
         </div>
       </nav>

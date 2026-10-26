@@ -1970,6 +1970,105 @@ test("trip mode shows a meal the plan leaves out as it comes up, with places nea
   await expect(lunch).toHaveCount(0);
 });
 
+test("trip mode offers places for spare time and adds one to today by replanning the day", async ({ page }, testInfo) => {
+  // 10:00 in Paris on the first day.
+  await page.clock.install({ time: new Date("2026-10-13T08:00:00Z") });
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const coffee = { ...newStop("Coffee"), placeId: "coffee-id", duration: 45 };
+  const museum = { ...newStop("Museum"), placeId: "museum-id", day: 0, fixedTime: "11:30", duration: 90 };
+  const garden = { ...newStop("Garden"), placeId: "garden-id", location: { lat: 48.861, lng: 2.35 }, duration: 30 };
+  const market = { ...newStop("Market"), placeId: "market-id", location: { lat: 48.9, lng: 2.35 }, optional: true, duration: 120 };
+  const trip: Trip = { ...newTrip(), city: "Paris", hotel: "Hotel", hotelPlaceId: "hotel-id", startDate: "2026-10-13", days: 1, timeZone: "Europe/Paris", dailyStart: "09:00", dailyEnd: "21:00", stops: [coffee, museum, garden, market] };
+  const walk = (from: string, to: string, minutes: number) => ({ day: 0, from, to, mode: "WALK" as const, minutes, meters: 800 });
+  const at = (hour: number, minute = 0) => hour * 60 + minute;
+  // Garden was added after planning; it's kept for spare time below.
+  const schedule = { generatedAt: "2026-10-12T08:00:00Z", warnings: [], omitted: [market.id], days: [{ day: 0, date: "2026-10-13", visits: [
+    { stopId: coffee.id, start: at(9, 30), end: at(10, 15), leg: walk("hotel", coffee.id, 10) },
+    { stopId: museum.id, start: at(11, 30), end: at(13), leg: walk(coffee.id, museum.id, 20) },
+  ], returnLeg: walk(museum.id, "hotel", 15) }] };
+  const place = (id: string, name: string, lat: number) => ({ id, name, address: `${name}, Paris`, location: { lat, lng: 2.35 } });
+  const plan = persistedPlan(schedule, { ...trip, stops: [coffee, museum, market] }, { hotel: place("hotel-id", "Hotel", 48.87), [coffee.id]: place("coffee-id", "Coffee", 48.87), [museum.id]: place("museum-id", "Museum", 48.86), [market.id]: place("market-id", "Market", 48.9) });
+  const requests: RecoveryRequest[] = [];
+  await page.route("**/api/day-recovery", async (route) => {
+    const body = route.request().postDataJSON() as RecoveryRequest; requests.push(body);
+    const departure = Math.ceil(recoveryMinute(body.trip, body.day, body.departureAt));
+    const result: RecoveryResult = { status: "recovery-checked", context: recoveryContext(body), departureAt: body.departureAt, checkedAt: "2026-10-13T08:00:00Z", options: [{ label: "Keep every visit", skipped: [], durations: { [coffee.id]: 45, [garden.id]: 30, [museum.id]: 90 }, day: { day: 0, date: trip.startDate, visits: [
+      { stopId: coffee.id, start: departure + 5, end: departure + 50, leg: walk("current", coffee.id, 5) },
+      { stopId: museum.id, start: at(11, 30), end: at(13), leg: walk(coffee.id, museum.id, 20) },
+      { stopId: garden.id, start: at(13, 5), end: at(13, 35), leg: walk(museum.id, garden.id, 5) },
+    ], returnLeg: walk(garden.id, "hotel", 15) } }] };
+    await route.fulfill({ json: result });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections and settings" }).click();
+  await page.getByLabel("Open trip backup").setInputFiles({ name: "extras.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ trip, plan })) });
+  await page.keyboard.press("Escape");
+  const mobile = testInfo.project.name === "mobile";
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.getByText("This itinerary is out of date.", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: /^Places/ }).click();
+  await page.locator(".stop-summary", { hasText: "Garden" }).click();
+  await page.getByLabel("Spare time only").check();
+  await expect(page.getByLabel("Optional if the day is full")).toBeChecked();
+  await expect(page.locator(".stop-summary", { hasText: "Garden" })).toContainText("Spare time");
+  // Kept for spare time, it's not planned, so the plan is current again.
+  await page.getByRole("button", { name: /^Itinerary/ }).click();
+  await expect(page.getByText("This itinerary is out of date.", { exact: false })).toHaveCount(0);
+
+  if (mobile) await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  const tripMode = page.getByRole("dialog", { name: "Trip mode, Day 1 · Tue 13 Oct" });
+  await expect(tripMode.locator(".trip-card")).toContainText("Coffee");
+  await expect(tripMode.getByText("Plan is out of date", { exact: false })).toHaveCount(0);
+  await tripMode.getByRole("button", { name: "Show the whole day" }).click();
+  await expect(tripMode.getByRole("region", { name: "Extra places" })).toContainText("Garden30 minMarket2 h");
+  await tripMode.getByRole("button", { name: "Trip menu" }).click();
+  await tripMode.getByRole("button", { name: "Extra time? Add a place" }).click();
+  const list = tripMode.locator(".extra-list li");
+  // A 16-minute walk from the hotel and half an hour there leaves time to reach the 11:30 booking; the market doesn't.
+  await expect(list).toHaveText([/Garden30 min · 16 min away · Fits before your 11:30 booking/, /Market2 h · 23 min away · Not before your 11:30 booking/]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("trip-mode-extras.png") });
+  // A place on the list has a card of its own.
+  await list.filter({ hasText: "Market" }).locator(".extra-list-place").click();
+  const card = tripMode.locator(".trip-card");
+  await expect(card).toContainText("Extra place");
+  await expect(card).toContainText("Market2 h · 23 min away");
+  await expect(card).toContainText("Not before your 11:30 booking");
+  expect(new URL((await card.getByRole("link", { name: "Directions" }).getAttribute("href"))!).searchParams.get("travelmode")).toBe("transit");
+  await card.getByRole("button", { name: "Back to next" }).click();
+  await tripMode.getByRole("button", { name: "Trip menu" }).click();
+  await tripMode.getByRole("button", { name: "Extra time? Add a place" }).click();
+  await tripMode.getByRole("button", { name: "Add Garden to today" }).click();
+
+  await expect(tripMode).toHaveCount(0);
+  const dialog = page.getByRole("dialog", { name: "Today", exact: true });
+  await expect(dialog.locator(".planning-visit", { hasText: "Garden" })).toContainText("30 min");
+  await dialog.getByRole("button", { name: "Replan today", exact: true }).click();
+  await dialog.getByRole("button", { name: "Use this plan", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("Added to today")).toBeVisible();
+  expect(requests).toHaveLength(1);
+  expect(requests[0].add).toBe(garden.id);
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download trip backup" }).click();
+  const output = testInfo.outputPath("extras-backup.json");
+  await (await download).saveAs(output);
+  const backup = JSON.parse(await readFile(output, "utf8"));
+  const progress = backup.journey.execution[trip.id]["2026-10-13"];
+  expect(progress.added).toEqual([garden.id]);
+  expect(progress.remaining.stopIds).toEqual([coffee.id, museum.id, garden.id]);
+  expect(backup.plan.days).toEqual(plan.days);
+
+  // Back in trip mode, it's one of today's stops and no longer an extra.
+  if (mobile) await page.getByRole("button", { name: "Today's plan" }).click();
+  else await page.getByRole("button", { name: "Trip mode" }).click();
+  await tripMode.getByRole("button", { name: "Show the whole day" }).click();
+  await expect(tripMode.locator(".itinerary-stop:not(.extra)")).toHaveText([/Coffee/, /Museum/, /Garden/]);
+  await expect(tripMode.getByRole("region", { name: "Extra places" })).toHaveText(/^Extra placesMarket2 h$/);
+  expect(errors).toEqual([]);
+});
+
 test("adds a day to a city up to the next city's first day", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByRole("button", { name: "New trip", exact: true }).click();

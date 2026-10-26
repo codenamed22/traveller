@@ -12,7 +12,7 @@ import { alternativeGroups, isRequiredStop, usesVisitTiming } from "./visit-slot
 import { RouteSamples } from "./route-samples";
 import { fareRoutesResponse, pickFare, type FareRequest, type FoundFare } from "./fares";
 import { nearbyTypes, pickNearby, type NearbyCandidate, type NearbyPlace, type NearbyRequest } from "./nearby";
-import { liveRouteKey, recoveryContext, recoveryInputErrors, recoveryMinute, remainingIds, validateDayRecovery, type RecoveryOption, type RecoveryRequest, type RecoveryResult } from "./day-recovery";
+import { liveRouteKey, recoveryContext, recoveryInputErrors, pendingIds, recoveryMinute, validateDayRecovery, type RecoveryOption, type RecoveryRequest, type RecoveryResult } from "./day-recovery";
 
 const jointPlanningLimit = 25;
 
@@ -363,7 +363,7 @@ export async function recoverDayWithGoogle(request: RecoveryRequest, signal?: Ab
   if (signal?.aborted) throw new HttpError(499, "The recovery request was cancelled.");
   const errors = recoveryInputErrors(request);
   if (errors.length) throw new HttpError(422, errors.join(" "));
-  const pending = remainingIds(request.stopIds, request.progress);
+  const pending = pendingIds(request);
   const context = recoveryContext(request);
   const base = { context, departureAt: request.departureAt };
   const budget = new RequestBudget(request.mode === "route" ? 2 : Math.max(12, 6 * (pending.length + 1)), signal, { matrix: 250, milliseconds: request.mode === "route" ? 30_000 : 45_000 });
@@ -419,7 +419,7 @@ export async function recoverDayWithGoogle(request: RecoveryRequest, signal?: Ab
       const shorten = label !== "Keep every visit";
       if (remainingCapacity === 0 && pending.length && (label !== "Skip approved visits" || pending.some((id) => !request.permissions.skipIds.includes(id)))) continue;
       const forcedSkips = remainingCapacity === 0 ? pending : [];
-      const stops = (remainingCapacity === 0 ? [] : pending).map((id) => request.trip.stops.find((stop) => stop.id === id)!).map((stop) => ({ ...stop, day: 0, durationOptions: undefined, duration: shorten ? request.permissions.minimumDurations[stop.id] ?? request.progress.remaining?.durations[stop.id] ?? stop.duration : request.progress.remaining?.durations[stop.id] ?? stop.duration, optional: label === "Skip approved visits" && request.permissions.skipIds.includes(stop.id), alternativeGroup: null }));
+      const stops = (remainingCapacity === 0 ? [] : pending).map((id) => request.trip.stops.find((stop) => stop.id === id)!).map((stop) => ({ ...stop, day: 0, durationOptions: undefined, duration: shorten ? request.permissions.minimumDurations[stop.id] ?? request.progress.remaining?.durations[stop.id] ?? stop.duration : request.progress.remaining?.durations[stop.id] ?? stop.duration, optional: label === "Skip approved visits" && request.permissions.skipIds.includes(stop.id), spare: undefined, alternativeGroup: null }));
       const single = tripForDay(request.trip, request.day, { dayGroups: undefined, planning: { ...planningPreferences(request.trip), maxStopsPerDay: Math.max(1, remainingCapacity) }, stops });
       for (let attempt = 0; attempt < 2 && verificationPasses < 3 && solverMilliseconds < 5000 && Date.now() < budget.deadline; attempt++) {
       let verifying = false;

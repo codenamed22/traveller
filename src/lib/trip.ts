@@ -34,6 +34,8 @@ export const stopSchema = z.object({
   fixedTime: timeSchema.nullable(),
   buffer: z.number().int().min(0).max(120),
   optional: z.boolean(),
+  // Kept for spare time: never planned, offered in trip mode when there's time, and added to that day alone.
+  spare: z.literal(true).optional(),
   priority: z.number().int().min(1).max(5),
   mode: modeSchema,
   source: z.string().max(1000),
@@ -59,6 +61,9 @@ export const stopSchema = z.object({
   }
   if (stop.fixedTime && stop.optional) {
     context.addIssue({ code: "custom", message: "A fixed booking cannot be optional.", path: ["optional"] });
+  }
+  if (stop.spare && !stop.optional) {
+    context.addIssue({ code: "custom", message: "A place kept for spare time is optional.", path: ["spare"] });
   }
   if (stop.durationOptions) {
     const allowed = new Set([stop.duration, Math.max(5, Math.ceil(stop.duration * 0.9)), Math.max(5, Math.ceil(stop.duration * 0.8)), ...(stop.duration === 15 ? [10] : [])]);
@@ -360,7 +365,8 @@ export function durationChoices(duration: number, rule: DurationRule): number[] 
 export function planningKey(trip: Trip | undefined, planned: ReadonlySet<string> = new Set()) {
   if (!trip) return "";
   const parsed = tripSchema.safeParse(trip);
-  const canonical = parsed.success ? parsed.data : trip;
+  // Places kept for spare time aren't planned, so adding one leaves the plan as it is.
+  const canonical = planningTrip(parsed.success ? parsed.data : trip);
   return JSON.stringify({ ...canonical, stops: canonical.stops.map(({ note, about, ...stop }) => {
     void note; void about;
     if (!planned.has(stop.id)) return stop;
@@ -368,6 +374,16 @@ export function planningKey(trip: Trip | undefined, planned: ReadonlySet<string>
     void priority;
     return rest;
   }) });
+}
+
+// The trip as the planner sees it: without the places kept for spare time.
+export function planningTrip(trip: Trip): Trip {
+  const spare = new Set(trip.stops.filter((stop) => stop.spare).map((stop) => stop.id));
+  if (!spare.size) return trip;
+  return {
+    ...trip, stops: trip.stops.filter((stop) => !spare.has(stop.id)),
+    ...(trip.dayGroups ? { dayGroups: trip.dayGroups.map((group) => ({ ...group, stopIds: group.stopIds.filter((id) => !spare.has(id)) })).filter((group) => group.stopIds.length) } : {}),
+  };
 }
 
 export function plannedStopIds(...days: ({ visits: { stopId: string }[] }[] | undefined)[]) {

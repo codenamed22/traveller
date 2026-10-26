@@ -61,6 +61,12 @@ export type AppConfig = { auth: boolean; database: boolean; maps: boolean; route
 type SavedTrip = { data: StoredTrip; revision: number; plan: SavedPlan | null; shared?: boolean; updatedAt: string };
 type PhotoSession = { key: string; total?: number; frames: Partial<Record<number, PlacePhoto | null>>; loading: number[]; errors: number[] };
 
+// The planner's place details, with those of places kept for spare time (which it doesn't look up) kept from before.
+function withSparePlaces(planned: Record<string, Place>, trip: Trip, known: Record<string, Place>) {
+  const spare = Object.entries(known).filter(([id]) => trip.stops.some((stop) => stop.id === id && stop.spare));
+  return spare.length ? { ...Object.fromEntries(spare), ...planned } : planned;
+}
+
 async function requestJson(url: string, body?: unknown, method = "POST", signal?: AbortSignal) {
   const response = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined, signal });
   const data = response.status === 204 ? null : await response.json();
@@ -108,6 +114,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
   const [refreshPreview, setRefreshPreview] = useState<{ result: PlanResult; trip: Trip; tripKey: string; planKey: string } | null>(null);
   const refreshAbort = useRef<AbortController | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [recoveryAdd, setRecoveryAdd] = useState<string>();
   const [now, setNow] = useState(() => Temporal.Now.instant());
   const [liveDay, setLiveDay] = useState<{ cityId: string; version: number; planKey: string; day: DayPlan; checkedAt: string; departureAt: string; origin: RecoveryRequest["origin"] }>();
   const [liveRoute, setLiveRoute] = useState<CheckedNextRoute & { cityId: string; day: number; version: number; planKey: string }>();
@@ -272,7 +279,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     const target = window as unknown as { travellerNative?: NativeApi };
     target.travellerNative = createNativeApi({
       journey, recordProgress: recordCityProgress, recordJournal, recordTransport,
-      adjustToday(cityId, targetDay) { nativeOpen.current = false; adjustToday(cityId, targetDay); },
+      adjustToday(cityId, targetDay, add) { nativeOpen.current = false; adjustToday(cityId, targetDay, add); },
       opened() { nativeOpen.current = true; },
       ...(canSwap ? { swap(cityId: string, targetDay: number, stopId: string) { nativeOpen.current = false; swapVisit(cityId, targetDay, stopId); } } : {}),
       closed() { nativeOpen.current = false; leaveTripMode(); },
@@ -622,7 +629,7 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       if (!response.verified || validateSchedule(validated, response.schedule, undefined, response.places).length) throw new Error("Refreshed routes did not pass itinerary validation. Your saved plan was kept.");
       const order = response.schedule.days.map(({ day, visits }) => ({ day, stopIds: visits.map((visit) => visit.stopId) })).sort((left, right) => left.day - right.day);
       if (JSON.stringify(order) !== JSON.stringify([...savedPlan.days].sort((left, right) => left.day - right.day)) || JSON.stringify(response.schedule.omitted) !== JSON.stringify(savedPlan.omitted)) throw new Error("Refresh changed saved days, order or omissions. Your saved plan was kept.");
-      persistedPlan(response.schedule, validated, response.places);
+      persistedPlan(response.schedule, validated, withSparePlaces(response.places, validated, places));
       setRefreshPreview({ result: response, trip: validated, tripKey: planningKey(trip), planKey: JSON.stringify(savedPlan) });
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Travel-time refresh failed. Your saved plan was kept.");
@@ -666,9 +673,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     replanAfterTrip.current = null;
     if (pending) openReplan(pending);
   }
-  function adjustToday(cityId: string, targetDay: number) {
+  // `add` is a place to fit into the day, from spare time in trip mode.
+  function adjustToday(cityId: string, targetDay: number, add?: string) {
     if (cityId !== trip.id) switchCity(cityId);
-    setDay(targetDay); setTab("itinerary"); setRecoveryOpen(true);
+    setDay(targetDay); setTab("itinerary"); setRecoveryAdd(add); setRecoveryOpen(true);
   }
   // In the iPhone app trip mode is native. It gets the trip as a snapshot and calls back here to record progress, so this
   // page stays the only place that saves the trip.
@@ -794,17 +802,18 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
             {duplicatePairs.length > 0 && <button className="button secondary small" onClick={() => setDuplicateReview({ ignored: [], keepId: null, error: "" })}><Search size={15} />Review duplicates ({duplicatePairs.length})</button>}
             {!trip.stops.length && <div className="empty-stops"><span className="empty-icon"><MapPin size={24} strokeWidth={1.4} /></span><h2>No places yet</h2><button className="button secondary" onClick={() => setImportOpen(true)}><FileInput size={16} />Import itinerary</button></div>}
             <div className="stop-list">{trip.stops.map((stop, index) => <article key={stop.id} className={`stop-item ${selected === stop.id ? "selected" : ""}`}>
-              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => selectLocation(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}</span></span><span className="stop-statuses">{stop.fixedTime && <span className="booking-status" role="img" aria-label="Booked appointment" title="Fixed booking date and time"><LockKeyhole size={16} className="booking-icon" /></span>}<span className="location-status" role="img" aria-label={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"} title={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"}>{stop.placeId ? <Check size={16} className="confirmed-icon" /> : <MapPinOff size={16} className="unconfirmed-icon" />}</span></span><ChevronDown size={14} /></button>
+              <button className="stop-summary" aria-expanded={selected === stop.id} onClick={() => selectLocation(selected === stop.id ? null : stop.id)}><span className={`stop-number ${stop.fixedTime ? "booked" : ""}`}>{index + 1}</span><span className="stop-heading"><strong>{stop.name}{isMustSee(stop) && <Star size={12} className="must-see-icon" role="img" aria-label="Must-see" />}</strong><span>{stop.duration} min <span className="dot-separator">·</span> {stop.day === null ? "Flexible day" : `Day ${stop.day + 1}`}{stop.fixedTime && `, ${stop.fixedTime}`}{stop.spare && " · Spare time"}</span></span><span className="stop-statuses">{stop.fixedTime && <span className="booking-status" role="img" aria-label="Booked appointment" title="Fixed booking date and time"><LockKeyhole size={16} className="booking-icon" /></span>}<span className="location-status" role="img" aria-label={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"} title={stop.placeId ? "Location confirmed on map" : "Location not confirmed on map"}>{stop.placeId ? <Check size={16} className="confirmed-icon" /> : <MapPinOff size={16} className="unconfirmed-icon" />}</span></span><ChevronDown size={14} /></button>
               {selected === stop.id && <div className="stop-details">
                 <PlacePhotos key={photoKey ?? stop.id} placeName={stop.name} variant="carousel" total={activePhotoSession?.total} frames={photoFrames} loading={photoLoading} errors={photoErrors} disabledMessage={photoDisabledMessage} onRequest={(index) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, index); }} onRetry={(index) => { if (photoKey && photoPlaceId) void requestPhoto(photoKey, photoPlaceId, index, true); }} />
                 <label className="field">Place name<input value={stop.name} maxLength={200} onChange={(event) => { editStop(stop.id, { name: event.target.value, placeId: null, location: undefined }); setPlaces((current) => { const next = { ...current }; delete next[stop.id]; return next; }); }} /></label>
                 <button className="text-button" disabled={Boolean(busy)} onClick={() => openSearch(stop.id, stop.name)}>{stop.placeId ? <Check size={14} /> : <Search size={14} />}{stop.placeId ? "Place confirmed · change" : "Confirm place on map"}</button>
                 <div className="form-grid"><label className="field">Visit minutes<input type="number" min={5} max={480} step={5} value={stop.duration} onChange={(event) => editStop(stop.id, { duration: Number(event.target.value) })} /></label><label className="field">Assigned day<select value={stop.day ?? ""} onChange={(event) => editStop(stop.id, { day: event.target.value === "" ? null : Number(event.target.value), ...(event.target.value === "" ? { fixedTime: null } : {}) })}><option value="">Flexible</option>{Array.from({ length: trip.days }, (_, dayIndex) => <option key={dayIndex} value={dayIndex}>Day {dayIndex + 1}</option>)}</select></label></div>
                 <VisitTimingFields trip={trip} stop={stop} place={places[stop.id]} groups={stopAlternatives} onChange={(patch) => editStop(stop.id, patch)} />
-                <label className="checkbox"><input type="checkbox" checked={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: "10:00", day: stop.day ?? day, optional: false } : { fixedTime: null })} /><LockKeyhole size={13} />Fixed booking</label>
+                <label className="checkbox"><input type="checkbox" checked={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { fixedTime: "10:00", day: stop.day ?? day, optional: false, spare: undefined } : { fixedTime: null })} /><LockKeyhole size={13} />Fixed booking</label>
                 {stop.fixedTime && <div className="form-grid"><label className="field">Booked time<input type="time" value={stop.fixedTime} onChange={(event) => editStop(stop.id, { fixedTime: event.target.value || null })} /></label><label className="field">Arrival buffer (min)<input type="number" min={0} max={120} value={stop.buffer} onChange={(event) => editStop(stop.id, { buffer: Number(event.target.value) })} /></label></div>}
                 <label className="field">Transport<select value={stop.mode} onChange={(event) => editStop(stop.id, { mode: event.target.value as Stop["mode"] })}><option value="AUTO">Walking or public transit</option><option value="WALK">Walking only</option><option value="TRANSIT">Public transit</option></select></label>
-                <label className="checkbox"><input type="checkbox" checked={stop.optional} disabled={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, { optional: event.target.checked })} />Optional if the day is full</label>
+                <label className="checkbox"><input type="checkbox" checked={stop.optional} disabled={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { optional: true } : { optional: false, spare: undefined })} />Optional if the day is full</label>
+                <label className="checkbox" title="Never planned; offered in trip mode when you have extra time"><input type="checkbox" checked={Boolean(stop.spare)} disabled={Boolean(stop.fixedTime)} onChange={(event) => editStop(stop.id, event.target.checked ? { spare: true, optional: true } : { spare: undefined })} />Spare time only</label>
                 <label className="checkbox" title="Kept before other optional places when a day is full, and shortened last"><input type="checkbox" checked={isMustSee(stop)} onChange={(event) => editStop(stop.id, { priority: event.target.checked ? mustSeePriority : 1 })} /><Star size={13} />Must-see</label>
                 <label className="field">Notes<textarea rows={2} maxLength={500} placeholder="Anything to remember about this place" value={stop.note ?? ""} onChange={(event) => editStop(stop.id, { note: event.target.value || undefined })} /></label>
                 <PlaceAboutFields about={stop.about} onChange={(about) => editStop(stop.id, { about })} />
@@ -860,9 +869,9 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       <div className="dialog-actions"><button className="button secondary" onClick={() => { refreshAbort.current?.abort(); setRefreshOpen(false); setRefreshPreview(null); }}>Keep saved itinerary</button>
         {refreshPreview && <button className="button primary" disabled={Boolean(busy) || refreshPreview.tripKey !== planningKey(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan)} onClick={() => {
           if (refreshPreview.tripKey !== planningKey(trip) || refreshPreview.planKey !== JSON.stringify(savedPlan) || validateSchedule(trip, refreshPreview.result.schedule, undefined, refreshPreview.result.places).length) { setError("The trip changed. Refresh again before accepting new timings."); return; }
-          const accepted = persistedPlan(refreshPreview.result.schedule, trip, refreshPreview.result.places);
+          const accepted = persistedPlan(refreshPreview.result.schedule, trip, withSparePlaces(refreshPreview.result.places, trip, places));
           setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: accepted } }));
-          setResult(refreshPreview.result); setPlaces(refreshPreview.result.places); setPlannedFor(planningKey(trip, plannedStopIds(refreshPreview.result.schedule.days)));
+          setResult(refreshPreview.result); setPlaces(withSparePlaces(refreshPreview.result.places, trip, places)); setPlannedFor(planningKey(trip, plannedStopIds(refreshPreview.result.schedule.days)));
           setRefreshOpen(false); setRefreshPreview(null); setError(""); setNotice("Travel times updated.");
         }}><Check size={16} />Use refreshed times</button>}
         {!busy && !refreshPreview && <button className="button secondary" onClick={() => { setRefreshOpen(false); setPlanningOpen(true); }}><Route size={16} />Replan itinerary</button>}
@@ -871,10 +880,10 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
     {planningOpen && <PlanningDialog trip={trip} places={places} canPlan={canPlan} canResearch={Boolean(canUseServices && config.timing)} onClose={() => setPlanningOpen(false)} onAskAssistant={canUseServices && config.assistant ? askAssistant : undefined} onPreview={generate} onCheck={(candidate) => requestJson("/api/plan", { trip: { ...candidate, dayGroups: undefined }, mode: "check", operationId: crypto.randomUUID() })} onResearch={(places) => requestJson("/api/timing", { city: trip.city, places, consent: true, operationId: crypto.randomUUID() })} onApply={(candidate, response) => {
       journeySchema.parse({ ...journey, cities: journey.cities.map((city) => city.id === trip.id ? candidate : city) });
       if (response && (!response.verified || validateSchedule(candidate, response.schedule, undefined, response.places).length)) throw new Error("Only a verified itinerary that respects the current preferences can be accepted.");
-      const acceptedPlan = response ? persistedPlan(response.schedule, candidate, response.places) : undefined;
+      const acceptedPlan = response ? persistedPlan(response.schedule, candidate, withSparePlaces(response.places, candidate, places)) : undefined;
       editVersion.current += 1; setTrip(candidate);
       if (response) {
-        setResult(response); setPlaces(response.places); setPlannedFor(planningKey(candidate, plannedStopIds(response.schedule.days))); setTab("itinerary"); setDay(0);
+        setResult(response); setPlaces(withSparePlaces(response.places, candidate, places)); setPlannedFor(planningKey(candidate, plannedStopIds(response.schedule.days))); setTab("itinerary"); setDay(0);
         setJourney((current) => ({ ...current, plans: { ...current.plans, [trip.id]: acceptedPlan! } }));
       }
       setPlanningOpen(false); setError(""); setNotice(response ? "Itinerary updated. Check venue hours and ticket conditions before departure." : "Planning preferences updated.");
@@ -910,11 +919,11 @@ export function TripPlanner({ initialTrip, initialSaved, initialList, config }: 
       const file = event.target.files?.[0]; if (!file) return;
       void perform("Opening backup", async () => { if (file.size > 10_000_000) throw new Error("The backup is too large."); const restored = restoreJourney(JSON.parse(await file.text())); if (confirmDiscard()) openJourney(restored); });
     }} />
-    {recoveryOpen && dayStopIds && <DayRecoveryDialog key={`${trip.id}:${date}`} trip={trip} day={day} stopIds={dayStopIds} progress={progress} plannedDay={currentDay} selectedRoute={checkedRoute} onClearRoute={() => setLiveRoute(undefined)} onProgress={recordProgress} onClose={() => setRecoveryOpen(false)} onRoute={(route) => { setLiveRoute({ ...route, cityId: trip.id, day, version: progress.version, planKey: recoveryPlanKey(trip, day, dayStopIds) }); }} onApply={(request, option, checkedAt) => {
+    {recoveryOpen && dayStopIds && <DayRecoveryDialog key={`${trip.id}:${date}:${recoveryAdd ?? ""}`} trip={trip} day={day} stopIds={dayStopIds} progress={progress} add={recoveryAdd} plannedDay={currentDay} selectedRoute={checkedRoute} onClearRoute={() => setLiveRoute(undefined)} onProgress={recordProgress} onClose={() => { setRecoveryOpen(false); setRecoveryAdd(undefined); }} onRoute={(route) => { setLiveRoute({ ...route, cityId: trip.id, day, version: progress.version, planKey: recoveryPlanKey(trip, day, dayStopIds) }); }} onApply={(request, option, checkedAt) => {
       if (progress.version !== request.progress.version || request.progress.planKey !== recoveryPlanKey(trip, day, dayStopIds) || validateDayRecovery(request, option).length) throw new Error("The day changed. Refresh the recovery preview.");
-      const next = applyDayRecovery(progress, option, { trip, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin, places }); recordProgress(next);
+      const next = applyDayRecovery(progress, option, { trip, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin, places }, request.add); recordProgress(next);
       setLiveDay({ cityId: trip.id, version: next.version, planKey: next.planKey, day: option.day, checkedAt, departureAt: request.departureAt, origin: request.origin });
-      setNotice("Today's plan updated. Other days are unchanged.");
+      setNotice(request.add ? "Added to today" : "Today's plan updated. Other days are unchanged.");
     }} />}
     {recapOpen && <RecapDialog journey={journey} now={now} onJournal={recordJournal} onClose={() => setRecapOpen(false)} />}
     {tripModeReady && !tripMode && <button className="trip-mode-pill" onClick={openTripMode}><Navigation size={17} />{todayInTrip ? "Today's plan" : "Start trip"}</button>}

@@ -191,6 +191,9 @@ summary::-webkit-details-marker { display: none; }
 .place-marker { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--green); border: 3px solid white; color: white; font-size: 12px; font-weight: 600; box-shadow: 0 2px 7px #0003; }
 .place-marker.unscheduled { background: #737d77; }
 .place-marker.selected { background: #b87428; }
+/* A place for spare time in trip mode: a grey square, apart from the day's numbered stops. */
+.extra-marker { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: #8b948e; border: 2px solid white; color: white; box-shadow: 0 2px 6px #0003; }
+.extra-marker.selected { background: #b87428; }
 .itinerary-content { padding: 20px 23px 35px; }
 .itinerary-start { display: flex; align-items: center; gap: 11px; padding: 9px 0; }
 .meal-gap { margin: 6px 0; padding: 9px 11px; border: 1px dashed #dcc78f; border-radius: 6px; background: #fffbef; }
@@ -566,6 +569,15 @@ body.trip-mode-open { overflow: hidden; }
 .trip-timeline-stop.done .stop-number { background: var(--green); }
 .trip-timeline-stop.skipped .stop-heading strong { text-decoration: line-through; color: var(--muted); }
 .itinerary-stop.next { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }
+.extra-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.extra-list li { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--line); }
+.extra-list-place { flex: 1; min-width: 0; display: grid; text-align: left; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; }
+.extra-list-place strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extra-list-place small { font-size: 11px; color: var(--muted); }
+.trip-extras { display: grid; gap: 6px; margin-top: 8px; }
+.trip-extras h3 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.itinerary-stop.extra { background: white; border-style: dashed; }
+.itinerary-stop.extra .extra-marker { width: 24px; height: 24px; flex-shrink: 0; box-shadow: none; }
 .trip-timeline-done { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; color: var(--green); }
 .trip-menu-scrim { position: absolute; inset: 0; z-index: 4; background: #0006; animation: fade-in 160ms ease; }
 .trip-menu { position: absolute; top: 0; bottom: 0; left: 0; width: min(330px, 86vw); display: flex; flex-direction: column; background: var(--paper); padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); box-shadow: 4px 0 20px #0003; animation: slide-in 200ms ease; }

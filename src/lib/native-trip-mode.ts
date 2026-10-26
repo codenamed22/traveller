@@ -5,8 +5,8 @@ import { mealTitles, type RoutineMeal } from "./gaps";
 import { asJourney, journeySchema, type Journey, type StoredTrip } from "./journey";
 import type { Ticket } from "./tickets";
 import { transferAt, transferLeaveAt, transferLineText } from "./transfers";
-import { aboutLines, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
-import { dayLabel, dayMeals, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
+import { aboutLines, dayEnd, endpointKey, formatMinute, instantForMinute, isMustSee, tripDate, type Place, type RouteLeg, type SavedPlan, type Transfer, type Trip } from "./trip";
+import { dayExtras, dayLabel, dayMeals, daySummary, directionsUrl, durationLabel, leaveBy, startingDay, tripModeDays, visitStatus, type TripModeDay, type VisitStatus } from "./trip-mode";
 import { tripRecap, type RecapTravel } from "./recap";
 import { legEnd, transitApp, uberUrl, type TransitApp, type TransportCard, type TransportEntry } from "./transport";
 import { transportStatus, type TransportStatus } from "./transport-status";
@@ -31,6 +31,9 @@ import { rainWarningFor, type DayWeather, type Forecast } from "./weather";
 // can count a Done tapped without a connection: the balance less each ride's cost where it should now count and isn't
 // counted. `meals` are the meals the day's plan leaves out, for the owner, which the app shows from half an hour before
 // each until it would end (mealSoon), with places to eat asked of the site (`/api/places/nearby`, as mealSearch asks).
+// `extras` are the places for spare time on a day still to come (dayExtras), with `open` in the day's minutes, and
+// `dayEnd` the minute its sightseeing ends, so the app can say how one fits from now (extraFit) without a connection;
+// adding one goes through the page (`travellerNative.adjustToday` with the place).
 type LatLng = { lat: number; lng: number };
 export type NativeLeg = {
   mode: RouteLeg["mode"]; minutes: number; label: string; detail: string; polyline?: string; from?: LatLng; to?: LatLng;
@@ -56,8 +59,9 @@ export type NativeDay = {
   summary: { stops: number; travel: string; leaveLabel?: string; backLabel?: string }; visits: NativeVisit[]; returnLeg?: NativeLeg;
   arrival?: Line; departure?: Line; doneElsewhere: Line[]; omitted: string[]; weather?: DayWeather; note?: string; travel?: RecapTravel;
   returnRide?: NativeRide; transportDay?: { rides: number; planned: number; spent: number; spentUncapped: number; fares: number };
-  meals?: NativeMeal[];
+  meals?: NativeMeal[]; extras?: NativeExtra[]; dayEnd?: number;
 };
+export type NativeExtra = { stopId: string; placeId: string; name: string; location: LatLng; duration: number; note?: string; open?: [number, number][] };
 // `near` names where the plan has you then, at `location`.
 export type NativeMeal = { meal: RoutineMeal; title: string; start: number; end: number; near: string; location?: LatLng };
 export type NativeTripMode = {
@@ -123,6 +127,9 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
     return found ? { ride: { cost: found.cost, counted: found.counted, price: found.price, key: found.key } } : {};
   };
   const returnRide = ride((candidate) => Boolean(candidate.back)).ride;
+  const extras = entry.isToday || !entry.started ? dayExtras(entry, journey.plans, journey.execution).map(({ open, ...extra }): NativeExtra => ({ ...extra, ...(open ? { open } : {}) })) : [];
+  let end: number | undefined;
+  try { end = dayEnd(entry.cityTrip, entry.day); } catch { end = undefined; }
   const gaps = meals ? dayMeals(entry).map((gap): NativeMeal => ({ meal: gap.meal, title: mealTitles[gap.meal], start: gap.start, end: gap.end, near: gap.nearName, ...(gap.location ? { location: gap.location } : {}) })) : [];
   return {
     key: entry.key, cityId: entry.cityId, city: entry.city, day: entry.day, date: entry.date, label: entry.label, timeZone: entry.cityTrip.timeZone,
@@ -174,7 +181,7 @@ function nativeDay(entry: TripModeDay, journey: Journey, forecast?: Forecast, tr
     ...(weather ? { weather } : {}), ...(journal.note ? { note: journal.note } : {}), ...(travel ? { travel } : {}),
     ...(returnRide ? { returnRide } : {}),
     ...(transportDay ? { transportDay: { rides: transportDay.count, planned: transportDay.planned, spent: transportDay.spent, spentUncapped: transportDay.spentUncapped, fares: transportDay.fares } } : {}),
-    ...(gaps.length ? { meals: gaps } : {}),
+    ...(gaps.length ? { meals: gaps } : {}), ...(extras.length ? { extras } : {}), ...(end !== undefined ? { dayEnd: end } : {}),
   };
 }
 

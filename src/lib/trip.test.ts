@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recoveryPlanKey } from "./day-recovery";
-import { aboutLines, applyScheduleDurations, persistedPlan, planningKey, plannedStopIds, arrivalTimes, withMeasuredTransfers, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
+import { aboutLines, applyScheduleDurations, persistedPlan, planningKey, planningTrip, plannedStopIds, arrivalTimes, withMeasuredTransfers, bookingConflictDetails, changeStartDate, dayEnd, dayStart, departureTimes, directDeparture, endpointKey, returnDeadline, tripForDay, durationChoices, formatMinute, minuteAt, newStop, newTrip, resolvePlanningConstraints, stopSchema, suggestDayTrips, tripSchema, tripDate, type Schedule } from "./trip";
 import { validateSchedule } from "./schedule-validation";
 
 describe("trip constraints", () => {
@@ -204,6 +204,21 @@ describe("planning key", () => {
     // Nor does a day already under way see its plan as changed.
     expect(recoveryPlanKey({ ...city, stops: [{ ...city.stops[0], about }] }, 0, [city.stops[0].id])).toBe(recoveryPlanKey(city, 0, [city.stops[0].id]));
     expect(aboutLines(about)).toEqual([{ key: "what", label: "What it is", text: "A 16th-century monument and mosque." }, { key: "expect", label: "What to expect", text: "Busy after 10:00." }]);
+  });
+
+  it("leaves places kept for spare time out of planning, so keeping one leaves the plan current", () => {
+    const charminar = { ...newStop("Charminar"), placeId: "g-charminar" };
+    const lassi = { ...newStop("Lassi stall"), placeId: "g-lassi", optional: true, spare: true as const };
+    const group = { id: crypto.randomUUID(), name: "Old City", stopIds: [charminar.id], allowedDays: [0], exclusive: false };
+    const city = { ...newTrip(), city: "Hyderabad", hotel: "Taj Krishna", timeZone: "Asia/Kolkata", stops: [charminar], dayGroups: [group] };
+    const kept = { ...city, stops: [charminar, lassi], dayGroups: [{ ...group, stopIds: [charminar.id, lassi.id] }, { ...group, id: crypto.randomUUID(), name: "Snacks", stopIds: [lassi.id] }] };
+    expect(planningTrip(kept)).toEqual(city);
+    expect(planningTrip(city)).toBe(city);
+    expect(planningKey(kept)).toBe(planningKey(city));
+    expect(planningKey({ ...kept, stops: [charminar, { ...lassi, spare: undefined }] })).not.toBe(planningKey(city));
+    // Kept for spare time, it's optional.
+    expect(stopSchema.safeParse({ ...lassi, optional: false }).success).toBe(false);
+    expect(stopSchema.safeParse(lassi).success).toBe(true);
   });
 
   it("keeps an itinerary current when a place it includes becomes a must-see, but not one it left out", () => {

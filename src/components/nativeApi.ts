@@ -1,4 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
+import { z } from "zod";
 import { giveConsent, hasConsent } from "@/lib/assistant-consent";
 import { dayProgressSchema, type DayProgress } from "@/lib/day-recovery";
 import type { Journey } from "@/lib/journey";
@@ -13,7 +14,7 @@ export const nativeFeatures = ["record-at", "undo-saved", "reset", "opened", "se
 type Deps = {
   journey: Journey;
   recordProgress: (cityId: string, date: string, next: DayProgress | undefined) => void;
-  adjustToday: (cityId: string, day: number) => void;
+  adjustToday: (cityId: string, day: number, add?: string) => void;
   opened: () => void;
   closed: () => void;
   photo?: (placeId: string, index: number) => Promise<unknown>;
@@ -126,7 +127,8 @@ export function createNativeApi({ journey, recordProgress, adjustToday, opened, 
       recordTransport(action.data);
       return change.message;
     },
-    adjustToday,
+    // `add` is a place to fit into the day, from spare time.
+    adjustToday(cityId: string, day: number, add?: unknown) { adjustToday(cityId, day, typeof add === "string" && z.uuid().safeParse(add).success ? add : undefined); },
     // Rain on an outdoor visit: the agent, with a swap for something indoors asked for but not sent. The app closes
     // trip mode first, as for adjustToday.
     swap(cityId: string, day: number, stopId: string) {
